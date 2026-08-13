@@ -1,0 +1,154 @@
+# ollama-router — versioned tunables (committed).
+# Fleet membership comes from OLLAMA_HOST_NN_* env vars, not from this file.
+#
+# To override a few knobs locally set OLLAMA_ROUTER_CONFIG to a thin overlay
+# YAML or use OLLAMA_ROUTER_* / VERDA_* env vars.
+
+policy:
+  sticky_affinity: false
+  auto_pull_on_miss: false
+
+  # Live-state routing (requires health.ps_probe_enabled: true).
+  prefer_warm_models: true
+  vram_headroom: 0.9
+
+  # Admission-time VRAM reservations (concurrent cold-load guard).
+  vram_per_b: 0.7
+  vram_floor_gb: 2.0
+  medium_reserve_min_gb: 8.0
+  small_reserve_vram_gb: 0
+  embed_reserve_vram_gb: 0
+  admission_wait_ms: 0
+
+  # RAM pressure routing.
+  ram_elevated_available_ratio: 0.25
+  ram_critical_available_ratio: 0.12
+  ram_elevated_available_gb: 4.0
+  ram_critical_available_gb: 2.0
+  ram_swap_elevated_gb: 0.5
+  ram_load_elevated_per_core: 1.5
+  ram_load_critical_per_core: 3.0
+  ram_headroom: 0.85
+  ram_elevated_score_penalty: 2.0
+  ram_critical_score_penalty: 8.0
+  reject_on_ram_critical: true
+  reject_on_ram_elevated_for_classes: [medium, large]
+  ram_sensitive_classes: [embed, small, medium, large]
+  embed_reserve_ram_gb: 4.0
+  small_reserve_ram_gb: 0
+  gpu_system_ram_overhead_gb: 1.0
+
+  # Backpressure / overload.
+  default_max_inflight: null
+  retry_max_attempts: 3
+  retry_on_status: [429, 503]
+  overload_wait_ms: 0
+  pull_miss_retry_after_seconds: 10
+  auto_pull_wait_seconds: 0
+  # Dangerous: single-node /api/pull|/api/delete passthrough (prefer admin APIs).
+  unsafe_single_node_mutate: false
+
+  # Model warm-keeper
+  model_warm_enabled: true
+  model_warm_interval_seconds: 60
+  model_warm_min_free_vram_gb: 4.0
+  model_warm_cooldown_seconds: 30
+  model_warm_max_inflight_ratio: 0.5
+
+health:
+  interval_seconds: 5
+  probe_timeout_seconds: 3
+  fail_streak_threshold: 3
+  overload_fail_credit: 1
+  ps_probe_enabled: true
+  # Node-local capacity discovery (soft-fail, never affects health).
+  capacity_probe_enabled: true
+  capacity_probe_port: 11436
+  capacity_probe_path: /v1/capacity
+  capacity_probe_timeout_seconds: 2
+  capacity_probe_every_n_probes: 1
+
+timeouts:
+  connect_seconds: 5
+  default_seconds: 30
+  embed_seconds: 300
+  generate_seconds: 600
+  pull_seconds: 3600
+
+# SQLite metadata only: operation id/kind/models/nodes/status/timestamps.
+# No upstream request/response bodies or target error details are retained.
+job_store_path: /var/lib/ollama-router/model-operations.sqlite3
+
+# VRAM-gated desired model tiers (additive — larger GPUs get richer sets).
+desired_model_tiers:
+  - models:
+      - qwen3-embedding:8b
+      - moondream
+      - llama3.2:1b
+    min_vram_gb: 0
+  - models:
+      - llama3.2:3b
+      - qwen3:4b
+      - minicpm-v4.6:1b
+      - minicpm-v4.6
+    min_vram_gb: 12
+  - models:
+      - mistral:7b
+      - llama3.1:8b
+      - qwen2.5:14b
+    min_vram_gb: 24
+
+provision_defaults:
+  auto: true
+  concurrency: 1
+  cooldown_seconds: 900
+  ssh_connect_timeout_seconds: 5
+  reboot_wait_timeout_seconds: 900
+  tailscale_ssh_wait_timeout_seconds: 300
+  tailscale_ssh_port: 22
+  poll_interval_seconds: 15
+  ts_authkey_env: TS_AUTHKEY
+  ts_ephemeral: true
+  ts_accept_routes: false
+
+# Verda Cloud spot GPU provisioning — DISABLED by default.
+# Credentials are boot/infra secrets (VERDA_CLIENT_ID / VERDA_CLIENT_SECRET);
+# never put secrets in this file.
+verda:
+  enabled: false
+  base_url: https://api.verda.com
+  client_id_env: VERDA_CLIENT_ID
+  client_secret_env: VERDA_CLIENT_SECRET
+  auto_scale: true
+  auto_scale_min_instances: 0
+  auto_scale_max_instances: 2
+  idle_scale_down_enabled: true
+  idle_timeout_seconds: 900
+  idle_grace_after_create_seconds: 300
+  ensure_on_startup: false
+  destroy_on_shutdown: true
+  router_id_env: OLLAMA_ROUTER_ID
+  ssh_key_id: null
+  ssh_key_name: illumination-ollama-router
+  ssh_public_key_file: null
+  ssh_private_key_file: null
+  preferred_image_globs:
+    - "*ubuntu-24*cuda*docker*"
+    - "*ubuntu-24*docker*"
+    - "ubuntu-24.04"
+  min_vram_gb: 8
+  max_vram_gb: 80
+  min_gpus: 1
+  max_gpus: null
+  allowed_instance_types: []
+  denied_instance_types: []
+  allowed_locations: []
+  max_spot_price_per_hour: null
+  selection_strategy: cheapest
+  os_volume_gb: 100
+  on_spot_discontinue: delete_permanently
+  poll_interval_seconds: 10
+  create_timeout_seconds: 900
+  destroy_timeout_seconds: 120
+  create_retries: 2
+  create_backoff_base_seconds: 2.0

@@ -1,0 +1,11 @@
+# CODEOWNERS — ollama-router
+#
+# These owners are automatically requested for review when a PR touches
+# the matching paths. Last matching line wins for each path.
+
+*                                          @miguelenes
+
+.github/**                                 @miguelenes
+.github/workflows/**                       @miguelenes
+.github/dependabot.yml                     @miguelenes
+SECURITY.md                                @miguelenes

@@ -1,0 +1,498 @@
+//! Layered YAML + env config loading.
+
+use std::path::Path;
+
+use serde_yaml::Value;
+
+use crate::fleet::env::parse_host_environ;
+use crate::fleet::state::{FleetState, DEFAULT_STATE_PATH};
+use crate::fleet::tailscale::{url_host_is_ip, url_host_is_tailscale};
+
+use super::env_source::{EnvSource, OsEnv};
+use super::error::ConfigError;
+use super::knobs::apply_env_knobs;
+use super::merge::deep_merge;
+use super::models::{RouterConfig, YamlTunables};
+use super::nodes_env::parse_nodes_env;
+
+/// Committed tunables (Verda-only; no inventory).
+pub const DEFAULTS_YAML: &str = include_str!("router.defaults.yaml");
+
+const ENV_CONFIG: &str = "OLLAMA_ROUTER_CONFIG";
+const ENV_NODES: &str = "OLLAMA_ROUTER_NODES";
+const ENV_STATE: &str = "OLLAMA_ROUTER_STATE_FILE";
+
+/// Load using the process environment.
+pub fn load_config(overlay: Option<&Path>) -> Result<RouterConfig, ConfigError> {
+    load_config_from(overlay, &OsEnv)
+}
+
+/// Load with an injectable environment (tests).
+///
+/// Path argument wins over `OLLAMA_ROUTER_CONFIG`. A missing overlay file is
+/// not an error.
+pub fn load_config_from(
+    overlay: Option<&Path>,
+    env: &impl EnvSource,
+) -> Result<RouterConfig, ConfigError> {
+    let mut merged = tunables_value_from_defaults()?;
+
+    let overlay_path = overlay.map(Path::to_path_buf).or_else(|| {
+        env.var(ENV_CONFIG)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .map(std::path::PathBuf::from)
+    });
+
+    if let Some(path) = overlay_path {
+        if let Some(overlay_raw) = load_yaml_file(&path)? {
+            reject_nodes(&overlay_raw, &path.display().to_string())?;
+            deep_merge(&mut merged, overlay_raw);
+        }
+    }
+
+    apply_env_knobs(&mut merged, env)?;
+    let tunables = tunables_from_value(merged)?;
+
+    let mut nodes = parse_host_environ(env)?;
+    if let Some(compact) = env.var(ENV_NODES) {
+        let stripped = compact.trim();
+        if !stripped.is_empty() {
+            nodes = parse_nodes_env(stripped)?;
+        }
+    }
+
+    let state_path = env
+        .var(ENV_STATE)
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
+    let state = FleetState::new(&state_path);
+    for node in &mut nodes {
+        let persisted = state.hydrate_url(&node.id)?;
+        if let Some(persisted) = persisted {
+            match node.url.as_deref() {
+                None => node.url = Some(persisted),
+                Some(existing) if !url_host_is_tailscale(existing) && url_host_is_ip(existing) => {
+                    node.url = Some(persisted);
+                }
+                Some(_) => {}
+            }
+        }
+        node.normalize_and_validate()?;
+    }
+
+    let config = RouterConfig::from_tunables(tunables, nodes);
+    config.validate_nodes()?;
+    Ok(config)
+}
+
+/// Parse YAML text into tunables (empty inventory). Does not read the
+/// committed defaults file — missing keys use struct defaults.
+pub fn parse_yaml(source: &str) -> Result<RouterConfig, ConfigError> {
+    let raw = parse_yaml_value(source, "YAML text")?;
+    reject_nodes(&raw, "YAML text")?;
+    let mut merged = default_tunables_value()?;
+    if !matches!(raw, Value::Null) {
+        deep_merge(&mut merged, raw);
+    }
+    let tunables = tunables_from_value(merged)?;
+    Ok(RouterConfig::from_tunables(tunables, Vec::new()))
+}
+
+fn tunables_value_from_defaults() -> Result<Value, ConfigError> {
+    let mut merged = default_tunables_value()?;
+    let defaults = parse_yaml_value(DEFAULTS_YAML, "router.defaults.yaml")?;
+    reject_nodes(&defaults, "router.defaults.yaml")?;
+    deep_merge(&mut merged, defaults);
+    Ok(merged)
+}
+
+fn default_tunables_value() -> Result<Value, ConfigError> {
+    serde_yaml::to_value(YamlTunables::default())
+        .map_err(|e| ConfigError::invalid(format!("serialize defaults: {e}")))
+}
+
+fn tunables_from_value(raw: Value) -> Result<YamlTunables, ConfigError> {
+    let tunables: YamlTunables = serde_yaml::from_value(raw)
+        .map_err(|e| ConfigError::invalid(format!("invalid config: {e}")))?;
+    tunables.validate()?;
+    Ok(tunables)
+}
+
+fn parse_yaml_value(source: &str, origin: &str) -> Result<Value, ConfigError> {
+    if source.trim().is_empty() {
+        return Ok(Value::Mapping(serde_yaml::Mapping::new()));
+    }
+    let raw: Value = serde_yaml::from_str(source)
+        .map_err(|e| ConfigError::InvalidYaml(format!("{origin}: {e}")))?;
+    match &raw {
+        Value::Null => Ok(Value::Mapping(serde_yaml::Mapping::new())),
+        Value::Mapping(_) => Ok(raw),
+        _ => Err(ConfigError::RootNotMapping),
+    }
+}
+
+fn load_yaml_file(path: &Path) -> Result<Option<Value>, ConfigError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(path)?;
+    let origin = path.display().to_string();
+    if text.trim().is_empty() {
+        return Ok(Some(Value::Mapping(serde_yaml::Mapping::new())));
+    }
+    let raw: Value = serde_yaml::from_str(&text)
+        .map_err(|e| ConfigError::InvalidYaml(format!("invalid YAML in {origin}: {e}")))?;
+    match raw {
+        Value::Null => Ok(Some(Value::Mapping(serde_yaml::Mapping::new()))),
+        Value::Mapping(_) => Ok(Some(raw)),
+        _ => Err(ConfigError::RootNotMapping),
+    }
+}
+
+pub(crate) fn reject_nodes(raw: &Value, source: &str) -> Result<(), ConfigError> {
+    let Some(map) = raw.as_mapping() else {
+        return Ok(());
+    };
+    if map.contains_key("nodes") {
+        return Err(ConfigError::NodesInventory {
+            origin: source.to_string(),
+        });
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::models::RequestClass;
+    use crate::fleet::state::FleetState;
+    use std::collections::HashMap;
+    use std::fs;
+
+    const TUNABLES_YAML: &str = r#"
+policy:
+  medium_min_vram_gb: 8
+  sticky_affinity: true
+  default_max_inflight: 4
+  retry_on_status: [429, 503]
+  overload_wait_ms: 250
+health:
+  interval_seconds: 7.5
+  fail_streak_threshold: 2
+  request_fail_credit: 2
+  overload_fail_credit: 1
+timeouts:
+  embed_seconds: 120
+desired_models:
+  - qwen3-embedding:8b
+ready_requires_embedding_model: true
+"#;
+
+    fn empty_env() -> HashMap<String, String> {
+        HashMap::new()
+    }
+
+    fn env_with_state(dir: &tempfile::TempDir) -> HashMap<String, String> {
+        let mut env = empty_env();
+        env.insert(
+            ENV_STATE.to_string(),
+            dir.path().join("fleet-state.json").display().to_string(),
+        );
+        env
+    }
+
+    #[test]
+    fn parse_yaml_tunables() {
+        let config = parse_yaml(TUNABLES_YAML).unwrap();
+        assert!(config.nodes.is_empty());
+        assert_eq!(config.policy.medium_min_vram_gb, 8.0);
+        assert!(config.policy.sticky_affinity);
+        assert_eq!(config.policy.default_max_inflight, Some(4));
+        assert_eq!(config.policy.retry_max_attempts, 3);
+        assert_eq!(config.policy.retry_on_status, vec![429, 503]);
+        assert_eq!(config.policy.overload_wait_ms, 250);
+        assert_eq!(config.health.interval_seconds, 7.5);
+        assert_eq!(config.health.fail_streak_threshold, 2);
+        assert_eq!(config.health.request_fail_credit, 2);
+        assert_eq!(config.health.overload_fail_credit, 1);
+        assert_eq!(config.timeouts.embed_seconds, 120.0);
+        assert_eq!(config.desired_models, ["qwen3-embedding:8b"]);
+        assert!(config.ready_requires_embedding_model);
+    }
+
+    #[test]
+    fn parse_yaml_rejects_nodes_inventory() {
+        let err = parse_yaml(
+            "nodes:\n  - id: n\n    url: http://n:11434\npolicy:\n  sticky_affinity: true\n",
+        )
+        .unwrap_err();
+        assert!(matches!(err, ConfigError::NodesInventory { .. }));
+    }
+
+    #[test]
+    fn parse_yaml_rejects_empty_and_null_nodes() {
+        assert!(matches!(
+            parse_yaml("nodes: []\n").unwrap_err(),
+            ConfigError::NodesInventory { .. }
+        ));
+        assert!(matches!(
+            parse_yaml("nodes: null\n").unwrap_err(),
+            ConfigError::NodesInventory { .. }
+        ));
+    }
+
+    #[test]
+    fn parse_yaml_defaults() {
+        let config = parse_yaml("").unwrap();
+        assert!(config.nodes.is_empty());
+        assert_eq!(config.policy.small_max_b, 4.0);
+        assert_eq!(config.health.interval_seconds, 5.0);
+        assert_eq!(config.max_pulls_per_node, 1);
+        assert_eq!(config.listen_port, 11434);
+        assert_eq!(config.policy.default_max_inflight, None);
+        assert_eq!(config.policy.retry_max_attempts, 3);
+        assert_eq!(config.policy.retry_on_status, vec![429, 503]);
+        assert_eq!(config.policy.overload_wait_ms, 0);
+        assert_eq!(config.health.overload_fail_credit, 1);
+        assert!(!config.policy.unsafe_single_node_mutate);
+        assert!(config.desired_model_tiers.is_empty());
+        assert_eq!(config.verda.min_vram_gb, 8.0);
+        assert_eq!(config.verda.max_vram_gb, Some(80.0));
+        assert!(config.policy.model_warm_enabled);
+        assert_eq!(config.policy.model_warm_interval_seconds, 60.0);
+        assert_eq!(
+            config.policy.reject_on_ram_elevated_for_classes,
+            [RequestClass::Medium, RequestClass::Large]
+        );
+    }
+
+    #[test]
+    fn desired_model_tiers_parsed_and_preference() {
+        let config = parse_yaml(
+            "desired_model_tiers:\n  - models: [embed:8b, tiny:1b]\n    min_vram_gb: 0\n  - models: [mid:7b]\n    min_vram_gb: 24\n",
+        )
+        .unwrap();
+        let tiers = config.effective_model_tiers();
+        assert_eq!(tiers.len(), 2);
+        assert_eq!(tiers[0].models, ["embed:8b", "tiny:1b"]);
+        assert_eq!(tiers[1].min_vram_gb, 24.0);
+
+        let compat =
+            parse_yaml("desired_models:\n  - qwen3-embedding:8b\n  - moondream\n").unwrap();
+        assert!(compat.desired_model_tiers.is_empty());
+        let tiers = compat.effective_model_tiers();
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers[0].models, ["qwen3-embedding:8b", "moondream"]);
+
+        let both = parse_yaml(
+            "desired_models:\n  - legacy:1b\ndesired_model_tiers:\n  - models: [tier-model:1b]\n    min_vram_gb: 0\n",
+        )
+        .unwrap();
+        assert_eq!(both.effective_model_tiers()[0].models, ["tier-model:1b"]);
+    }
+
+    #[test]
+    fn ram_policy_invalid_thresholds_rejected() {
+        assert!(parse_yaml(
+            "policy:\n  ram_critical_available_ratio: 0.5\n  ram_elevated_available_ratio: 0.25\n"
+        )
+        .is_err());
+        assert!(parse_yaml("policy:\n  ram_headroom: 1.5\n").is_err());
+        assert!(parse_yaml("policy:\n  reject_on_ram_elevated_for_classes: [bogus]\n").is_err());
+    }
+
+    #[test]
+    fn verda_vram_bounds_rejected() {
+        assert!(parse_yaml("verda:\n  max_vram_gb: -1\n").is_err());
+        assert!(parse_yaml("verda:\n  min_vram_gb: 48\n  max_vram_gb: 24\n").is_err());
+    }
+
+    #[test]
+    fn thunder_overlay_is_unknown_field() {
+        assert!(parse_yaml("thunder:\n  enabled: true\n").is_err());
+        assert!(parse_yaml("runpod:\n  enabled: true\n").is_err());
+    }
+
+    #[test]
+    fn invalid_yaml_and_non_mapping_root() {
+        assert!(matches!(
+            parse_yaml("policy: [unclosed").unwrap_err(),
+            ConfigError::InvalidYaml(_)
+        ));
+        assert!(matches!(
+            parse_yaml("- just\n- a list\n").unwrap_err(),
+            ConfigError::RootNotMapping
+        ));
+    }
+
+    #[test]
+    fn ssh_password_literal_rejected() {
+        let err =
+            parse_yaml("provision_defaults:\n  ts_authkey_env: tskey-auth-literal\n").unwrap_err();
+        assert!(err.to_string().contains("ts_authkey_env"));
+    }
+
+    #[test]
+    fn committed_defaults_have_no_inventory_or_other_clouds() {
+        let raw: Value = serde_yaml::from_str(DEFAULTS_YAML).unwrap();
+        let map = raw.as_mapping().unwrap();
+        assert!(!map.contains_key("nodes"));
+        assert!(!map.contains_key("thunder"));
+        assert!(!map.contains_key("runpod"));
+        let tunables: YamlTunables = serde_yaml::from_value(raw).unwrap();
+        tunables.validate().unwrap();
+        assert_eq!(tunables.verda.min_vram_gb, 8.0);
+        assert_eq!(tunables.verda.max_vram_gb, Some(80.0));
+    }
+
+    #[test]
+    fn overlay_deep_merge_keeps_nested_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(&overlay, "provision_defaults:\n  auto: false\n").unwrap();
+        let env = env_with_state(&dir);
+        let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert!(!config.provision_defaults.auto);
+        assert!(config.provision_defaults.ts_ephemeral);
+    }
+
+    #[test]
+    fn load_config_env_override_replaces_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(&overlay, TUNABLES_YAML).unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert(
+            ENV_NODES.to_string(),
+            "env-node|http://env:11434|vram=4".to_string(),
+        );
+        let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert_eq!(config.nodes.len(), 1);
+        assert_eq!(config.nodes[0].id.as_str(), "env-node");
+        assert_eq!(config.health.interval_seconds, 7.5);
+    }
+
+    #[test]
+    fn load_config_rejects_nodes_overlay() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("legacy.yaml");
+        fs::write(
+            &overlay,
+            "nodes:\n  - id: legacy\n    url: http://legacy:11434\npolicy:\n  sticky_affinity: true\n",
+        )
+        .unwrap();
+        let err = load_config_from(Some(&overlay), &env_with_state(&dir)).unwrap_err();
+        assert!(matches!(err, ConfigError::NodesInventory { .. }));
+    }
+
+    #[test]
+    fn load_config_missing_overlay_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.yaml");
+        let config = load_config_from(Some(&missing), &env_with_state(&dir)).unwrap();
+        assert!(config.nodes.is_empty());
+        assert_eq!(config.policy.default_max_inflight, None);
+        assert!(config.provision_defaults.ts_ephemeral);
+    }
+
+    #[test]
+    fn hydrate_public_ipv4_replaced_tailscale_and_hostname_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        let state = FleetState::new(env.get(ENV_STATE).unwrap());
+        state
+            .persist_url("host-01", "http://100.64.0.1:11434", Some("100.64.0.1"))
+            .unwrap();
+
+        env.insert("OLLAMA_HOST_01_ID".into(), "host-01".into());
+        env.insert("OLLAMA_HOST_01_URL".into(), "http://8.8.8.8:11434".into());
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(
+            config.nodes[0].url.as_deref(),
+            Some("http://100.64.0.1:11434")
+        );
+
+        env.insert(
+            "OLLAMA_HOST_01_URL".into(),
+            "http://100.64.0.9:11434".into(),
+        );
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(
+            config.nodes[0].url.as_deref(),
+            Some("http://100.64.0.9:11434")
+        );
+
+        env.insert(
+            "OLLAMA_HOST_01_URL".into(),
+            "http://host.docker.internal:11434".into(),
+        );
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(
+            config.nodes[0].url.as_deref(),
+            Some("http://host.docker.internal:11434")
+        );
+    }
+
+    #[test]
+    fn malformed_knobs_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        for (key, value) in [
+            ("VERDA_ENABLED", "perhaps"),
+            ("OLLAMA_ROUTER_DEBUG_HEADERS", "sometimes"),
+            ("OLLAMA_ROUTER_DESIRED_MODELS", "embed,,small"),
+            ("VERDA_MIN_VRAM_GB", "nan"),
+        ] {
+            let mut env = env_with_state(&dir);
+            env.insert(key.into(), value.into());
+            assert!(load_config_from(None, &env).is_err(), "{key}={value}");
+        }
+    }
+
+    #[test]
+    fn verda_demand_scale_price_from_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("VERDA_DEMAND_SCALE_PRICE_PER_HOUR".into(), "0.30".into());
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(config.verda.demand_scale_price_per_hour, Some(0.30));
+    }
+
+    #[test]
+    fn overlay_example_file_has_no_inventory() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.overlay.example.yaml");
+        let text = fs::read_to_string(&root).unwrap();
+        assert!(!text.lines().any(|l| l.starts_with("nodes:")));
+        assert!(!text.lines().any(|l| l.starts_with("thunder:")));
+        assert!(!text.lines().any(|l| l.starts_with("runpod:")));
+    }
+
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn yaml_mapping_with_nodes_always_errors(
+            extra in prop::collection::hash_map("[a-z]{1,6}", 0i32..8, 0..3),
+            kind in 0u8..5
+        ) {
+            let nodes = match kind {
+                0 => "[]",
+                1 => "null",
+                2 => "[{id: n, url: http://n:11434}]",
+                3 => "foo",
+                _ => "0",
+            };
+            let mut yaml = format!("nodes: {nodes}\n");
+            for (k, v) in extra {
+                if k == "nodes" {
+                    continue;
+                }
+                yaml.push_str(&format!("{k}: {v}\n"));
+            }
+            let err = parse_yaml(&yaml).unwrap_err();
+            let ok = matches!(err, ConfigError::NodesInventory { .. });
+            prop_assert!(ok);
+        }
+    }
+}

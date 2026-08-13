@@ -8,3 +8,16 @@ description = "Routing, fleet, config, capacity, cloud, and job types for ollama
 
 [lints]
 workspace = true
+
+[dependencies]
+fs4.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true

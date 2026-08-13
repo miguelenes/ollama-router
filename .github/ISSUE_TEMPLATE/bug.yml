@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a functional bug (not a security vulnerability)
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Do not** report security vulnerabilities here. Use [private vulnerability reporting](https://github.com/miguelenes/ollama-router/security/advisories/new) instead.
+
+        Do not include prompts, request/response bodies, embeddings, tokens, SSH keys, or credentials.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What went wrong?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: input
+    id: rustc
+    attributes:
+      label: rustc version
+      placeholder: "1.97.0"
+  - type: input
+    id: os
+    attributes:
+      label: OS
+      placeholder: "Linux / macOS / Windows"
