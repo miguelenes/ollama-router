@@ -5,11 +5,20 @@
 #   docker build --target mock -t ollama-mock:local .
 #
 # Listen :11434 inside the container. Compose publishes host 11435 → 11434.
+# rust-toolchain.toml is dockerignored; this image tag is the rustc pin.
 
-FROM rust:1.97-slim-bookworm AS builder
+FROM rust:1.97-slim-bookworm AS chef
 WORKDIR /app
-COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
-COPY crates ./crates
+RUN cargo install cargo-chef --locked --version 0.1.78
+
+FROM chef AS planner
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
+FROM chef AS builder
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --recipe-path recipe.json
+COPY . .
 RUN cargo build --release --bin ollama-router --bin ollama-mock
 
 FROM debian:bookworm-slim AS mock

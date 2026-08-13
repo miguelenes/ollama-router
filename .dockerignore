@@ -4,5 +4,7 @@
 .cursor
 .opencode
 .agents
+.task
 *.md
 !README.md
+rust-toolchain.toml

@@ -68,8 +68,12 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=ollama-router
-          cache-to: type=gha,mode=max,scope=ollama-router
+          cache-from: |
+            type=gha,scope=ollama-router
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
+          cache-to: |
+            type=gha,mode=max,scope=ollama-router,ignore-error=true
+            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
 
       # Artifact attestations are unavailable on user-owned private repos.
       # Re-enable automatically when the repository is public.
