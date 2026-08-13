@@ -21,3 +21,5 @@ id_rsa*
 .vscode/
 *.swp
 .DS_Store
+.cursor/hooks/state/continual-learning-index.json
+.cursor/hooks/state/continual-learning.json

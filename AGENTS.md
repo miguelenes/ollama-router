@@ -91,6 +91,14 @@ cargo deny check advisories bans
 
 Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.
 
+## Learned User Preferences
+
+- Keep Context7 and docsrs-mcp as global Cursor/OpenCode MCP servers; leave project `.cursor/mcp.json` `mcpServers` empty and never commit API keys there.
+
+## Learned Workspace Facts
+
+- cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
+
 <!-- BEGIN opencode-rag -->
 ## Code Navigation
 
