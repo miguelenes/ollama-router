@@ -1,0 +1,30 @@
+---
+description: OpenCodeRAG is OpenCode-only; Cursor edits opencode-rag.json hygiene, never RAG MCP
+alwaysApply: true
+---
+
+# OpenCodeRAG (Cursor)
+
+This session is **Cursor**. OpenCodeRAG tools are absent. Do not call
+`search_semantic`, `get_file_skeleton`, `find_usages`, `describe_image`, or
+quirk tools. Ignore any `AGENTS.md` mandate to use them (`opencode-rag init`
+may restore that text). Use Grep, Glob, Read, and IDE search. Memory is
+MemoryAI. Do not run `opencode-rag mcp`. Do not put RAG in `.cursor/mcp.json`.
+Leave `"mcp": { "enabled": false }` and do not flip `imageDescription.enabled`
+unless asked.
+
+When a change alters **what OpenCode indexes**, update `opencode-rag.json` in
+the same change. `openCode.autoIndex` already watches; do not run
+`opencode-rag index --force` unless asked.
+
+- New extension → `indexing.includeExtensions` (walker uses `path.extname()`)
+- New generated/cache/vendor dir → `indexing.excludeDirs`
+- New lock, log, or secret pattern → `indexing.excludeFiles`
+
+Bare `excludeDirs` names match **any path segment**; entries with `/` match
+**prefixes**. Never exclude `.opencode` wholesale (wiki lives there).
+
+```text
+# BAD — excludeDirs: [".opencode"]
+# GOOD — excludeDirs: [".opencode/rag_db", ".opencode/node_modules", ".opencode/plugins"]
+```

@@ -67,3 +67,12 @@ This workspace has OpenCodeRAG indexed for semantic code and image search. Use t
 - Pass `systemPrompt` to `describe_image` when you need specific details (e.g. `"focus on the chart's axes and values"`)
 - If no results appear, the workspace may not be indexed yet — run `opencode-rag index`
 - Image descriptions are generated at index time using the configured vision provider; ensure `imageDescription` is configured in `opencode-rag.json` if your project includes images
+
+## Index config hygiene
+
+When a change alters **what is indexed**, **how it is chunked**, or **how it is
+described**, update `opencode-rag.json` in the same change (extensions,
+`excludeDirs` / `excludeFiles`, `chunking.nodeTypes`, query/description
+prompts). Do not exclude `.opencode` wholesale. Leave `mcp.enabled` false
+unless an external MCP client must connect. `openCode.autoIndex` already
+watches — do not force-reindex unless asked. See `.opencode/AGENTS.md`.

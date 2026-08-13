@@ -16,3 +16,31 @@ cargo check
 # GOOD — gate matches CI intent
 task check
 ```
+
+# OpenCodeRAG index config
+
+Keep `opencode-rag.json` in sync with the tree. When a change alters **what is
+indexed**, **how it is chunked**, or **how it is described**, update that file
+in the same change. `openCode.autoIndex` already watches; do not run
+`opencode-rag index --force` unless asked.
+
+- New source extension → `indexing.includeExtensions`; add `chunking.nodeTypes`
+  for that language if tree-sitter should split functions/types
+- New generated, cache, or vendor directory → `indexing.excludeDirs`
+- New lockfile, log, or secret pattern → `indexing.excludeFiles`
+- Retrieval wording no longer matches the stack → `embedding.queryPrefix`
+  and/or `description.systemPrompt`
+
+Walker uses `path.extname()`. Bare `excludeDirs` names match **any path
+segment**; entries with `/` match **prefixes**. Never exclude `.opencode`
+wholesale — wiki and skills live there; keep `.opencode/rag_db`,
+`.opencode/node_modules`, and `.opencode/plugins`.
+
+Leave `"mcp": { "enabled": false }` unless an external MCP client must connect.
+Do not register the plugin via an OpenCode `"plugin"` config key (use
+`.opencode/plugins/*.js` auto-discovery).
+
+```text
+# BAD — excludeDirs: [".opencode"]
+# GOOD — excludeDirs: [".opencode/rag_db", ".opencode/node_modules", ".opencode/plugins"]
+```
