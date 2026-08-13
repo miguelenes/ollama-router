@@ -28,7 +28,7 @@ jobs:
           toolchain: "1.97"
           components: clippy, rustfmt
 
-      - uses: Swatinem/rust-cache@85e3b93b4bef2c493ba7e0e35a6f2ccc30fdfccf # v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
