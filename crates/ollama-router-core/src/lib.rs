@@ -5,6 +5,7 @@ pub mod cloud;
 pub mod config;
 pub mod fleet;
 pub mod jobs;
+pub mod provision;
 pub mod routing;
 
 pub use capacity::{
@@ -12,7 +13,10 @@ pub use capacity::{
     CapacityReport, CapacitySource, CapacityTarget, MergeOutcome, Pressure, PressureEnvelope,
     BYTES_PER_GIB,
 };
-pub use cloud::{DemandScale, NoopDemandScale};
+pub use cloud::{
+    idle_scale_down_candidates, DemandScale, IdleCandidate, IdleNodeView, IdlePolicy,
+    NoopDemandScale,
+};
 pub use config::{
     hydrate_node_urls, load_config, load_config_from, parse_yaml, ConfigError, EnvSource, OsEnv,
     RouterConfig,
@@ -22,7 +26,17 @@ pub use fleet::{
     NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId, VerdaInstanceId,
     VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
-pub use jobs::{JobOutcome, JobStatus, ModelOrchestrator, OrchestratorError, StubOrchestrator};
+pub use jobs::{
+    Job, JobId, JobKind, JobOutcome, JobStatus, JobStore, JobTarget, ModelOrchestrator,
+    OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
+};
+pub use provision::{
+    posix_quote, provision_config_from_defaults, read_provision_script, redact_authkey,
+    resolve_provision_script, NodeProvisioner, ProvisionFuture, ProvisionOpts, ProvisionPhase,
+    ProvisionResult, ProvisionStatus, DEFAULT_SCRIPT_PATH, REMOTE_SCRIPT,
+};
 pub use routing::{
-    classify, parse_model_size_b, rank_nodes, RankOutcome, RequestClass, RoutingError,
+    classify, parse_model_size_b, placement_class, placement_eligible_node_ids,
+    ram_pressure_blocks_placement, rank_nodes, resolve_target_nodes, PlacementError, RankOutcome,
+    RequestClass, RoutingError, TargetSpec, TARGET_ALL,
 };

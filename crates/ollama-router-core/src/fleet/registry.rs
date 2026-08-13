@@ -182,6 +182,7 @@ struct NodeState {
     loaded_models: HashSet<String>,
     inflight: u32,
     last_client_request_at: Option<Instant>,
+    registered_at: Instant,
     loaded_vram_gb: Option<f64>,
     reserved_vram_gb: f64,
     reserved_ram_gb: f64,
@@ -215,6 +216,7 @@ impl NodeState {
             loaded_models: HashSet::new(),
             inflight: 0,
             last_client_request_at: None,
+            registered_at: Instant::now(),
             loaded_vram_gb: None,
             reserved_vram_gb: 0.0,
             reserved_ram_gb: 0.0,
@@ -343,6 +345,65 @@ impl Registry {
     /// Snapshot of one node.
     pub fn get(&self, id: &NodeId) -> Option<NodeSnapshot> {
         self.read().nodes.get(id).map(NodeState::snapshot)
+    }
+
+    /// Clone the live `NodeConfig` (SSH host may have been switched to Tailscale).
+    pub fn node_config(&self, id: &NodeId) -> Option<NodeConfig> {
+        self.read().nodes.get(id).map(|n| n.config.clone())
+    }
+
+    /// Set the Ollama routing URL after Tailscale verify. Refuses public IPv4.
+    ///
+    /// Does not count as inflight. Marks the node unhealthy so health re-probes.
+    pub fn set_node_url(&self, id: &NodeId, url: &str) -> Result<(), String> {
+        let trimmed = url.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Err("empty url".into());
+        }
+        if crate::fleet::tailscale::url_host_is_public_ipv4(trimmed) {
+            return Err("refusing public IPv4 routing URL".into());
+        }
+        let mut inner = self.write();
+        let Some(node) = inner.nodes.get_mut(id) else {
+            return Ok(());
+        };
+        node.config.url = Some(trimmed.to_string());
+        node.healthy = false;
+        node.success_streak = 0;
+        node.next_probe_at = Instant::now();
+        Ok(())
+    }
+
+    /// Point ordinary OpenSSH at a Tailscale IPv4 (same key/user).
+    pub fn set_ssh_endpoint(&self, id: &NodeId, host: &str, port: u16) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            if let Some(ssh) = node.config.ssh.as_mut() {
+                ssh.host = host.to_string();
+                ssh.port = port;
+            }
+        }
+    }
+
+    /// Clear a non-Tailscale IP routing URL after a failed provision.
+    pub fn clear_unsafe_routing_url(&self, id: &NodeId) {
+        let mut inner = self.write();
+        let Some(node) = inner.nodes.get_mut(id) else {
+            return;
+        };
+        let Some(url) = node.config.url.as_deref() else {
+            return;
+        };
+        if crate::fleet::tailscale::url_host_is_tailscale(url) {
+            return;
+        }
+        if crate::fleet::tailscale::url_host_is_ip(url) {
+            node.config.url = None;
+        }
+    }
+
+    /// Instant the node was first registered (idle grace).
+    pub fn registered_at(&self, id: &NodeId) -> Option<Instant> {
+        self.read().nodes.get(id).map(|n| n.registered_at)
     }
 
     /// Mark a node healthy (tests). Bypasses `success_threshold`.
@@ -718,6 +779,18 @@ impl Registry {
         }
     }
 
+    /// Drop a Verda node from the live registry. Permanent hosts are ignored.
+    pub fn remove_verda(&self, id: &NodeId) {
+        let mut inner = self.write();
+        if inner
+            .nodes
+            .get(id)
+            .is_some_and(|n| n.origin == NodeOrigin::Verda)
+        {
+            inner.nodes.remove(id);
+        }
+    }
+
     /// Sticky-affinity owner: prefer a warm healthy holder of `model`.
     pub fn sticky_owner(&self, model: &str) -> Option<NodeId> {
         let snap = self.snapshot();
@@ -1020,5 +1093,45 @@ mod tests {
         assert!(!snap.healthy);
         assert_eq!(snap.unhealthy_reason.as_deref(), Some("public_url_blocked"));
         assert!(snap.fail_streak >= 3);
+    }
+
+    #[test]
+    fn set_node_url_refuses_public_ipv4() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        let err = registry
+            .set_node_url(&id, "http://8.8.8.8:11434")
+            .expect_err("public");
+        assert!(err.contains("public IPv4"));
+        assert_eq!(
+            registry.get(&id).unwrap().url.as_deref(),
+            Some("http://a:11434")
+        );
+        registry
+            .set_node_url(&id, "http://100.64.0.9:11434")
+            .expect("tailscale");
+        assert_eq!(
+            registry.get(&id).unwrap().url.as_deref(),
+            Some("http://100.64.0.9:11434")
+        );
+        assert!(!registry.get(&id).unwrap().healthy);
+    }
+
+    #[test]
+    fn remove_verda_spares_permanent() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.remove_verda(&nid("a"));
+        assert!(registry.get(&nid("a")).is_some());
+        registry.upsert_verda(node("spot", 24.0, 1));
+        registry.remove_verda(&nid("spot"));
+        assert!(registry.get(&nid("spot")).is_none());
     }
 }

@@ -870,6 +870,20 @@ impl VerdaConfig {
         Ok(())
     }
 
+    /// Credential from the env var named by `client_id_env`.
+    pub fn client_id(&self, env: &impl super::env_source::EnvSource) -> Option<String> {
+        env.var(&self.client_id_env)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// Credential from the env var named by `client_secret_env`. Never log this.
+    pub fn client_secret(&self, env: &impl super::env_source::EnvSource) -> Option<String> {
+        env.var(&self.client_secret_env)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
     /// Resolve the stable router identity: env var named by `router_id_env`, else hostname.
     pub fn router_id(
         &self,

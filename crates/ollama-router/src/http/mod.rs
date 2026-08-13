@@ -11,14 +11,18 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use ollama_router_core::cloud::{DemandScale, NoopDemandScale};
 use ollama_router_core::config::RouterConfig;
-use ollama_router_core::fleet::Registry;
-use ollama_router_core::jobs::{ModelOrchestrator, StubOrchestrator};
+use ollama_router_core::fleet::{FleetState, Registry};
+use ollama_router_core::jobs::PullOrchestrator;
 use ollama_router_core::routing::{looks_like_embedding, DEFAULT_EMBED_MARKERS};
+use ollama_router_verda::VerdaManager;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
 
+use crate::provision::ProvisionOrchestrator;
 use crate::proxy;
+
+mod admin;
 
 /// Shared proxy / admin state.
 #[derive(Clone)]
@@ -26,26 +30,52 @@ pub struct AppState {
     pub config: Arc<RouterConfig>,
     pub registry: Arc<Registry>,
     pub client: reqwest::Client,
-    pub orchestrator: Arc<dyn ModelOrchestrator>,
+    pub orchestrator: Arc<PullOrchestrator>,
     pub demand: Arc<dyn DemandScale>,
     pub pool: Arc<Semaphore>,
     pub tie_break: Arc<AtomicU64>,
+    /// Captured from `OLLAMA_ROUTER_ADMIN_TOKEN` (never YAML). Unset disables admin.
+    pub admin_token: Option<String>,
+    pub fleet_state: Arc<FleetState>,
+    pub provisioner: Option<Arc<ProvisionOrchestrator>>,
+    pub verda: Option<VerdaManager>,
 }
 
 impl AppState {
-    /// Production wiring: stub orchestrator, no demand scale-up.
+    /// Production wiring: SQLite orchestrator, no demand scale-up.
     pub fn from_config(config: RouterConfig) -> anyhow::Result<Self> {
         let client = build_upstream_client(&config)?;
         let pool = Arc::new(Semaphore::new(config.upstream.max_connections as usize));
+        let config = Arc::new(config);
         let registry = Arc::new(Registry::new(&config));
+        let orchestrator = Arc::new(PullOrchestrator::new(
+            config.clone(),
+            client.clone(),
+            Some(registry.clone()),
+        )?);
+        let admin_token = std::env::var("OLLAMA_ROUTER_ADMIN_TOKEN")
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let fleet_state = Arc::new(FleetState::new(&config.state_path));
+        let provisioner = Some(Arc::new(ProvisionOrchestrator::new(
+            config.clone(),
+            client.clone(),
+            Some(registry.clone()),
+            Some(fleet_state.clone()),
+        )));
         Ok(Self {
-            config: Arc::new(config),
+            config,
             registry,
             client,
-            orchestrator: Arc::new(StubOrchestrator),
+            orchestrator,
             demand: Arc::new(NoopDemandScale),
             pool,
             tie_break: Arc::new(AtomicU64::new(0)),
+            admin_token,
+            fleet_state,
+            provisioner,
+            verda: None,
         })
     }
 }
@@ -124,7 +154,7 @@ async fn proxy_route(State(state): State<AppState>, req: Request<axum::body::Bod
     proxy::handle(&state, req).await
 }
 
-fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
+pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
     let mut res = Json(body).into_response();
     *res.status_mut() = status;
     res
@@ -139,6 +169,13 @@ pub fn make_app(state: AppState) -> Router {
         .route("/api/tags", get(proxy_route))
         .route("/api/pull", post(proxy_route))
         .route("/api/delete", delete(proxy_route))
+        .route("/router/v1/models/ensure", post(admin::ensure_models))
+        .route("/router/v1/models/delete", post(admin::delete_models))
+        .route("/router/v1/jobs/{id}", get(admin::get_job))
+        .route("/router/v1/nodes/provision", post(admin::provision_nodes))
+        .route("/router/v1/verda/status", get(admin::verda_status))
+        .route("/router/v1/verda/ensure", post(admin::verda_ensure))
+        .route("/router/v1/verda/destroy", post(admin::verda_destroy))
         .fallback(proxy_route)
         .with_state(state)
 }

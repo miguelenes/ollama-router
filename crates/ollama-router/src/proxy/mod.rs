@@ -20,7 +20,7 @@ use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
 use ollama_router_core::fleet::{NodeId, NodeSnapshot, Registry};
-use ollama_router_core::jobs::{JobStatus, OrchestratorError};
+use ollama_router_core::jobs::{JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify, estimate_request_ram_gb, estimate_request_vram_gb,
     rank_nodes, RequestClass, RoutingError,

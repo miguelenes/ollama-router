@@ -211,7 +211,7 @@ pub fn capacity_fits(
         && ram_fits(node, request_class, model, policy).is_ok()
 }
 
-fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
+pub(crate) fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
     if !policy.must_have_labels.is_empty() {
         let have: HashSet<&str> = labels.iter().map(String::as_str).collect();
         if !policy
@@ -235,7 +235,7 @@ fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
     true
 }
 
-fn capacity_preference(node: &NodeSnapshot, request_class: RequestClass) -> f64 {
+pub(crate) fn capacity_preference(node: &NodeSnapshot, request_class: RequestClass) -> f64 {
     match request_class {
         RequestClass::Embed => {
             let mut base = node.vram_gb();

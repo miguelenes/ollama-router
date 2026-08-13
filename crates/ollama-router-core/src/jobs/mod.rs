@@ -1,26 +1,29 @@
-//! Job orchestrator trait. SQLite persistence is a later slice.
+//! Placement-aware pull/delete with SQLite WAL persistence.
 //!
-//! Store path (when implemented): `/var/lib/ollama-router/model-operations.sqlite3`.
-//! No upstream bodies.
+//! Store path (default): `/var/lib/ollama-router/model-operations.sqlite3`.
+//! No upstream bodies or per-target `detail` strings are persisted.
 
 use std::future::Future;
 use std::pin::Pin;
 
-/// Outcome of an ensure/delete fan-out.
+mod orchestrator;
+mod store;
+mod types;
+
+pub use orchestrator::PullOrchestrator;
+pub use store::{JobStore, StoreError};
+pub use types::{Job, JobId, JobKind, JobStatus, JobTarget, TargetStatus};
+
+use crate::routing::PlacementError;
+
+/// Outcome of an ensure/delete fan-out (proxy-facing).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct JobOutcome {
-    pub id: String,
+    pub id: JobId,
     pub status: JobStatus,
 }
 
-/// Terminal job status (wire-facing).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum JobStatus {
-    Success,
-    Failed,
-}
-
-/// Orchestrator failures mapped by the proxy to 400/503/502.
+/// Orchestrator failures mapped by the proxy / admin to 400/422/503/502.
 #[derive(Debug, thiserror::Error)]
 pub enum OrchestratorError {
     #[error("job orchestrator is not configured")]
@@ -29,21 +32,39 @@ pub enum OrchestratorError {
     NoPlacementTargets,
     #[error("no target nodes")]
     NoTargetNodes,
+    #[error("unknown node id: {0}")]
+    UnknownNode(String),
+    #[error("models must be non-empty")]
+    EmptyModels,
     #[error("{0}")]
     Other(String),
+}
+
+impl From<PlacementError> for OrchestratorError {
+    fn from(err: PlacementError) -> Self {
+        match err {
+            PlacementError::UnknownNode(id) => Self::UnknownNode(id),
+        }
+    }
+}
+
+impl From<StoreError> for OrchestratorError {
+    fn from(err: StoreError) -> Self {
+        Self::Other(err.to_string())
+    }
 }
 
 /// Boxed future so the trait stays object-safe.
 pub type JobFuture<'a> =
     Pin<Box<dyn Future<Output = Result<JobOutcome, OrchestratorError>> + Send + 'a>>;
 
-/// Placement-aware pull/delete. SQLite-backed impl comes later; tests inject a fake.
+/// Placement-aware pull/delete. Tests may inject [`StubOrchestrator`].
 pub trait ModelOrchestrator: Send + Sync {
     fn ensure(&self, model: &str) -> JobFuture<'_>;
     fn delete(&self, model: &str) -> JobFuture<'_>;
 }
 
-/// Default stub: pull/delete are not configured yet.
+/// Stub: pull/delete are not configured.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct StubOrchestrator;
 
@@ -56,3 +77,6 @@ impl ModelOrchestrator for StubOrchestrator {
         Box::pin(std::future::ready(Err(OrchestratorError::NotConfigured)))
     }
 }
+
+#[cfg(test)]
+mod tests;

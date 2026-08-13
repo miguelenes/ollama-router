@@ -105,6 +105,7 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 ## Learned Workspace Facts
 
 - cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
+- russh must be **>=0.60.3** (we pin **0.62**): 0.54.5 fails deny on RUSTSEC-2026-0154/0153. `RUSTSEC-2023-0071` (rsa Marvin) has no patch — ignored in `deny.toml` because rsa is only pulled via russh.
 - GitHub artifact attestations fail on user-owned private repos; gate `actions/attest-build-provenance` with `if: ${{ !github.event.repository.private }}` until the repo is public.
 - Trust the capacity-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs (`ram_elevated_*`, `ram_swap_*`, `ram_load_*`). Keep VRAM/RAM headroom and the reservation ledger.
 - Capacity-agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml), not Verda or agent payloads.

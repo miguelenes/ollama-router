@@ -8,6 +8,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # rsa crate still has no constant-time patch. Only reached via russh
+    # publickey auth to operator-owned hosts (ed25519 keys in practice).
+    { id = "RUSTSEC-2023-0071", reason = "no patched rsa crate; russh-only SSH to operator-owned hosts" },
+]
 
 [bans]
 multiple-versions = "warn"

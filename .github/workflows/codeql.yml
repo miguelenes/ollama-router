@@ -18,10 +18,11 @@ permissions:
   contents: read
   actions: read
 
-# SARIF upload to the Security tab needs a public repo or GitHub Code Security
-# on a private repo. Without that license, upload fails the job even when
-# analysis succeeds. Set repository variable CODEQL_UPLOAD_ENABLED=true after
-# enabling Code Security, or make the repository public.
+# SARIF + CodeQL database upload need a public repo or GitHub Code Security on
+# a private repo. Without that, analyze still succeeds with upload: never, but
+# default upload-database: true spams API errors ("code scanning is not
+# enabled"). Gate both; set CODEQL_UPLOAD_ENABLED=true after enabling Code
+# Security, or make the repository public.
 env:
   CODEQL_SHOULD_UPLOAD: ${{ vars.CODEQL_UPLOAD_ENABLED == 'true' || !github.event.repository.private }}
 
@@ -68,6 +69,7 @@ jobs:
           category: ${{ matrix.language }}
           output: ${{ runner.temp }}/codeql-sarif
           upload: ${{ env.CODEQL_SHOULD_UPLOAD == 'true' && 'always' || 'never' }}
+          upload-database: ${{ env.CODEQL_SHOULD_UPLOAD == 'true' }}
 
       - name: Upload SARIF artifact
         if: env.CODEQL_SHOULD_UPLOAD != 'true'

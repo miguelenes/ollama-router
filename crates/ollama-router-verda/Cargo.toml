@@ -10,4 +10,17 @@ description = "Verda Cloud NVIDIA spot client, selector, and fleet manager"
 workspace = true
 
 [dependencies]
+base64.workspace = true
+md-5.workspace = true
 ollama-router-core = { path = "../ollama-router-core" }
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

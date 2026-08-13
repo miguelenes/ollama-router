@@ -521,10 +521,17 @@ async fn readyz_503_when_nothing_healthy() {
 }
 
 #[tokio::test]
-async fn stub_pull_returns_503() {
+async fn fleet_pull_succeeds_when_upstream_has_model() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[{"name":"llama3.2:3b"}]}"#);
+    });
     let state = state_from(fleet_config(vec![node(
         "gpu",
-        "http://127.0.0.1:9",
+        &server.base_url(),
         8.0,
         1,
         None,
@@ -535,12 +542,9 @@ async fn stub_pull_returns_503() {
         json_req(Method::POST, "/api/pull", json!({"model": "llama3.2:3b"})),
     )
     .await;
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(status, StatusCode::OK);
     let parsed: Value = serde_json::from_slice(&body).unwrap();
-    assert!(parsed["error"]
-        .as_str()
-        .unwrap()
-        .contains("job orchestrator is not configured"));
+    assert_eq!(parsed["status"], "success");
 }
 
 #[tokio::test]

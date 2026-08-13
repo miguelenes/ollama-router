@@ -40,6 +40,8 @@ RUN apt-get update -qq \
     && mkdir -p /var/lib/ollama-router \
     && chown router:router /var/lib/ollama-router
 COPY --from=builder /app/target/release/ollama-router /usr/local/bin/
+COPY scripts/provision-ollama-gpu.sh /usr/share/ollama-router/provision-ollama-gpu.sh
+RUN chmod 644 /usr/share/ollama-router/provision-ollama-gpu.sh
 USER router
 EXPOSE 11434
 ENV OLLAMA_ROUTER_HOST=0.0.0.0 \
