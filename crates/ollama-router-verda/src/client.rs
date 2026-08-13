@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use reqwest::header::RETRY_AFTER;
 use reqwest::StatusCode;
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
@@ -35,9 +36,9 @@ pub struct VerdaClient {
     http: reqwest::Client,
     base_url: String,
     client_id: String,
-    client_secret: String,
-    access_token: Mutex<Option<String>>,
-    refresh_token: Mutex<Option<String>>,
+    client_secret: SecretString,
+    access_token: Mutex<Option<SecretString>>,
+    refresh_token: Mutex<Option<SecretString>>,
     expires_at: Mutex<Instant>,
     auth_lock: Mutex<()>,
 }
@@ -75,16 +76,12 @@ impl VerdaClient {
             base_url: config.base_url.trim_end_matches('/').to_string(),
             http,
             client_id,
-            client_secret,
+            client_secret: SecretString::from(client_secret),
             access_token: Mutex::new(None),
             refresh_token: Mutex::new(None),
             expires_at: Mutex::new(Instant::now()),
             auth_lock: Mutex::new(()),
         })
-    }
-
-    fn credentials(&self) -> (String, String) {
-        (self.client_id.clone(), self.client_secret.clone())
     }
 
     async fn token_request(&self, payload: Value) -> Result<TokenResponse, VerdaError> {
@@ -114,9 +111,9 @@ impl VerdaClient {
     }
 
     async fn store_token(&self, token: TokenResponse) {
-        *self.access_token.lock().await = Some(token.access_token);
+        *self.access_token.lock().await = Some(SecretString::from(token.access_token));
         if let Some(refresh) = token.refresh_token {
-            *self.refresh_token.lock().await = Some(refresh);
+            *self.refresh_token.lock().await = Some(SecretString::from(refresh));
         }
         let expires_in = token.expires_in.unwrap_or(3600).max(30);
         *self.expires_at.lock().await = Instant::now() + Duration::from_secs(expires_in);
@@ -124,12 +121,11 @@ impl VerdaClient {
     }
 
     async fn authenticate(&self) -> Result<(), VerdaError> {
-        let (client_id, client_secret) = self.credentials();
         let token = self
             .token_request(serde_json::json!({
                 "grant_type": "client_credentials",
-                "client_id": client_id,
-                "client_secret": client_secret,
+                "client_id": self.client_id,
+                "client_secret": self.client_secret.expose_secret(),
             }))
             .await?;
         self.store_token(token).await;
@@ -137,9 +133,15 @@ impl VerdaClient {
     }
 
     async fn refresh(&self) -> Result<(), VerdaError> {
-        let refresh = self.refresh_token.lock().await.clone().ok_or_else(|| {
-            VerdaError::Auth("Verda refresh failed: no refresh_token held".into())
-        })?;
+        let refresh = self
+            .refresh_token
+            .lock()
+            .await
+            .as_ref()
+            .map(|t| t.expose_secret().to_string())
+            .ok_or_else(|| {
+                VerdaError::Auth("Verda refresh failed: no refresh_token held".into())
+            })?;
         let token = self
             .token_request(serde_json::json!({
                 "grant_type": "refresh_token",
@@ -176,7 +178,13 @@ impl VerdaClient {
         let mut attempt = 0u32;
         let mut refreshed_once = false;
         loop {
-            let token = self.access_token.lock().await.clone().unwrap_or_default();
+            let token = self
+                .access_token
+                .lock()
+                .await
+                .as_ref()
+                .map(|t| t.expose_secret().to_string())
+                .unwrap_or_default();
             let mut builder = self.http.request(method.clone(), &url).bearer_auth(&token);
             if let Some(body) = &json {
                 builder = builder.json(body);

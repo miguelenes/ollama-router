@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
@@ -9,7 +10,7 @@ use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{build_upstream_client, make_app, AppState};
 use ollama_router::provision::{ProvisionOrchestrator, ProvisionWatcher};
 use ollama_router::warm::run as run_warm;
-use ollama_router_core::cloud::DemandScale;
+use ollama_router_core::cloud::{should_destroy_on_shutdown, DemandScale};
 use ollama_router_core::fleet::{normalize_model, FleetState, Registry};
 use ollama_router_core::jobs::{Job, JobStatus, PullOrchestrator};
 use ollama_router_core::load_config;
@@ -155,10 +156,11 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
         tokio::spawn(watcher.run(auto, poll));
     }
     spawn_sighup_reloader(state.clone());
-    let verda_shutdown = state
-        .verda
-        .clone()
-        .filter(|_| state.config.verda.destroy_on_shutdown);
+    let started_at = Instant::now();
+    let destroy_on_shutdown = state.config.verda.destroy_on_shutdown;
+    let shutdown_grace =
+        Duration::from_secs_f64(state.config.verda.idle_grace_after_create_seconds.max(0.0));
+    let verda_shutdown = state.verda.clone();
     if let Some(mgr) = state.verda.clone() {
         if state.config.verda.ensure_on_startup && !state.config.verda.auto_scale {
             let startup = mgr.clone();
@@ -180,8 +182,20 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
         .await
         .context("server")?;
     if let Some(mgr) = verda_shutdown {
-        tracing::info!("verda_destroy_on_shutdown");
-        let _ = mgr.destroy_all_owned().await;
+        let uptime = started_at.elapsed();
+        if should_destroy_on_shutdown(destroy_on_shutdown, uptime, shutdown_grace) {
+            tracing::info!(
+                uptime_seconds = uptime.as_secs_f64(),
+                "verda_destroy_on_shutdown"
+            );
+            let _ = mgr.destroy_all_owned().await;
+        } else if destroy_on_shutdown {
+            tracing::info!(
+                uptime_seconds = uptime.as_secs_f64(),
+                grace_seconds = shutdown_grace.as_secs_f64(),
+                "verda_destroy_on_shutdown_skipped"
+            );
+        }
     }
     Ok(())
 }

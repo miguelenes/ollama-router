@@ -176,6 +176,7 @@ pub fn pick_cheapest_available_spot_gpu(
 mod tests {
     use super::*;
     use crate::types::{GpuMemorySpec, GpuSpec};
+    use ollama_router_core::config::SelectionStrategy;
 
     fn nvidia(ty: &str, price: &str, vram: f64, gpus: u32) -> InstanceType {
         InstanceType {
@@ -246,6 +247,54 @@ mod tests {
         let ranked = rank_candidates(&availability, &types, &config);
         assert_eq!(ranked.len(), 1);
         assert_eq!(ranked[0].instance_type, "ok");
+    }
+
+    #[test]
+    fn cheapest_larger_gpu_beats_expensive_smaller() {
+        let config = VerdaConfig::default();
+        let types = [
+            nvidia("small", "0.50", 24.0, 1),
+            nvidia("large", "0.20", 80.0, 1),
+        ];
+        let availability = vec![avail("HEL", &["small", "large"])];
+        let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
+        assert_eq!(pick.instance_type, "large");
+    }
+
+    #[test]
+    fn best_value_ranks_by_price_per_vram() {
+        let config = VerdaConfig {
+            selection_strategy: SelectionStrategy::BestValue,
+            ..VerdaConfig::default()
+        };
+        let types = [
+            nvidia("small", "0.40", 24.0, 1),
+            nvidia("large", "0.80", 80.0, 1),
+        ];
+        let availability = vec![avail("HEL", &["small", "large"])];
+        let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
+        assert_eq!(pick.instance_type, "large");
+        let cheapest_config = VerdaConfig::default();
+        let cheap =
+            pick_cheapest_available_spot_gpu(&availability, &types, &cheapest_config).unwrap();
+        assert_eq!(cheap.instance_type, "small");
+    }
+
+    #[test]
+    fn best_value_unknown_vram_sorts_last() {
+        let config = VerdaConfig {
+            selection_strategy: SelectionStrategy::BestValue,
+            min_vram_gb: 0.0,
+            max_vram_gb: None,
+            ..VerdaConfig::default()
+        };
+        let mut unknown = nvidia("mystery", "0.05", 24.0, 1);
+        unknown.gpu_memory = None;
+        let types = [nvidia("known", "0.40", 24.0, 1), unknown];
+        let availability = vec![avail("HEL", &["known", "mystery"])];
+        let ranked = rank_candidates(&availability, &types, &config);
+        assert_eq!(ranked[0].instance_type, "known");
+        assert_eq!(ranked[1].instance_type, "mystery");
     }
 }
 

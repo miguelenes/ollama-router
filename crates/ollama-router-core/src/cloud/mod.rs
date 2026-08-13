@@ -1,8 +1,8 @@
-//! Idle reconcile (`CloudFleetManager`, Verda-only).
+//! Idle reconcile and demand scale-up (Verda-only).
 //!
-//! Env permanent hosts are never destroyed. Verda teardown uses `delete_permanently`.
-//! Demand scale-up is fire-and-forget from the proxy; this module owns the trait
-//! and idle-candidate selection.
+//! fleet.yaml permanent hosts are never destroyed. Verda teardown uses
+//! `delete_permanently`. Demand scale-up is fire-and-forget from the proxy;
+//! this module owns the trait and idle-candidate selection.
 
 use std::time::{Duration, Instant};
 
@@ -14,7 +14,7 @@ pub trait DemandScale: Send + Sync {
     fn request_scale_up(&self, reason: RoutingError);
 }
 
-/// No-op until the Verda manager lands.
+/// No-op when Verda is disabled.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopDemandScale;
 
@@ -106,6 +106,14 @@ pub fn idle_scale_down_candidates(
         .collect()
 }
 
+/// Crash-loop guard for `destroy_on_shutdown`.
+///
+/// Python always deleted owned spots on SIGTERM. Skip when process uptime is
+/// still inside create-grace so a boot loop cannot mass-destroy.
+pub fn should_destroy_on_shutdown(enabled: bool, uptime: Duration, grace: Duration) -> bool {
+    enabled && uptime >= grace
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,5 +181,41 @@ mod tests {
             min_instances: 0,
         };
         assert!(idle_scale_down_candidates(&nodes, now, policy).is_empty());
+    }
+
+    #[test]
+    fn restart_without_client_activity_uses_registered_at() {
+        let registered = Instant::now();
+        let now = registered + Duration::from_secs(60);
+        let nodes = [view("verda-a", NodeOrigin::Verda, 0, registered, None)];
+        let policy = IdlePolicy {
+            idle_timeout: Duration::from_secs(900),
+            grace_after_create: Duration::from_secs(300),
+            min_instances: 0,
+        };
+        assert!(
+            idle_scale_down_candidates(&nodes, now, policy).is_empty(),
+            "registered_at fallback must not mass-destroy after a router restart"
+        );
+    }
+
+    #[test]
+    fn should_destroy_on_shutdown_skips_inside_grace() {
+        let grace = Duration::from_secs(300);
+        assert!(!should_destroy_on_shutdown(
+            true,
+            Duration::from_secs(10),
+            grace
+        ));
+        assert!(should_destroy_on_shutdown(
+            true,
+            Duration::from_secs(300),
+            grace
+        ));
+        assert!(!should_destroy_on_shutdown(
+            false,
+            Duration::from_secs(10_000),
+            grace
+        ));
     }
 }

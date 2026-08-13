@@ -53,12 +53,27 @@ FleetState ownership so reconcile can retry the still-billed resource.
 
 ## Demand-driven scale-up
 
-When idle teardown leaves no healthy capacity, the next client miss triggers
-coalesced async Verda `ensure` (never blocks the client). The client receives
+When idle teardown leaves no healthy capacity, the next client miss
+(`no_healthy_nodes` / `no_nodes_configured` / `all_nodes_saturated` /
+`insufficient_capacity`) triggers coalesced async Verda **`create_additional`**
+(never `ensure`, never blocks the client). The client receives
 **503 + `Retry-After: 30`**. Cold create may take minutes (provision + model pull).
+
+Demand skips when `auto_scale` is false or owned `verda-*` count is already at
+`auto_scale_max_instances` (`0` means unlimited).
 
 `create_additional` is scale-out: it must not adopt an existing running resource.
 `ensure(create=true)` stays adopt-first for startup and admin.
+
+## Shutdown
+
+`destroy_on_shutdown` defaults true. Skip destroy when process uptime is still
+inside `idle_grace_after_create_seconds` so a crash-loop cannot mass-delete spots.
+
+## v1 replica limit
+
+One router process per FleetState file. Two replicas sharing the same state path
+can double-create spots. The file lock is same-host only. Do not add Redis.
 
 ## Config knobs (Verda)
 

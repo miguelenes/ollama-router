@@ -8,7 +8,9 @@ use ollama_router_core::cloud::{
     idle_scale_down_candidates, DemandScale, IdleNodeView, IdlePolicy,
 };
 use ollama_router_core::config::{Capacity, NodeConfig, NodeSshConfig, OsEnv, RouterConfig};
-use ollama_router_core::fleet::{FleetState, NodeId, Registry, VerdaInstanceId, VerdaNodePersist};
+use ollama_router_core::fleet::{
+    FleetState, NodeId, NodeOrigin, Registry, VerdaInstanceId, VerdaNodePersist,
+};
 use ollama_router_core::provision::{
     provision_config_from_defaults, NodeProvisioner, ProvisionOpts, ProvisionStatus,
 };
@@ -83,7 +85,10 @@ impl VerdaManager {
 
     fn is_owned(&self, instance: &Instance) -> bool {
         let tags = instance.tag_map();
-        if tags.get("managed_by").copied() != Some(MANAGED_BY) {
+        let Some(managed) = tags.get("managed_by").copied() else {
+            return false;
+        };
+        if managed.starts_with("illumination-") || managed != MANAGED_BY {
             return false;
         }
         let rid = self.router_id();
@@ -843,19 +848,45 @@ impl VerdaManager {
 }
 
 impl DemandScale for VerdaManager {
-    fn request_scale_up(&self, _reason: RoutingError) {
+    fn request_scale_up(&self, reason: RoutingError) {
+        let reason_code = reason.as_reason_code();
+        if !self.inner.config.verda.auto_scale {
+            tracing::info!(reason = reason_code, "verda_demand_scale_up_skipped");
+            return;
+        }
+        let max_n = self.inner.config.verda.auto_scale_max_instances;
+        if max_n > 0 {
+            let owned = self
+                .inner
+                .registry
+                .snapshot()
+                .iter()
+                .filter(|n| n.origin == NodeOrigin::Verda)
+                .count() as u32;
+            if owned >= max_n {
+                tracing::info!(
+                    reason = reason_code,
+                    owned_count = owned,
+                    max_n,
+                    "verda_demand_scale_up_capped"
+                );
+                return;
+            }
+        }
         let mut slot = match self.inner.demand.lock() {
             Ok(g) => g,
             Err(_) => return,
         };
         if slot.as_ref().is_some_and(|h| !h.is_finished()) {
+            tracing::info!(reason = reason_code, "verda_demand_scale_up_coalesced");
             return;
         }
         let inner = self.inner.clone();
         *slot = Some(tokio::spawn(async move {
             let mgr = VerdaManager { inner };
+            tracing::info!(reason = reason_code, "verda_demand_scale_up");
             if let Err(err) = mgr.create_additional().await {
-                tracing::error!(error = %err, "verda_demand_ensure_failed");
+                tracing::error!(reason = reason_code, error = %err, "verda_demand_ensure_failed");
             }
         }));
     }

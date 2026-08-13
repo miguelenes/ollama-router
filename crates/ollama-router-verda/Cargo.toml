@@ -14,6 +14,7 @@ base64.workspace = true
 md-5.workspace = true
 ollama-router-core = { path = "../ollama-router-core" }
 reqwest.workspace = true
+secrecy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

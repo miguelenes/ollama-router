@@ -44,7 +44,7 @@ Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-
 - **fleet.yaml inventory** — `OLLAMA_ROUTER_FLEET` + durable FleetState + Verda. Tunables YAML is tunables only.
 - **Verda spots** — cheapest, then smallest GPU inside an inclusive 8–80 GiB VRAM window. Public `:11434` is never healthy.
 - **Idle teardown** — router-owned. Only proxied client forwards reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count. **Never destroy fleet.yaml hosts.**
-- **Capacity miss** — coalesced async Verda `ensure`. The client gets **503 + `Retry-After`**, never a blocked provision.
+- **Capacity miss** — coalesced async Verda `create_additional` (not adopt-first `ensure`). The client gets **503 + `Retry-After`**, never a blocked provision. **v1: one router replica** — two processes sharing FleetState can double-create; do not add Redis.
 
 The sibling capacity agent on `:11436` is not this crate. GiB = bytes / `1024³`.
 

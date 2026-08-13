@@ -14,8 +14,8 @@ pub use capacity::{
     BYTES_PER_GIB,
 };
 pub use cloud::{
-    idle_scale_down_candidates, DemandScale, IdleCandidate, IdleNodeView, IdlePolicy,
-    NoopDemandScale,
+    idle_scale_down_candidates, should_destroy_on_shutdown, DemandScale, IdleCandidate,
+    IdleNodeView, IdlePolicy, NoopDemandScale,
 };
 pub use config::{
     hydrate_node_urls, load_config, load_config_from, parse_yaml, ConfigError, EnvSource, OsEnv,

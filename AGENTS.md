@@ -20,9 +20,11 @@ services, Thunder, or RunPod.
   healthy. There is no public-proxy exception.
 - **Idle timer = client forwards only.** `last_client_request_at` is written solely
   from `inflight_inc` on generate / chat / embed. Health, `/api/ps`, capacity
-  probes, admin, and the warm-keeper do not count. After idle destroy: async Verda
-  `ensure`; the client gets **503 + `Retry-After`**. **Never destroy fleet.yaml
-  hosts.** Destroy Verda instances with `delete_permanently`.
+  probes, admin, and the warm-keeper do not count. After idle destroy: coalesced
+  async Verda `create_additional`; the client gets **503 + `Retry-After`**. **Never
+  destroy fleet.yaml hosts.** Destroy Verda instances with `delete_permanently`.
+- **One router replica.** Two processes sharing one FleetState file can double-create
+  Verda spots. The file lock is same-host only. Do not add Redis or run HA replicas.
 - **Capacity agent is a sibling, not this crate.** Probe
   `GET http://{ollama-host}:11436/v1/capacity` and `/v1/pressure`. Soft-fail.
   GiB = bytes / `1024³`. Do not reimplement the agent here.
