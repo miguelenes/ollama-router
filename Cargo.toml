@@ -16,7 +16,7 @@ license = "proprietary"
 anyhow = "1"
 axum = { version = "0.8", default-features = false, features = ["tokio", "http1", "json"] }
 clap = { version = "4", features = ["derive", "env"] }
-fs4 = "0.13"
+fs4 = "1.1"
 http-body-util = "0.1"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
