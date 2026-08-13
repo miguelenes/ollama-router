@@ -177,7 +177,7 @@ Release artifacts (`.github/workflows/release-agent.yml`; locally `task agent:re
 
 | OS | Install path | Portable |
 | --- | --- | --- |
-| Linux amd64/arm64 | `ollama-node-agent_<ver>_<arch>.deb` (`apt install`; gnu, glibc ≥ bookworm) | musl `ollama-node-agent-linux-<arch>.tar.gz` then `sudo ./ollama-node-agent setup` |
+| Linux amd64/arm64 | `ollama-node-agent_<ver>_<arch>.deb` (`apt install`; gnu, glibc ≥ bookworm) | musl static-pie `ollama-node-agent-linux-<arch>.tar.gz` then `sudo ./ollama-node-agent setup` |
 | macOS amd64/arm64 | `ollama-node-agent-<ver>-darwin-<arch>.pkg` | unsigned zip + `sudo ollama-node-agent setup` |
 | Windows amd64 | `ollama-node-agent-<ver>-windows-amd64.msi` (LocalSystem service) | `ollama-node-agent-windows-amd64.exe` then elevated `setup` |
 

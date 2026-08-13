@@ -29,16 +29,21 @@ mkdir -p "$ROOT/.local/cargo-home" "$ROOT/$OUTDIR"
 run_in_image() {
   local cargo_target_dir=$1
   shift
-  mkdir -p "$ROOT/$cargo_target_dir"
+  mkdir -p "$ROOT/$cargo_target_dir" "$ROOT/.local/rustup"
+  local -a env_args=(
+    -e HOME=/tmp
+    -e CARGO_HOME=/src/.local/cargo-home
+    -e RUSTUP_HOME=/src/.local/rustup
+    -e CARGO_TARGET_DIR="/src/${cargo_target_dir}"
+  )
+  # Musl portable builds: fully static-pie via rustc self-contained CRT.
+  # Do not set musl-gcc as linker — that + -static produces a broken binary.
+  if [[ -n "${RUSTFLAGS:-}" ]]; then
+    env_args+=(-e "RUSTFLAGS=${RUSTFLAGS}")
+  fi
   docker run --rm \
     --user "$(id -u):$(id -g)" \
-    -e HOME=/tmp \
-    -e CARGO_HOME=/src/.local/cargo-home \
-    -e CARGO_TARGET_DIR="/src/${cargo_target_dir}" \
-    -e CC_x86_64_unknown_linux_musl=musl-gcc \
-    -e CC_aarch64_unknown_linux_musl=musl-gcc \
-    -e CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
-    -e CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc \
+    "${env_args[@]}" \
     -v "$ROOT":/src \
     -w /src \
     "$IMAGE" \
@@ -47,8 +52,13 @@ run_in_image() {
 
 case "$MODE" in
   musl)
+    # rust-toolchain.toml remounts a fresh toolchain into RUSTUP_HOME; re-add
+    # the musl target. crt-static + link-self-contained so the tarball runs on
+    # glibc hosts (pack scripts invoke setup --print-unit).
+    RUSTFLAGS="-C target-feature=+crt-static -C link-self-contained=yes" \
     run_in_image .local/target-agent-linux-musl \
       bash -euo pipefail -c "
+        rustup target add ${MUSL_TARGET}
         cargo build --release --locked -p ollama-node-agent --target ${MUSL_TARGET}
         bash crates/ollama-node-agent/packaging/linux/pack-tarball.sh \
           .local/target-agent-linux-musl/${MUSL_TARGET}/release/ollama-node-agent \

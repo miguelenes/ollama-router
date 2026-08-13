@@ -75,10 +75,9 @@ jobs:
 
       - name: cargo build musl
         env:
-          CC_x86_64_unknown_linux_musl: musl-gcc
-          CC_aarch64_unknown_linux_musl: musl-gcc
-          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          # Fully static-pie so pack-tarball can run setup --print-unit on glibc runners.
+          # Do not force musl-gcc as linker (breaks with -static).
+          RUSTFLAGS: "-C target-feature=+crt-static -C link-self-contained=yes"
         run: cargo build --release --locked -p ollama-node-agent --target ${{ matrix.target }}
 
       - name: Pack tarball

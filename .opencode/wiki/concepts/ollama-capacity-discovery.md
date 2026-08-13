@@ -84,14 +84,15 @@ handoff exists.
 Release workflow [`.github/workflows/release-agent.yml`](../../../.github/workflows/release-agent.yml)
 (not `ci.yml`) builds OS-native daemon artifacts. Local: `task agent:release`
 (plus `agent:release:linux` / `:deb` / `:macos` / `:windows`). Linux local
-recipes run in Docker `rust:1.97-slim-bookworm` (musl-tools in that image for
-the tarball; gnu `.deb` is bookworm glibc). GHA compiles on native
+recipes run in Docker `rust:1.97-slim-bookworm` (musl static-pie tarball via
+`RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes`; gnu `.deb`
+is bookworm glibc). GHA compiles on native
 `ubuntu-latest` / `ubuntu-24.04-arm` and packages in the same job; the `.deb`
 job uses a `rust:1.97-slim-bookworm` container. GHA never installs Task.
 
 | Artifact | Role |
 | --- | --- |
-| `ollama-node-agent-linux-<arch>.tar.gz` | musl-static binary + unit + README + optional OpenRC contrib; installer is `sudo ./ollama-node-agent setup` |
+| `ollama-node-agent-linux-<arch>.tar.gz` | musl static-pie binary + unit + README + optional OpenRC contrib; installer is `sudo ./ollama-node-agent setup` |
 | `ollama-node-agent_<ver>_<arch>.deb` | gnu (glibc ≥ bookworm); unit in `/usr/lib/systemd/system`; postinst enables the service when `/run/systemd/system` exists |
 | `ollama-node-agent-<ver>-darwin-<arch>.pkg` | binary + LaunchDaemon `com.ollama.node-agent`; postinstall `launchctl bootstrap` |
 | `ollama-node-agent-darwin-<arch>.zip` | unsigned binary for source-style `setup` (not the install path) |

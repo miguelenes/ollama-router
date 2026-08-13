@@ -1,7 +1,7 @@
 # Portable ollama-node-agent (Linux)
 
-Musl-static binary for any Linux (no dpkg required). Extract and install with
-the binary's own `setup` (elevated, idempotent):
+Musl **static-pie** binary for any Linux (no dpkg/rpm, no glibc version pin). Extract
+and install with the binary's own `setup` (elevated, idempotent):
 
 ```bash
 tar -xzf ollama-node-agent-linux-<arch>.tar.gz
