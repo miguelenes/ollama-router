@@ -181,3 +181,4 @@
 {"path":"ollama-router/.github/workflows/release-agent.yml","sizeBytes":1711,"mtimeMs":1786638952231.1,"sha256":"6f1ec401bf19e42f877433d14160fb4b24c9f95c561cfd0921047263e80e1f2e"}
 {"path":"ollama-router/crates/ollama-node-agent/config.docker.yaml","sizeBytes":239,"mtimeMs":1786639042609.134,"sha256":"b40160f1317363fb08ed2f7f32587dedf5a86b56b0caba929ac4722b7e2540c8"}
 {"path":"ollama-router/Dockerfile.agent","sizeBytes":1429,"mtimeMs":1786638952126.0095,"sha256":"9e0555bdefca815ce59afe98dc3f20ed2957b5ee5f9263cf7aac45c7d577e33b"}
+{"path":"ollama-router/.cursor/settings.json","sizeBytes":78,"mtimeMs":1786639773081.226,"sha256":"7830ccce27688a00ec3571aecd626c74be4df9bc55947679e0b945dd655eb415"}
