@@ -7,8 +7,8 @@
 </p>
 
 <p align="center">
-  <strong>CPU-only Ollama-compatible fleet proxy.</strong><br>
-  One listen URL. Env hosts plus optional Verda Tailscale GPUs.
+  <strong>Mixed CPU+GPU Ollama-compatible fleet proxy.</strong><br>
+  The router process needs no GPU. One listen URL. fleet.yaml hosts plus optional Verda Tailscale GPUs.
 </p>
 
 <p align="center">
@@ -37,13 +37,13 @@
 
 ## What it is
 
-Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-balances generate, chat, and embed across a fleet you already run, then optionally bursts onto Verda NVIDIA **spot** GPUs on Tailscale.
+Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-balances generate, chat, and embed across a mixed CPU+GPU fleet you already run (the router process itself needs **no GPU**), then optionally bursts onto Verda NVIDIA **spot** GPUs on Tailscale.
 
 - **Ollama surface** — `POST /api/generate`, `/api/chat`, `/api/embed` (plus `/api/embeddings` rewritten to `/api/embed` for Ollama ≤0.32). Aggregated `GET /api/tags`. NDJSON streaming.
 - **Utilization WLC** — rank by `inflight / capacity`, then RAM pressure, then class preference (embed / small / medium / large). Saturated nodes are never a fallback.
-- **Env-first inventory** — `OLLAMA_HOST_NN_*` + durable FleetState + Verda. YAML is tunables only.
+- **fleet.yaml inventory** — `OLLAMA_ROUTER_FLEET` + durable FleetState + Verda. Tunables YAML is tunables only.
 - **Verda spots** — cheapest, then smallest GPU inside an inclusive 8–80 GiB VRAM window. Public `:11434` is never healthy.
-- **Idle teardown** — router-owned. Only proxied client forwards reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count.
+- **Idle teardown** — router-owned. Only proxied client forwards reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count. **Never destroy fleet.yaml hosts.**
 - **Capacity miss** — coalesced async Verda `ensure`. The client gets **503 + `Retry-After`**, never a blocked provision.
 
 The sibling capacity agent on `:11436` is not this crate. GiB = bytes / `1024³`.
@@ -53,9 +53,9 @@ The sibling capacity agent on `:11436` is not this crate. GiB = bytes / `1024³`
 ```mermaid
 flowchart LR
   clients[Clients] --> router["ollama-router :11434"]
-  router --> envHosts[OLLAMA_HOST_NN]
+  router --> fleetFile[fleet.yaml]
   router --> verda[Verda spots]
-  envHosts --> agent["capacity-agent :11436"]
+  fleetFile --> agent["capacity-agent :11436"]
   verda --> agent
 ```
 
@@ -63,23 +63,23 @@ Cloud Ollama URLs are Tailscale-only. Register a node after OpenSSH and `/api/ta
 
 ## Inventory
 
-Fleet membership is **not** a YAML list.
+Fleet membership is **not** a tunables YAML list. Point `OLLAMA_ROUTER_FLEET` at a GitOps `fleet.yaml` (default `/etc/ollama-router/fleet.yaml`).
 
 | Source | Role |
 | --- | --- |
-| `OLLAMA_HOST_NN_*` | Primary static hosts (`01`–`99`) |
+| `OLLAMA_ROUTER_FLEET` / `fleet.yaml` | Permanent hosts (CPU and GPU). Never destroyed on idle. |
 | FleetState | Durable Tailscale URLs and Verda metadata |
-| Verda manager | Dynamic spot GPUs |
-| `OLLAMA_ROUTER_NODES` | Compact test/dev override only |
+| Verda manager | Dynamic spot GPUs (not listed in fleet.yaml) |
 
-Point `OLLAMA_ROUTER_CONFIG` at a thin overlay such as [`config.overlay.example.yaml`](config.overlay.example.yaml) to override committed tunables in `router.defaults.yaml`. A top-level `nodes:` key is a **hard config error**.
+Point `OLLAMA_ROUTER_CONFIG` at a thin overlay such as [`config.overlay.example.yaml`](config.overlay.example.yaml) to override committed tunables in `router.defaults.yaml`. A top-level `nodes:` key in that overlay is a **hard config error**.
 
 | Knob | Default |
 | --- | --- |
 | `OLLAMA_ROUTER_HOST` / `OLLAMA_ROUTER_PORT` | `0.0.0.0` / `11434` |
+| `OLLAMA_ROUTER_FLEET` | `/etc/ollama-router/fleet.yaml` |
 | `OLLAMA_ROUTER_ADMIN_TOKEN` | unset → admin API **403** (no default secret) |
 
-Verda stays **off** until you enable it. Credentials belong in process env, never in YAML.
+Verda stays **off** until you enable it. Credentials belong in process env, never in YAML. Cloud instance tag `managed_by=ollama-router`.
 
 ## Quick start
 
@@ -90,11 +90,11 @@ task docker
 docker run --rm -p 11434:11434 ollama-router:local
 curl -fsS http://127.0.0.1:11434/healthz
 # {"status":"ok","version":"0.1.0"}
+
+task compose:up
+curl -fsS http://127.0.0.1:11435/healthz
+# mixed CPU+GPU mocks on the private compose network; host port is 11435
 ```
-
-Equivalent: `docker build -t ollama-router:local .`
-
-When this image is published next to a Compose stack, map the host as `${FORWARD_OLLAMA_ROUTER_PORT:-11435}:11434` so it does not collide with host-installed Ollama. In-network clients keep `http://ollama-router:11434`. This repo does not edit that Compose file.
 
 ## Develop
 
@@ -110,9 +110,9 @@ cargo test --workspace --locked
 - rustls only (`deny.toml` bans `openssl` / `native-tls`)
 - tracing JSON — never request bodies, prompts, embeddings, or tokens
 
-CLI: `serve`, `ensure`, `delete`, `nodes`, `provision`. **`serve` is implemented.** The rest parse and exit 2 until the fleet proxy lands.
+CLI: `serve`, `ensure`, `delete`, `nodes`, `provision`. **`serve` is implemented** (proxy, health probes, SIGHUP fleet reload). The rest parse and exit 2 until those slices land.
 
-Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (config, fleet, routing, capacity, jobs), `crates/ollama-router-verda` (OAuth2 + spot manager).
+Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (config, fleet, routing, capacity, jobs), `crates/ollama-router-verda` (OAuth2 + spot manager), `crates/ollama-mock` (compose stand-in).
 
 ## Sensitivity
 

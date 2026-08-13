@@ -306,7 +306,7 @@ pub fn rank_nodes(
     let all_ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
     let healthy: Vec<&NodeSnapshot> = nodes
         .iter()
-        .filter(|n| n.healthy && !excluded_node_ids.contains(&n.id))
+        .filter(|n| n.healthy && !n.draining && !excluded_node_ids.contains(&n.id))
         .collect();
     if healthy.is_empty() {
         return RankOutcome {

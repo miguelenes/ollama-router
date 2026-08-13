@@ -76,7 +76,7 @@ async fn healthz() -> Json<HealthResponse> {
 
 async fn readyz(State(state): State<AppState>) -> Response {
     let snap = state.registry.snapshot();
-    let healthy: Vec<_> = snap.iter().filter(|n| n.healthy).collect();
+    let healthy: Vec<_> = snap.iter().filter(|n| n.healthy && !n.draining).collect();
     if healthy.is_empty() {
         return json_status(
             StatusCode::SERVICE_UNAVAILABLE,

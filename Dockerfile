@@ -1,17 +1,29 @@
-# Multi-stage image for the Ollama fleet proxy.
-# Build:  docker build -t ollama-router:local .
-# Run:    docker run --rm -p 11434:11434 ollama-router:local
+# Multi-stage image for the Ollama fleet proxy and the compose mock.
+# Default target is `router` (last stage):
+#   docker build -t ollama-router:local .
+# Mock:
+#   docker build --target mock -t ollama-mock:local .
 #
-# Listen :11434 inside the container. Illumination Sail publishes host 11435
-# (`FORWARD_OLLAMA_ROUTER_PORT`, default 11435) — do not collide with host Ollama.
+# Listen :11434 inside the container. Compose publishes host 11435 → 11434.
 
 FROM rust:1.97-slim-bookworm AS builder
 WORKDIR /app
 COPY rust-toolchain.toml Cargo.toml Cargo.lock ./
 COPY crates ./crates
-RUN cargo build --release --bin ollama-router
+RUN cargo build --release --bin ollama-router --bin ollama-mock
 
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim AS mock
+RUN apt-get update -qq \
+    && apt-get install -y -qq --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -m -u 1000 mock
+COPY --from=builder /app/target/release/ollama-mock /usr/local/bin/
+USER mock
+EXPOSE 11434
+ENV OLLAMA_MOCK_PORT=11434
+CMD ["ollama-mock"]
+
+FROM debian:bookworm-slim AS router
 RUN apt-get update -qq \
     && apt-get install -y -qq --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \

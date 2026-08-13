@@ -1,12 +1,13 @@
 # ollama-router — versioned tunables (committed).
-# Fleet membership comes from OLLAMA_HOST_NN_* env vars, not from this file.
+# Fleet membership comes from OLLAMA_ROUTER_FLEET (fleet.yaml), not from this file.
+# A top-level `nodes:` key here is a hard config error.
 #
 # To override a few knobs locally set OLLAMA_ROUTER_CONFIG to a thin overlay
-# YAML or use OLLAMA_ROUTER_* / VERDA_* env vars.
+# YAML or use OLLAMA_ROUTER_* / VERDA_* env vars. Process env is secrets and
+# listen/admin knobs only — never membership.
 
 policy:
   sticky_affinity: false
-  auto_pull_on_miss: false
 
   # Live-state routing (requires health.ps_probe_enabled: true).
   prefer_warm_models: true
@@ -20,14 +21,7 @@ policy:
   embed_reserve_vram_gb: 0
   admission_wait_ms: 0
 
-  # RAM pressure routing.
-  ram_elevated_available_ratio: 0.25
-  ram_critical_available_ratio: 0.12
-  ram_elevated_available_gb: 4.0
-  ram_critical_available_gb: 2.0
-  ram_swap_elevated_gb: 0.5
-  ram_load_elevated_per_core: 1.5
-  ram_load_critical_per_core: 3.0
+  # RAM pressure routing (trust capacity-agent pressure_level; no classify knobs).
   ram_headroom: 0.85
   ram_elevated_score_penalty: 2.0
   ram_critical_score_penalty: 8.0
@@ -43,10 +37,8 @@ policy:
   retry_max_attempts: 3
   retry_on_status: [429, 503]
   overload_wait_ms: 0
-  pull_miss_retry_after_seconds: 10
-  auto_pull_wait_seconds: 0
-  # Dangerous: single-node /api/pull|/api/delete passthrough (prefer admin APIs).
-  unsafe_single_node_mutate: false
+  saturated_retry_after_seconds: 30
+  provision_retry_after_seconds: 30
 
   # Model warm-keeper
   model_warm_enabled: true
@@ -60,6 +52,8 @@ health:
   probe_timeout_seconds: 3
   fail_streak_threshold: 3
   overload_fail_credit: 1
+  probe_jitter_ratio: 0.2
+  max_concurrent_probes: 8
   ps_probe_enabled: true
   # Node-local capacity discovery (soft-fail, never affects health).
   capacity_probe_enabled: true
@@ -118,7 +112,7 @@ provision_defaults:
 
 # Verda Cloud spot GPU provisioning — DISABLED by default.
 # Credentials are boot/infra secrets (VERDA_CLIENT_ID / VERDA_CLIENT_SECRET);
-# never put secrets in this file.
+# never put secrets in this file. Cloud instance tag managed_by=ollama-router.
 verda:
   enabled: false
   base_url: https://api.verda.com
@@ -134,7 +128,7 @@ verda:
   destroy_on_shutdown: true
   router_id_env: OLLAMA_ROUTER_ID
   ssh_key_id: null
-  ssh_key_name: illumination-ollama-router
+  ssh_key_name: ollama-router
   ssh_public_key_file: null
   ssh_private_key_file: null
   preferred_image_globs:

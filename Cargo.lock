@@ -972,6 +972,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ollama-mock"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "ollama-router"
 version = "0.1.0"
 dependencies = [
@@ -992,6 +1002,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "url",
 ]
 
 [[package]]

@@ -17,7 +17,7 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `GET /api/tags` | Aggregated **union** of healthy nodes' tags. Not a single-node passthrough. |
-| `POST /api/pull`, `/api/delete` | Fleet orchestrator unless `policy.unsafe_single_node_mutate`. Prefer admin. |
+| `POST /api/pull`, `/api/delete` | Always fleet orchestrator (stub → 503 until jobs land). Prefer admin. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
 | `GET /metrics` | Prometheus. |

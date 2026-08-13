@@ -1,0 +1,10 @@
+version: 1
+nodes:
+  - id: cpu
+    url: http://mock-cpu:11434
+    labels: [cpu]
+  - id: gpu
+    url: http://mock-gpu:11434
+    labels: [gpu]
+    capacity:
+      vram_gb: 24

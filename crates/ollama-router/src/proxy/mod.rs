@@ -94,14 +94,12 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
         }
     }
 
-    if !state.config.policy.unsafe_single_node_mutate {
-        let clean = path.trim_end_matches('/');
-        if clean == "/api/pull" && method == Method::POST {
-            return fleet_pull(state, model.as_deref()).await;
-        }
-        if clean == "/api/delete" && method == Method::DELETE {
-            return fleet_delete(state, model.as_deref()).await;
-        }
+    let clean = path.trim_end_matches('/');
+    if clean == "/api/pull" && method == Method::POST {
+        return fleet_pull(state, model.as_deref()).await;
+    }
+    if clean == "/api/delete" && method == Method::DELETE {
+        return fleet_delete(state, model.as_deref()).await;
     }
 
     let request_class = classify(&path, model.as_deref(), &state.config.policy);
@@ -179,10 +177,7 @@ async fn proxy_ranked(
         if reason.requests_demand_scale_up() {
             DemandScale::request_scale_up(state.demand.as_ref(), reason);
         }
-        if reason == RoutingError::ModelMissing && model.is_some() && policy.auto_pull_on_miss {
-            return auto_pull_miss(state, model.as_deref().unwrap_or(""), request_class).await;
-        }
-        return no_candidate_response(reason, model.as_deref(), request_class);
+        return no_candidate_response(reason, model.as_deref(), request_class, policy);
     }
 
     let mut ranked = outcome.ranked;
@@ -263,7 +258,7 @@ async fn proxy_ranked(
                         RoutingError::Saturated.as_reason_code()
                     )
                 }),
-                Some(30),
+                Some(policy.saturated_retry_after_seconds),
             )
         }
         Some(ForwardError::Retryable { reason, message }) => upstream_unavailable(reason, &message),
@@ -715,12 +710,12 @@ async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
                     RoutingError::Capacity.as_reason_code()
                 )
             }),
-            Some(30),
+            Some(state.config.policy.provision_retry_after_seconds),
         ),
         Err(OrchestratorError::NotConfigured) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error": "ollama-router: job orchestrator is not configured"}),
-            Some(30),
+            Some(state.config.policy.provision_retry_after_seconds),
         ),
         Err(other) => json_error(
             StatusCode::BAD_GATEWAY,
@@ -756,7 +751,7 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
         Err(OrchestratorError::NotConfigured) => json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error": "ollama-router: job orchestrator is not configured"}),
-            Some(30),
+            Some(state.config.policy.provision_retry_after_seconds),
         ),
         Err(other) => json_error(
             StatusCode::BAD_GATEWAY,
@@ -766,31 +761,11 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
     }
 }
 
-async fn auto_pull_miss(state: &AppState, model: &str, request_class: RequestClass) -> Response {
-    let retry_after = state.config.policy.pull_miss_retry_after_seconds;
-    match state.orchestrator.ensure(model).await {
-        Ok(job) => json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({
-                "error": format!(
-                    "ollama-router: model {model} missing; pull enqueued on placement nodes * (job {}, retry in {retry_after}s)",
-                    job.id
-                ),
-                "reason": "pull_enqueued",
-                "job_id": job.id,
-                "model": model,
-                "retry_after_seconds": retry_after,
-            }),
-            Some(retry_after),
-        ),
-        Err(_) => no_candidate_response(RoutingError::ModelMissing, Some(model), request_class),
-    }
-}
-
 fn no_candidate_response(
     reason: RoutingError,
     model: Option<&str>,
     request_class: RequestClass,
+    policy: &PolicyConfig,
 ) -> Response {
     let mut detail = format!("ollama-router: {}", reason.message());
     if let Some(model) = model {
@@ -803,7 +778,7 @@ fn no_candidate_response(
     json_error(
         StatusCode::SERVICE_UNAVAILABLE,
         json!({"error": detail}),
-        reason.retry_after_seconds(),
+        reason.retry_after_seconds(policy),
     )
 }
 

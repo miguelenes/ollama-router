@@ -12,23 +12,24 @@ lastReviewed: 2026-08-13
 
 # ollama-router product surface
 
-CPU-only Ollama-compatible fleet proxy. One URL (`:11434`) load-balances
-embeddings and chat across env hosts and optional Verda Tailscale GPU nodes.
+Mixed CPU+GPU Ollama-compatible fleet proxy. The router process needs **no GPU**.
+One URL (`:11434`) load-balances embeddings and chat across `fleet.yaml` hosts
+and optional Verda Tailscale GPU nodes.
 
 This crate is **not** Illumination. The Python tree at
 `/home/menes/Projects/illumination/services/ollama-router/` is a behavioral
 spec — read it; do not paste it.
 
-## Inventory (env-first)
+## Inventory (fleet.yaml)
 
 | Source | Role |
 |--------|------|
-| `OLLAMA_HOST_NN_*` | Primary static fleet membership |
+| `OLLAMA_ROUTER_FLEET` / `fleet.yaml` | Permanent CPU and GPU membership |
 | `FleetState` | Durable Tailscale URLs + Verda metadata |
-| Verda manager | Dynamic spot GPUs |
-| `OLLAMA_ROUTER_NODES` | Compact test/dev override only |
+| Verda manager | Dynamic spot GPUs (not in fleet.yaml) |
 
-YAML overlays are **tunables-only**. Top-level `nodes:` is a hard config error.
+YAML overlays are **tunables-only**. Top-level `nodes:` is a hard config error
+(wrong file). Never destroy fleet.yaml hosts.
 
 Config lives under `crates/ollama-router-core/src/config/`: models + knobs +
 layered load that rejects YAML inventory.
@@ -58,13 +59,14 @@ Production: sibling Rust `ollama-capacity-agent` on `:11436`. See
 ## Model operations
 
 Pull/delete metadata persists to SQLite and recovers via live `/api/tags`; see
-[[concepts/ollama-router-durable-model-operations]].
+[[concepts/ollama-router-durable-model-operations]]. `POST /api/pull` and
+`/api/delete` always go through the fleet orchestrator (stub → 503 until jobs
+land). There is no single-node mutate passthrough.
 
-## Dangerous flags
+`/api/embeddings` → `/api/embed` is Ollama ≤0.32 protocol compatibility, not debt.
 
-- `policy.unsafe_single_node_mutate` (default false) — single-node `/api/pull`
-  and `/api/delete` passthrough. Prefer admin ensure/delete APIs.
-- `/api/embeddings` → `/api/embed` is Ollama ≤0.32 protocol compatibility, not debt.
+Cloud instance tag `managed_by=ollama-router`. FleetState `managed_by=verda`
+is an ownership discriminator, not the cloud tag.
 
 ## Related
 

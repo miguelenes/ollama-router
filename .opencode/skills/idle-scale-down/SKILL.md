@@ -25,7 +25,7 @@ Implementation: `crates/ollama-router-core/src/cloud/` + `Registry::inflight_inc
 
 Owned Verda instance, `inflight == 0`, past create grace, past idle timeout.
 Activity anchor = `last_client_request_at` or else `registered_at` (restart
-must not mass-destroy). Never destroy env `OLLAMA_HOST_NN_*` hosts. Never go
+must not mass-destroy). Never destroy **fleet.yaml** hosts. Never go
 below `auto_scale_min_instances`.
 
 Destroy with `delete_permanently`. Failed destroy keeps ownership.

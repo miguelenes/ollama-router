@@ -4,7 +4,7 @@
 pub trait EnvSource {
     /// Return a single variable, if set.
     fn var(&self, key: &str) -> Option<String>;
-    /// Snapshot of all variables (used to parse `OLLAMA_HOST_NN_*`).
+    /// Snapshot of all variables.
     fn vars(&self) -> Vec<(String, String)>;
 }
 

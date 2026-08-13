@@ -44,15 +44,13 @@ impl RoutingError {
     }
 
     /// `Retry-After` seconds for capacity-miss 503s. `model_missing` has none.
-    pub fn retry_after_seconds(self) -> Option<u32> {
+    pub fn retry_after_seconds(self, policy: &crate::config::PolicyConfig) -> Option<u32> {
         match self {
             Self::ModelMissing => None,
-            Self::NoNodes
-            | Self::NoHealthy
-            | Self::Capacity
-            | Self::Ram
-            | Self::RamPressure
-            | Self::Saturated => Some(30),
+            Self::Capacity => Some(policy.provision_retry_after_seconds),
+            Self::NoNodes | Self::NoHealthy | Self::Ram | Self::RamPressure | Self::Saturated => {
+                Some(policy.saturated_retry_after_seconds)
+            }
         }
     }
 

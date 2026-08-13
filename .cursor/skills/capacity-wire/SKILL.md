@@ -18,7 +18,7 @@ Agent (do not reimplement):
 | GET | `/v1/capacity` | bearer if `OLLAMA_CAPACITY_TOKEN` set |
 | GET | `/v1/pressure` | same |
 
-Default URL: `http://{ollama-host}:11436`. Override `OLLAMA_HOST_NN_CAPACITY_URL`.
+Default URL: `http://{ollama-host}:11436`. Override per node with fleet.yaml `capacity_url`.
 
 Probe **after** a successful Ollama `/api/tags` health check.
 
@@ -36,8 +36,8 @@ Never flip the node unhealthy solely because `:11436` is down.
 ## Merge
 
 Effective capacity fills omitted static fields from discovery. Explicit static
-VRAM/RAM **cap** discovered values. Router **reclassifies** `pressure_level`
-with its own policy; the agent's level is an ops hint.
+VRAM/RAM **cap** discovered values. Trust the agent's `pressure_level` when
+present; until then keep `Unknown`.
 
 ## Tests
 

@@ -203,14 +203,6 @@ const KNOBS: &[Knob] = &[
 
 /// Merge selected env knobs into the YAML tunables mapping.
 pub(crate) fn apply_env_knobs(raw: &mut Value, env: &impl EnvSource) -> Result<(), ConfigError> {
-    if let Some(desired) = env.var("OLLAMA_ROUTER_DESIRED_MODELS") {
-        let stripped = desired.trim();
-        if !stripped.is_empty() {
-            let items = parse_csv("OLLAMA_ROUTER_DESIRED_MODELS", stripped)?;
-            set_path(raw, &["desired_models"], sequence(items));
-        }
-    }
-
     for knob in KNOBS {
         let Some(raw_val) = env.var(knob.env) else {
             continue;

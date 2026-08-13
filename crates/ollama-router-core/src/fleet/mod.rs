@@ -1,15 +1,16 @@
-//! Registry, env inventory, durable FleetState.
+//! Registry, declarative fleet file, durable FleetState.
 
-pub(crate) mod env;
+pub(crate) mod file;
 pub(crate) mod ids;
 pub(crate) mod registry;
 pub(crate) mod state;
 pub(crate) mod tailscale;
 
-pub use env::parse_host_environ;
+pub use file::{fleet_path_from_env, load_fleet_nodes, parse_fleet_yaml, DEFAULT_FLEET_PATH};
 pub use ids::{NodeId, RouterId, VerdaInstanceId};
 pub use registry::{
-    model_base, normalize_model, suggested_max_inflight, NodeSnapshot, PressureLevel, Registry,
+    model_base, normalize_model, suggested_max_inflight, NodeOrigin, NodeSnapshot, PressureLevel,
+    Registry,
 };
 pub use state::{
     FleetState, FleetStateEntry, FleetStateError, VerdaNodePersist, DEFAULT_STATE_PATH,

@@ -1,0 +1,40 @@
+# Mixed CPU + GPU Ollama mock fleet. Host port 11435 avoids colliding with
+# a local Ollama on :11434. The router process needs no GPU.
+services:
+  mock-cpu:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: mock
+    environment:
+      MOCK_ROLE: cpu
+      OLLAMA_MOCK_PORT: "11434"
+      CAPACITY_PORT: "11436"
+
+  mock-gpu:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: mock
+    environment:
+      MOCK_ROLE: gpu
+      OLLAMA_MOCK_PORT: "11434"
+      CAPACITY_PORT: "11436"
+
+  router:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      target: router
+    ports:
+      - "11435:11434"
+    volumes:
+      - ./fleet.yaml:/etc/ollama-router/fleet.yaml:ro
+    environment:
+      OLLAMA_ROUTER_FLEET: /etc/ollama-router/fleet.yaml
+      OLLAMA_ROUTER_HOST: 0.0.0.0
+      OLLAMA_ROUTER_PORT: "11434"
+      RUST_LOG: ollama_router=info
+    depends_on:
+      - mock-cpu
+      - mock-gpu

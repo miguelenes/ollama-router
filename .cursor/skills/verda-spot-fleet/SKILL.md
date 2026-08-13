@@ -42,6 +42,10 @@ Never default to huge SKUs. DTOs: serde **ignore extra fields**.
 4. Register Ollama URL only after OpenSSH + `GET /api/tags` succeed on the tailnet.
 5. Public `:11434` is `public_url_blocked` — never a routing URL.
 
+Tag created instances `managed_by=ollama-router` (not an Illumination prefix).
+FleetState key `managed_by=verda` stays the ownership discriminator. Default
+`ssh_key_name` is `ollama-router`.
+
 ## Destroy
 
 `delete_permanently=true`. Spot billing stops only on delete. Teardown failure

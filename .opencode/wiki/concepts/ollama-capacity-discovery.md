@@ -28,8 +28,8 @@ Agent-down is **soft-fail**: node health still follows Ollama `/api/tags`, the
 last discovered capacity is retained, `capacity_error` is populated, and routing
 degrades to static / `ps_lower_bound` values.
 
-Default probe URL: `http://{ollama-url-host}:11436/...`. Override per env host
-with `OLLAMA_HOST_NN_CAPACITY_URL`.
+Default probe URL: `http://{ollama-url-host}:11436/...`. Override per node with
+fleet.yaml `capacity_url`.
 
 ## Effective capacity
 

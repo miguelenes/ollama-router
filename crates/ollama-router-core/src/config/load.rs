@@ -1,10 +1,10 @@
 //! Layered YAML + env config loading.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_yaml::Value;
 
-use crate::fleet::env::parse_host_environ;
+use crate::fleet::file::{fleet_path_from_env, load_fleet_nodes};
 use crate::fleet::state::{FleetState, DEFAULT_STATE_PATH};
 use crate::fleet::tailscale::{url_host_is_ip, url_host_is_tailscale};
 
@@ -12,14 +12,12 @@ use super::env_source::{EnvSource, OsEnv};
 use super::error::ConfigError;
 use super::knobs::apply_env_knobs;
 use super::merge::deep_merge;
-use super::models::{RouterConfig, YamlTunables};
-use super::nodes_env::parse_nodes_env;
+use super::models::{NodeConfig, RouterConfig, YamlTunables};
 
 /// Committed tunables (Verda-only; no inventory).
 pub const DEFAULTS_YAML: &str = include_str!("router.defaults.yaml");
 
 const ENV_CONFIG: &str = "OLLAMA_ROUTER_CONFIG";
-const ENV_NODES: &str = "OLLAMA_ROUTER_NODES";
 const ENV_STATE: &str = "OLLAMA_ROUTER_STATE_FILE";
 
 /// Load using the process environment.
@@ -41,7 +39,7 @@ pub fn load_config_from(
         env.var(ENV_CONFIG)
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .map(std::path::PathBuf::from)
+            .map(PathBuf::from)
     });
 
     if let Some(path) = overlay_path {
@@ -54,13 +52,8 @@ pub fn load_config_from(
     apply_env_knobs(&mut merged, env)?;
     let tunables = tunables_from_value(merged)?;
 
-    let mut nodes = parse_host_environ(env)?;
-    if let Some(compact) = env.var(ENV_NODES) {
-        let stripped = compact.trim();
-        if !stripped.is_empty() {
-            nodes = parse_nodes_env(stripped)?;
-        }
-    }
+    let (fleet_path, fleet_missing_is_error) = fleet_path_from_env(env);
+    let mut nodes = load_fleet_nodes(&fleet_path, fleet_missing_is_error)?;
 
     let state_path = env
         .var(ENV_STATE)
@@ -68,7 +61,19 @@ pub fn load_config_from(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
     let state = FleetState::new(&state_path);
-    for node in &mut nodes {
+    hydrate_node_urls(&mut nodes, &state)?;
+
+    let mut config = RouterConfig::from_tunables(tunables, nodes);
+    config.fleet_path = fleet_path;
+    config.fleet_missing_is_error = fleet_missing_is_error;
+    config.state_path = PathBuf::from(&state_path);
+    config.validate_nodes()?;
+    Ok(config)
+}
+
+/// Apply FleetState Tailscale URLs onto permanent nodes (public IPv4 replaced).
+pub fn hydrate_node_urls(nodes: &mut [NodeConfig], state: &FleetState) -> Result<(), ConfigError> {
+    for node in nodes {
         let persisted = state.hydrate_url(&node.id)?;
         if let Some(persisted) = persisted {
             match node.url.as_deref() {
@@ -81,10 +86,7 @@ pub fn load_config_from(
         }
         node.normalize_and_validate()?;
     }
-
-    let config = RouterConfig::from_tunables(tunables, nodes);
-    config.validate_nodes()?;
-    Ok(config)
+    Ok(())
 }
 
 /// Parse YAML text into tunables (empty inventory). Does not read the
@@ -185,8 +187,9 @@ health:
   overload_fail_credit: 1
 timeouts:
   embed_seconds: 120
-desired_models:
-  - qwen3-embedding:8b
+desired_model_tiers:
+  - models: [qwen3-embedding:8b]
+    min_vram_gb: 0
 ready_requires_embedding_model: true
 "#;
 
@@ -200,6 +203,25 @@ ready_requires_embedding_model: true
             ENV_STATE.to_string(),
             dir.path().join("fleet-state.json").display().to_string(),
         );
+        let fleet = dir.path().join("empty-fleet.yaml");
+        fs::write(&fleet, "version: 1\nnodes: []\n").unwrap();
+        env.insert(
+            "OLLAMA_ROUTER_FLEET".to_string(),
+            fleet.display().to_string(),
+        );
+        env
+    }
+
+    fn write_fleet(dir: &tempfile::TempDir, yaml: &str) -> PathBuf {
+        let path = dir.path().join("fleet.yaml");
+        fs::write(&path, yaml).unwrap();
+        path
+    }
+
+    fn env_with_fleet(dir: &tempfile::TempDir, fleet_yaml: &str) -> HashMap<String, String> {
+        let mut env = env_with_state(dir);
+        let path = write_fleet(dir, fleet_yaml);
+        env.insert("OLLAMA_ROUTER_FLEET".into(), path.display().to_string());
         env
     }
 
@@ -218,7 +240,7 @@ ready_requires_embedding_model: true
         assert_eq!(config.health.request_fail_credit, 2);
         assert_eq!(config.health.overload_fail_credit, 1);
         assert_eq!(config.timeouts.embed_seconds, 120.0);
-        assert_eq!(config.desired_models, ["qwen3-embedding:8b"]);
+        assert_eq!(config.desired_model_tiers[0].models, ["qwen3-embedding:8b"]);
         assert!(config.ready_requires_embedding_model);
     }
 
@@ -229,6 +251,7 @@ ready_requires_embedding_model: true
         )
         .unwrap_err();
         assert!(matches!(err, ConfigError::NodesInventory { .. }));
+        assert!(err.to_string().contains("OLLAMA_ROUTER_FLEET"));
     }
 
     #[test]
@@ -256,10 +279,14 @@ ready_requires_embedding_model: true
         assert_eq!(config.policy.retry_on_status, vec![429, 503]);
         assert_eq!(config.policy.overload_wait_ms, 0);
         assert_eq!(config.health.overload_fail_credit, 1);
-        assert!(!config.policy.unsafe_single_node_mutate);
+        assert_eq!(config.policy.saturated_retry_after_seconds, 30);
+        assert_eq!(config.policy.provision_retry_after_seconds, 30);
+        assert!((config.health.probe_jitter_ratio - 0.2).abs() < f64::EPSILON);
+        assert_eq!(config.health.max_concurrent_probes, 8);
         assert!(config.desired_model_tiers.is_empty());
         assert_eq!(config.verda.min_vram_gb, 8.0);
         assert_eq!(config.verda.max_vram_gb, Some(80.0));
+        assert_eq!(config.verda.ssh_key_name, "ollama-router");
         assert!(config.policy.model_warm_enabled);
         assert_eq!(config.policy.model_warm_interval_seconds, 60.0);
         assert_eq!(config.upstream.max_connections, 256);
@@ -271,7 +298,7 @@ ready_requires_embedding_model: true
     }
 
     #[test]
-    fn desired_model_tiers_parsed_and_preference() {
+    fn desired_model_tiers_parsed() {
         let config = parse_yaml(
             "desired_model_tiers:\n  - models: [embed:8b, tiny:1b]\n    min_vram_gb: 0\n  - models: [mid:7b]\n    min_vram_gb: 24\n",
         )
@@ -280,27 +307,16 @@ ready_requires_embedding_model: true
         assert_eq!(tiers.len(), 2);
         assert_eq!(tiers[0].models, ["embed:8b", "tiny:1b"]);
         assert_eq!(tiers[1].min_vram_gb, 24.0);
+    }
 
-        let compat =
-            parse_yaml("desired_models:\n  - qwen3-embedding:8b\n  - moondream\n").unwrap();
-        assert!(compat.desired_model_tiers.is_empty());
-        let tiers = compat.effective_model_tiers();
-        assert_eq!(tiers.len(), 1);
-        assert_eq!(tiers[0].models, ["qwen3-embedding:8b", "moondream"]);
-
-        let both = parse_yaml(
-            "desired_models:\n  - legacy:1b\ndesired_model_tiers:\n  - models: [tier-model:1b]\n    min_vram_gb: 0\n",
-        )
-        .unwrap();
-        assert_eq!(both.effective_model_tiers()[0].models, ["tier-model:1b"]);
+    #[test]
+    fn parse_yaml_rejects_desired_models_unknown_field() {
+        let err = parse_yaml("desired_models:\n  - qwen3-embedding:8b\n").unwrap_err();
+        assert!(err.to_string().contains("desired_models") || err.to_string().contains("unknown"));
     }
 
     #[test]
     fn ram_policy_invalid_thresholds_rejected() {
-        assert!(parse_yaml(
-            "policy:\n  ram_critical_available_ratio: 0.5\n  ram_elevated_available_ratio: 0.25\n"
-        )
-        .is_err());
         assert!(parse_yaml("policy:\n  ram_headroom: 1.5\n").is_err());
         assert!(parse_yaml("policy:\n  reject_on_ram_elevated_for_classes: [bogus]\n").is_err());
     }
@@ -347,6 +363,7 @@ ready_requires_embedding_model: true
         tunables.validate().unwrap();
         assert_eq!(tunables.verda.min_vram_gb, 8.0);
         assert_eq!(tunables.verda.max_vram_gb, Some(80.0));
+        assert_eq!(tunables.verda.ssh_key_name, "ollama-router");
     }
 
     #[test]
@@ -361,19 +378,20 @@ ready_requires_embedding_model: true
     }
 
     #[test]
-    fn load_config_env_override_replaces_nodes() {
+    fn load_config_reads_fleet_file() {
         let dir = tempfile::tempdir().unwrap();
         let overlay = dir.path().join("overlay.yaml");
         fs::write(&overlay, TUNABLES_YAML).unwrap();
-        let mut env = env_with_state(&dir);
-        env.insert(
-            ENV_NODES.to_string(),
-            "env-node|http://env:11434|vram=4".to_string(),
+        let env = env_with_fleet(
+            &dir,
+            "version: 1\nnodes:\n  - id: desk\n    url: http://env:11434\n    capacity:\n      vram_gb: 4\n",
         );
         let config = load_config_from(Some(&overlay), &env).unwrap();
         assert_eq!(config.nodes.len(), 1);
-        assert_eq!(config.nodes[0].id.as_str(), "env-node");
+        assert_eq!(config.nodes[0].id.as_str(), "desk");
+        assert_eq!(config.nodes[0].static_capacity.vram_gb, Some(4.0));
         assert_eq!(config.health.interval_seconds, 7.5);
+        assert!(config.fleet_missing_is_error);
     }
 
     #[test]
@@ -397,39 +415,55 @@ ready_requires_embedding_model: true
         assert!(config.nodes.is_empty());
         assert_eq!(config.policy.default_max_inflight, None);
         assert!(config.provision_defaults.ts_ephemeral);
+        assert!(config.fleet_missing_is_error);
+    }
+
+    #[test]
+    fn missing_explicit_fleet_path_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert(
+            "OLLAMA_ROUTER_FLEET".into(),
+            dir.path().join("missing-fleet.yaml").display().to_string(),
+        );
+        let err = load_config_from(None, &env).unwrap_err();
+        assert!(err.to_string().contains("not found"));
     }
 
     #[test]
     fn hydrate_public_ipv4_replaced_tailscale_and_hostname_kept() {
         let dir = tempfile::tempdir().unwrap();
-        let mut env = env_with_state(&dir);
+        let mut env = env_with_fleet(
+            &dir,
+            "version: 1\nnodes:\n  - id: host-01\n    url: http://8.8.8.8:11434\n",
+        );
         let state = FleetState::new(env.get(ENV_STATE).unwrap());
         state
             .persist_url("host-01", "http://100.64.0.1:11434", Some("100.64.0.1"))
             .unwrap();
 
-        env.insert("OLLAMA_HOST_01_ID".into(), "host-01".into());
-        env.insert("OLLAMA_HOST_01_URL".into(), "http://8.8.8.8:11434".into());
         let config = load_config_from(None, &env).unwrap();
         assert_eq!(
             config.nodes[0].url.as_deref(),
             Some("http://100.64.0.1:11434")
         );
 
-        env.insert(
-            "OLLAMA_HOST_01_URL".into(),
-            "http://100.64.0.9:11434".into(),
+        let fleet = write_fleet(
+            &dir,
+            "version: 1\nnodes:\n  - id: host-01\n    url: http://100.64.0.9:11434\n",
         );
+        env.insert("OLLAMA_ROUTER_FLEET".into(), fleet.display().to_string());
         let config = load_config_from(None, &env).unwrap();
         assert_eq!(
             config.nodes[0].url.as_deref(),
             Some("http://100.64.0.9:11434")
         );
 
-        env.insert(
-            "OLLAMA_HOST_01_URL".into(),
-            "http://host.docker.internal:11434".into(),
+        let fleet = write_fleet(
+            &dir,
+            "version: 1\nnodes:\n  - id: host-01\n    url: http://host.docker.internal:11434\n",
         );
+        env.insert("OLLAMA_ROUTER_FLEET".into(), fleet.display().to_string());
         let config = load_config_from(None, &env).unwrap();
         assert_eq!(
             config.nodes[0].url.as_deref(),
@@ -443,7 +477,6 @@ ready_requires_embedding_model: true
         for (key, value) in [
             ("VERDA_ENABLED", "perhaps"),
             ("OLLAMA_ROUTER_DEBUG_HEADERS", "sometimes"),
-            ("OLLAMA_ROUTER_DESIRED_MODELS", "embed,,small"),
             ("VERDA_MIN_VRAM_GB", "nan"),
         ] {
             let mut env = env_with_state(&dir);

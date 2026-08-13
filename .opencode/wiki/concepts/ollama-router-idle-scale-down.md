@@ -38,7 +38,7 @@ Runs inside `reconcile()`, gated on `auto_scale` and `idle_scale_down_enabled`
 
 Eligibility (all must hold):
 
-1. Instance is owned (never an env permanent `OLLAMA_HOST_NN_*` host)
+1. Instance is owned (never a **fleet.yaml** permanent host)
 2. `inflight == 0`
 3. `now - registered_at >= idle_grace_after_create_seconds`
 4. `now - activity_anchor >= idle_timeout_seconds`

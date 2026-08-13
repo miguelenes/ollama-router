@@ -38,3 +38,23 @@ tasks:
     desc: Build ollama-router:local
     cmds:
       - docker build -t ollama-router:local .
+
+  compose:up:
+    desc: Build and start the mixed CPU/GPU mock fleet (host :11435)
+    cmds:
+      - docker compose -f deploy/compose.yaml up --build -d
+
+  compose:down:
+    desc: Stop the compose mock fleet
+    cmds:
+      - docker compose -f deploy/compose.yaml down
+
+  compose:ps:
+    desc: Show compose mock fleet status
+    cmds:
+      - docker compose -f deploy/compose.yaml ps
+
+  compose:logs:
+    desc: Follow compose mock fleet logs
+    cmds:
+      - docker compose -f deploy/compose.yaml logs -f

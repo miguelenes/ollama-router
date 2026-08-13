@@ -8,9 +8,8 @@ pub enum ConfigError {
     /// Top-level YAML `nodes:` is not supported (empty list included).
     #[error(
         "{origin}: top-level 'nodes:' is not supported. \
-         Fleet membership is env-first (OLLAMA_HOST_NN_*) plus FleetState \
-         and cloud providers. Use YAML only for tunables \
-         (policy, health, timeouts, verda, …)."
+         Permanent membership belongs in OLLAMA_ROUTER_FLEET (fleet.yaml). \
+         Use this YAML only for tunables (policy, health, timeouts, verda, …)."
     )]
     NodesInventory { origin: String },
     /// YAML syntax or structure is invalid.
@@ -22,9 +21,6 @@ pub enum ConfigError {
     /// Serde / semantic validation failed.
     #[error("invalid config: {0}")]
     Invalid(String),
-    /// `OLLAMA_HOST_NN` index is outside 01–99.
-    #[error("{key}: host index must be 01–99 (got {index})")]
-    HostIndex { key: String, index: u32 },
     /// Durable fleet-state could not be read safely.
     #[error(transparent)]
     FleetState(#[from] FleetStateError),

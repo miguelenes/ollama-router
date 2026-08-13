@@ -1,4 +1,6 @@
-//! Serde config models (YAML tunables + env-built nodes).
+//! Serde config models (YAML tunables + fleet.yaml nodes).
+
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
@@ -360,7 +362,6 @@ pub struct PolicyConfig {
     pub medium_min_vram_gb: f64,
     pub inflight_weight: f64,
     pub sticky_affinity: bool,
-    pub auto_pull_on_miss: bool,
     pub must_have_labels: Vec<String>,
     pub avoid_labels: Vec<String>,
     pub prefer_warm_models: bool,
@@ -370,13 +371,6 @@ pub struct PolicyConfig {
     pub medium_reserve_min_gb: f64,
     pub small_reserve_vram_gb: f64,
     pub embed_reserve_vram_gb: f64,
-    pub ram_elevated_available_ratio: f64,
-    pub ram_critical_available_ratio: f64,
-    pub ram_elevated_available_gb: f64,
-    pub ram_critical_available_gb: f64,
-    pub ram_swap_elevated_gb: f64,
-    pub ram_load_elevated_per_core: f64,
-    pub ram_load_critical_per_core: f64,
     pub ram_headroom: f64,
     pub ram_elevated_score_penalty: f64,
     pub ram_critical_score_penalty: f64,
@@ -391,9 +385,8 @@ pub struct PolicyConfig {
     pub retry_on_status: Vec<u16>,
     pub overload_wait_ms: u32,
     pub admission_wait_ms: u32,
-    pub pull_miss_retry_after_seconds: u32,
-    pub auto_pull_wait_seconds: f64,
-    pub unsafe_single_node_mutate: bool,
+    pub saturated_retry_after_seconds: u32,
+    pub provision_retry_after_seconds: u32,
     pub model_warm_enabled: bool,
     pub model_warm_interval_seconds: f64,
     pub model_warm_min_free_vram_gb: f64,
@@ -411,7 +404,6 @@ impl Default for PolicyConfig {
             medium_min_vram_gb: 8.0,
             inflight_weight: 1.0,
             sticky_affinity: false,
-            auto_pull_on_miss: false,
             must_have_labels: Vec::new(),
             avoid_labels: Vec::new(),
             prefer_warm_models: true,
@@ -421,13 +413,6 @@ impl Default for PolicyConfig {
             medium_reserve_min_gb: 8.0,
             small_reserve_vram_gb: 0.0,
             embed_reserve_vram_gb: 0.0,
-            ram_elevated_available_ratio: 0.25,
-            ram_critical_available_ratio: 0.12,
-            ram_elevated_available_gb: 4.0,
-            ram_critical_available_gb: 2.0,
-            ram_swap_elevated_gb: 0.5,
-            ram_load_elevated_per_core: 1.5,
-            ram_load_critical_per_core: 3.0,
             ram_headroom: 0.85,
             ram_elevated_score_penalty: 2.0,
             ram_critical_score_penalty: 8.0,
@@ -447,9 +432,8 @@ impl Default for PolicyConfig {
             retry_on_status: vec![429, 503],
             overload_wait_ms: 0,
             admission_wait_ms: 0,
-            pull_miss_retry_after_seconds: 10,
-            auto_pull_wait_seconds: 0.0,
-            unsafe_single_node_mutate: false,
+            saturated_retry_after_seconds: 30,
+            provision_retry_after_seconds: 30,
             model_warm_enabled: true,
             model_warm_interval_seconds: 60.0,
             model_warm_min_free_vram_gb: 4.0,
@@ -505,25 +489,6 @@ impl PolicyConfig {
         }
         for (name, value) in [
             (
-                "ram_elevated_available_ratio",
-                self.ram_elevated_available_ratio,
-            ),
-            (
-                "ram_critical_available_ratio",
-                self.ram_critical_available_ratio,
-            ),
-            ("ram_elevated_available_gb", self.ram_elevated_available_gb),
-            ("ram_critical_available_gb", self.ram_critical_available_gb),
-            ("ram_swap_elevated_gb", self.ram_swap_elevated_gb),
-            (
-                "ram_load_elevated_per_core",
-                self.ram_load_elevated_per_core,
-            ),
-            (
-                "ram_load_critical_per_core",
-                self.ram_load_critical_per_core,
-            ),
-            (
                 "ram_elevated_score_penalty",
                 self.ram_elevated_score_penalty,
             ),
@@ -547,29 +512,14 @@ impl PolicyConfig {
         if self.ram_headroom <= 0.0 || self.ram_headroom > 1.0 {
             return Err(ConfigError::invalid("ram_headroom must be > 0 and <= 1"));
         }
-        if self.ram_critical_available_ratio > self.ram_elevated_available_ratio {
+        if !(1..=900).contains(&self.saturated_retry_after_seconds) {
             return Err(ConfigError::invalid(
-                "critical RAM ratio threshold must not exceed elevated threshold",
+                "saturated_retry_after_seconds must be between 1 and 900",
             ));
         }
-        if self.ram_critical_available_gb > self.ram_elevated_available_gb {
+        if !(1..=900).contains(&self.provision_retry_after_seconds) {
             return Err(ConfigError::invalid(
-                "critical RAM GB threshold must not exceed elevated threshold",
-            ));
-        }
-        if self.ram_load_critical_per_core < self.ram_load_elevated_per_core {
-            return Err(ConfigError::invalid(
-                "critical load threshold must be >= elevated threshold",
-            ));
-        }
-        if !(1..=900).contains(&self.pull_miss_retry_after_seconds) {
-            return Err(ConfigError::invalid(
-                "pull_miss_retry_after_seconds must be between 1 and 900",
-            ));
-        }
-        if self.auto_pull_wait_seconds < 0.0 || self.auto_pull_wait_seconds > 120.0 {
-            return Err(ConfigError::invalid(
-                "auto_pull_wait_seconds must be between 0 and 120",
+                "provision_retry_after_seconds must be between 1 and 900",
             ));
         }
         if self.model_warm_interval_seconds <= 0.0 || self.model_warm_cooldown_seconds <= 0.0 {
@@ -610,6 +560,8 @@ pub struct HealthConfig {
     pub capacity_probe_token: Option<String>,
     pub capacity_probe_every_n_probes: u32,
     pub pressure_probe_path: Option<String>,
+    pub probe_jitter_ratio: f64,
+    pub max_concurrent_probes: u32,
 }
 
 impl Default for HealthConfig {
@@ -630,6 +582,8 @@ impl Default for HealthConfig {
             capacity_probe_token: None,
             capacity_probe_every_n_probes: 1,
             pressure_probe_path: None,
+            probe_jitter_ratio: 0.2,
+            max_concurrent_probes: 8,
         }
     }
 }
@@ -679,6 +633,14 @@ impl HealthConfig {
             return Err(ConfigError::invalid(
                 "overload_fail_credit must be <= request_fail_credit",
             ));
+        }
+        if self.probe_jitter_ratio < 0.0 || self.probe_jitter_ratio > 1.0 {
+            return Err(ConfigError::invalid(
+                "probe_jitter_ratio must be between 0 and 1",
+            ));
+        }
+        if self.max_concurrent_probes < 1 {
+            return Err(ConfigError::invalid("max_concurrent_probes must be >= 1"));
         }
         Ok(())
     }
@@ -819,7 +781,7 @@ impl Default for VerdaConfig {
             destroy_on_shutdown: true,
             router_id_env: "OLLAMA_ROUTER_ID".to_string(),
             ssh_key_id: None,
-            ssh_key_name: "illumination-ollama-router".to_string(),
+            ssh_key_name: "ollama-router".to_string(),
             ssh_public_key_file: None,
             ssh_private_key_file: None,
             ts_accept_routes: None,
@@ -942,7 +904,6 @@ pub struct YamlTunables {
     pub policy: PolicyConfig,
     pub health: HealthConfig,
     pub timeouts: TimeoutsConfig,
-    pub desired_models: Vec<String>,
     pub desired_model_tiers: Vec<ModelTier>,
     pub ready_requires_embedding_model: bool,
     pub bootstrap_desired_models: bool,
@@ -968,7 +929,6 @@ impl Default for YamlTunables {
             policy: PolicyConfig::default(),
             health: HealthConfig::default(),
             timeouts: TimeoutsConfig::default(),
-            desired_models: Vec::new(),
             desired_model_tiers: Vec::new(),
             ready_requires_embedding_model: false,
             bootstrap_desired_models: false,
@@ -1033,14 +993,13 @@ impl YamlTunables {
     }
 }
 
-/// Top-level router configuration (tunables + env-first nodes).
+/// Top-level router configuration (tunables + fleet.yaml nodes).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RouterConfig {
     pub nodes: Vec<NodeConfig>,
     pub policy: PolicyConfig,
     pub health: HealthConfig,
     pub timeouts: TimeoutsConfig,
-    pub desired_models: Vec<String>,
     pub desired_model_tiers: Vec<ModelTier>,
     pub ready_requires_embedding_model: bool,
     pub bootstrap_desired_models: bool,
@@ -1058,6 +1017,9 @@ pub struct RouterConfig {
     pub provision_defaults: ProvisionDefaults,
     pub verda: VerdaConfig,
     pub upstream: UpstreamPoolConfig,
+    pub fleet_path: PathBuf,
+    pub fleet_missing_is_error: bool,
+    pub state_path: PathBuf,
 }
 
 impl Default for RouterConfig {
@@ -1073,7 +1035,6 @@ impl RouterConfig {
             policy: tunables.policy,
             health: tunables.health,
             timeouts: tunables.timeouts,
-            desired_models: tunables.desired_models,
             desired_model_tiers: tunables.desired_model_tiers,
             ready_requires_embedding_model: tunables.ready_requires_embedding_model,
             bootstrap_desired_models: tunables.bootstrap_desired_models,
@@ -1091,6 +1052,9 @@ impl RouterConfig {
             provision_defaults: tunables.provision_defaults,
             verda: tunables.verda,
             upstream: tunables.upstream,
+            fleet_path: PathBuf::from("/etc/ollama-router/fleet.yaml"),
+            fleet_missing_is_error: false,
+            state_path: PathBuf::from("/var/lib/ollama-router/fleet-state.json"),
         }
     }
 
@@ -1098,25 +1062,9 @@ impl RouterConfig {
         reject_duplicate_node_ids(&self.nodes)
     }
 
-    /// Return `desired_model_tiers` when set; otherwise a single tier from `desired_models`.
+    /// Configured VRAM-gated desired model tiers (no legacy flat list).
     pub fn effective_model_tiers(&self) -> Vec<ModelTier> {
-        if !self.desired_model_tiers.is_empty() {
-            return self.desired_model_tiers.clone();
-        }
-        let flat: Vec<String> = self
-            .desired_models
-            .iter()
-            .map(|m| m.trim().to_string())
-            .filter(|m| !m.is_empty())
-            .collect();
-        if flat.is_empty() {
-            Vec::new()
-        } else {
-            vec![ModelTier {
-                models: flat,
-                min_vram_gb: 0.0,
-            }]
-        }
+        self.desired_model_tiers.clone()
     }
 }
 

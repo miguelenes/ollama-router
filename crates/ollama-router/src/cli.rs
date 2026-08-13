@@ -21,7 +21,7 @@ pub struct Cli {
 pub enum Commands {
     /// Run the router HTTP server.
     Serve {
-        /// Optional tunables YAML overlay (fleet is env-first).
+        /// Optional tunables YAML overlay (`OLLAMA_ROUTER_CONFIG`).
         #[arg(long)]
         config: Option<PathBuf>,
         #[arg(long, env = "OLLAMA_ROUTER_HOST", default_value = "0.0.0.0")]
@@ -64,7 +64,7 @@ pub enum Commands {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// SSH-provision GPU hosts from env fleet ssh blocks.
+    /// SSH-provision GPU hosts from fleet.yaml ssh blocks.
     Provision {
         #[arg(long)]
         config: Option<PathBuf>,

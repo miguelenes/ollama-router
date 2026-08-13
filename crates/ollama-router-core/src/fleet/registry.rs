@@ -7,6 +7,13 @@ use std::time::SystemTime;
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
 
+/// Where a live registry row came from. Reload never drops `Verda` rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NodeOrigin {
+    Permanent,
+    Verda,
+}
+
 /// RAM pressure classification used by scoring and hard filters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PressureLevel {
@@ -18,13 +25,24 @@ pub enum PressureLevel {
 }
 
 impl PressureLevel {
-    /// Python-stable token (`unknown` / `elevated` / `critical`).
+    /// Python-stable token (`unknown` / `ok` / `elevated` / `critical`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
             Self::Ok => "ok",
             Self::Elevated => "elevated",
             Self::Critical => "critical",
+        }
+    }
+
+    /// Parse a capacity-agent `pressure_level` string. Unknown tokens stay `None`.
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "unknown" => Some(Self::Unknown),
+            "ok" => Some(Self::Ok),
+            "elevated" => Some(Self::Elevated),
+            "critical" => Some(Self::Critical),
+            _ => None,
         }
     }
 }
@@ -85,6 +103,9 @@ pub struct NodeSnapshot {
     pub ram_available_ratio: Option<f64>,
     pub pressure_level: PressureLevel,
     pub fail_streak: u32,
+    pub draining: bool,
+    pub origin: NodeOrigin,
+    pub capacity_url: Option<String>,
 }
 
 impl NodeSnapshot {
@@ -166,10 +187,12 @@ struct NodeState {
     ram_available_ratio: Option<f64>,
     pressure_level: PressureLevel,
     capacity_effective: Capacity,
+    origin: NodeOrigin,
+    draining: bool,
 }
 
 impl NodeState {
-    fn from_config(config: NodeConfig) -> Self {
+    fn from_config(config: NodeConfig, origin: NodeOrigin) -> Self {
         let capacity_effective = config.static_capacity.clone();
         Self {
             config,
@@ -190,7 +213,21 @@ impl NodeState {
             ram_available_ratio: None,
             pressure_level: PressureLevel::Unknown,
             capacity_effective,
+            origin,
+            draining: false,
         }
+    }
+
+    fn apply_permanent_config(&mut self, config: NodeConfig) {
+        self.config.url = config.url;
+        self.config.labels = config.labels;
+        self.config.capacity_url = config.capacity_url;
+        self.config.max_inflight = config.max_inflight;
+        self.config.ssh = config.ssh;
+        self.config.provision = config.provision;
+        self.config.static_capacity = config.static_capacity.clone();
+        merge_static_into_effective(&mut self.capacity_effective, &config.static_capacity);
+        self.draining = false;
     }
 
     fn snapshot(&self) -> NodeSnapshot {
@@ -211,6 +248,9 @@ impl NodeState {
             ram_available_ratio: self.ram_available_ratio,
             pressure_level: self.pressure_level,
             fail_streak: self.fail_streak,
+            draining: self.draining,
+            origin: self.origin,
+            capacity_url: self.config.capacity_url.clone(),
         }
     }
 }
@@ -232,7 +272,12 @@ impl Registry {
         let nodes = config
             .nodes
             .iter()
-            .map(|n| (n.id.clone(), NodeState::from_config(n.clone())))
+            .map(|n| {
+                (
+                    n.id.clone(),
+                    NodeState::from_config(n.clone(), NodeOrigin::Permanent),
+                )
+            })
             .collect();
         Self {
             inner: RwLock::new(Inner { nodes }),
@@ -331,11 +376,13 @@ impl Registry {
         }
     }
 
-    /// Release one inflight slot.
+    /// Release one inflight slot. Draining permanent nodes with zero inflight are dropped.
     pub fn inflight_dec(&self, id: &NodeId) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
+        let mut inner = self.write();
+        if let Some(node) = inner.nodes.get_mut(id) {
             node.inflight = node.inflight.saturating_sub(1);
         }
+        sweep_drained(&mut inner);
     }
 
     /// Wall-clock of last client generate/chat/embed (idle scale-down).
@@ -459,12 +506,69 @@ impl Registry {
         }
     }
 
+    /// Store agent-reported pressure (soft-fail capacity probe). Does not change health.
+    pub fn set_pressure_level(&self, id: &NodeId, level: PressureLevel) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.pressure_level = level;
+        }
+    }
+
+    /// Insert or refresh a fleet.yaml node without resetting inflight / idle / reservations.
+    /// Existing Verda rows with the same id are left untouched.
+    pub fn upsert_permanent(&self, config: NodeConfig) {
+        let mut inner = self.write();
+        upsert_permanent_locked(&mut inner, config);
+    }
+
+    /// Exclude a permanent node from ranking immediately; drop it when inflight hits 0.
+    pub fn begin_remove_permanent(&self, id: &NodeId) {
+        let mut inner = self.write();
+        begin_remove_permanent_locked(&mut inner, id);
+        sweep_drained(&mut inner);
+    }
+
+    /// Diff fleet.yaml membership by `NodeId`. Never deletes Verda rows.
+    pub fn apply_permanent_inventory(&self, nodes: &[NodeConfig]) {
+        let mut inner = self.write();
+        let incoming: HashSet<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+        let stale: Vec<NodeId> = inner
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.origin == NodeOrigin::Permanent && !incoming.contains(&n.config.id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in stale {
+            begin_remove_permanent_locked(&mut inner, &id);
+        }
+        for node in nodes {
+            upsert_permanent_locked(&mut inner, node.clone());
+        }
+        sweep_drained(&mut inner);
+    }
+
+    /// Insert or refresh a Verda ephemeral (tests / future manager). Does not overwrite Permanent.
+    pub fn upsert_verda(&self, config: NodeConfig) {
+        let mut inner = self.write();
+        let id = config.id.clone();
+        match inner.nodes.get_mut(&id) {
+            Some(existing) if existing.origin == NodeOrigin::Verda => {
+                existing.apply_permanent_config(config);
+            }
+            Some(_) => {}
+            None => {
+                inner
+                    .nodes
+                    .insert(id, NodeState::from_config(config, NodeOrigin::Verda));
+            }
+        }
+    }
+
     /// Sticky-affinity owner: prefer a warm healthy holder of `model`.
     pub fn sticky_owner(&self, model: &str) -> Option<NodeId> {
         let snap = self.snapshot();
         let holders: Vec<&NodeSnapshot> = snap
             .iter()
-            .filter(|n| n.healthy && n.has_model(model))
+            .filter(|n| n.healthy && !n.draining && n.has_model(model))
             .collect();
         if holders.is_empty() {
             return None;
@@ -481,7 +585,7 @@ impl Registry {
     pub fn aggregated_tags(&self) -> Vec<(String, Vec<String>)> {
         let mut by_model: HashMap<String, Vec<String>> = HashMap::new();
         for node in self.snapshot() {
-            if !node.healthy {
+            if !node.healthy || node.draining {
                 continue;
             }
             for model in &node.models {
@@ -501,6 +605,58 @@ impl Registry {
         models.sort_by(|a, b| a.0.cmp(&b.0));
         models
     }
+}
+
+fn merge_static_into_effective(effective: &mut Capacity, static_capacity: &Capacity) {
+    if static_capacity.vram_gb.is_some() {
+        effective.vram_gb = static_capacity.vram_gb;
+    }
+    if static_capacity.ram_gb.is_some() {
+        effective.ram_gb = static_capacity.ram_gb;
+    }
+    if static_capacity.gpus.is_some() {
+        effective.gpus = static_capacity.gpus;
+    }
+    if static_capacity.cpu_cores.is_some() {
+        effective.cpu_cores = static_capacity.cpu_cores;
+    }
+}
+
+fn upsert_permanent_locked(inner: &mut Inner, config: NodeConfig) {
+    let id = config.id.clone();
+    match inner.nodes.get_mut(&id) {
+        Some(existing) if existing.origin == NodeOrigin::Verda => {
+            tracing::warn!(
+                node = %id,
+                "fleet.yaml id collides with a Verda node; leaving Verda row in place"
+            );
+        }
+        Some(existing) => {
+            existing.origin = NodeOrigin::Permanent;
+            existing.apply_permanent_config(config);
+        }
+        None => {
+            inner
+                .nodes
+                .insert(id, NodeState::from_config(config, NodeOrigin::Permanent));
+        }
+    }
+}
+
+fn begin_remove_permanent_locked(inner: &mut Inner, id: &NodeId) {
+    let Some(node) = inner.nodes.get_mut(id) else {
+        return;
+    };
+    if node.origin != NodeOrigin::Permanent {
+        return;
+    }
+    node.draining = true;
+}
+
+fn sweep_drained(inner: &mut Inner) {
+    inner.nodes.retain(|_, node| {
+        !(node.origin == NodeOrigin::Permanent && node.draining && node.inflight == 0)
+    });
 }
 
 fn reconcile_ps_reservations(node: &mut NodeState) {
@@ -532,6 +688,7 @@ fn reconcile_ps_reservations(node: &mut NodeState) {
 mod tests {
     use super::*;
     use crate::config::{Capacity, NodeConfig, RouterConfig};
+    use std::collections::HashSet;
 
     fn nid(id: &str) -> NodeId {
         NodeId::parse(id).expect("node id")
@@ -579,6 +736,94 @@ mod tests {
         registry.inflight_dec(&id);
         assert_eq!(registry.inflight(&id), 0);
         assert!(registry.last_client_request_at(&id).is_some());
+    }
+
+    #[test]
+    fn apply_permanent_inventory_adds_and_updates_without_resetting_inflight() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        registry.set_healthy(&id);
+        registry.inflight_inc(&id);
+        let last = registry.last_client_request_at(&id);
+
+        let mut updated = node("a", 16.0, 1);
+        updated.url = Some("http://a-new:11434".into());
+        updated.labels = vec!["gpu".into()];
+        registry.apply_permanent_inventory(&[updated, node("b", 8.0, 1)]);
+
+        let snap_a = registry.get(&id).unwrap();
+        assert_eq!(snap_a.url.as_deref(), Some("http://a-new:11434"));
+        assert_eq!(snap_a.labels, ["gpu"]);
+        assert_eq!(snap_a.capacity.vram_gb, Some(16.0));
+        assert_eq!(snap_a.inflight, 1);
+        assert_eq!(snap_a.origin, NodeOrigin::Permanent);
+        assert!(!snap_a.draining);
+        assert_eq!(registry.last_client_request_at(&id), last);
+        assert!(registry.get(&nid("b")).is_some());
+    }
+
+    #[test]
+    fn remove_permanent_with_inflight_drains_then_drops() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1), node("b", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let a = nid("a");
+        registry.set_healthy(&a);
+        registry.set_healthy(&nid("b"));
+        registry.inflight_inc(&a);
+
+        registry.apply_permanent_inventory(&[node("b", 8.0, 1)]);
+        let snap = registry.get(&a).unwrap();
+        assert!(snap.draining);
+        assert_eq!(snap.inflight, 1);
+
+        let ranked = crate::routing::rank_nodes(
+            &registry.snapshot(),
+            crate::routing::RequestClass::Small,
+            None,
+            registry.policy(),
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(ranked.ranked.iter().all(|n| n.id.as_str() != "a"));
+
+        registry.inflight_dec(&a);
+        assert!(registry.get(&a).is_none());
+        assert!(registry.get(&nid("b")).is_some());
+    }
+
+    #[test]
+    fn apply_permanent_inventory_does_not_drop_verda() {
+        let config = RouterConfig {
+            nodes: vec![node("desk", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.upsert_verda(node("spot-1", 24.0, 1));
+        registry.apply_permanent_inventory(&[]);
+        assert!(registry.get(&nid("desk")).is_none());
+        let spot = registry.get(&nid("spot-1")).unwrap();
+        assert_eq!(spot.origin, NodeOrigin::Verda);
+        assert!(!spot.draining);
+    }
+
+    #[test]
+    fn fleet_yaml_id_does_not_overwrite_verda() {
+        let registry = Registry::new(&RouterConfig::default());
+        registry.upsert_verda(node("shared", 24.0, 1));
+        let mut permanent = node("shared", 8.0, 1);
+        permanent.url = Some("http://fleet:11434".into());
+        registry.upsert_permanent(permanent);
+        let snap = registry.get(&nid("shared")).unwrap();
+        assert_eq!(snap.origin, NodeOrigin::Verda);
+        assert_eq!(snap.url.as_deref(), Some("http://shared:11434"));
     }
 
     #[test]

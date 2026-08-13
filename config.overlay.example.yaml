@@ -1,26 +1,30 @@
 # ollama-router — optional tunables overlay.
 #
 # Point OLLAMA_ROUTER_CONFIG at this file (or a copy) to override
-# committed router.defaults.yaml. Fleet membership is env-first:
-# set OLLAMA_HOST_NN_* (see .env.ollama-router.example). Do not add
-# a top-level `nodes:` key — that is a hard config error.
+# committed router.defaults.yaml. Permanent membership is
+# OLLAMA_ROUTER_FLEET (see deploy/fleet.yaml). Do not add a top-level
+# `nodes:` key here — that is a hard config error.
 #
 # Verda is the only cloud provider. Thunder / RunPod sections are rejected.
 
 # policy:
 #   sticky_affinity: false
-#   auto_pull_on_miss: false
 #   default_max_inflight: 2
+#   saturated_retry_after_seconds: 30
+#   provision_retry_after_seconds: 30
 
-# desired_models:
-#   - qwen3-embedding:8b
-#   - moondream
-#   - llama3.2:1b
+# desired_model_tiers:
+#   - models:
+#       - qwen3-embedding:8b
+#       - moondream
+#       - llama3.2:1b
+#     min_vram_gb: 0
 
 # verda:
 #   auto_scale: true
 #   auto_scale_min_instances: 0
 #   auto_scale_max_instances: 2
+#   ssh_key_name: ollama-router
 #   # Inclusive VRAM window; 80 GB excludes H200-class cards.
 #   min_vram_gb: 8
 #   max_vram_gb: 80

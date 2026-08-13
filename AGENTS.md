@@ -1,8 +1,9 @@
 # ollama-router
 
-CPU-only **Ollama-compatible fleet proxy** (Axum / Tokio). One listen URL (`:11434`)
-load-balances generate, chat, and embed across env-configured hosts and optional
-Verda Cloud NVIDIA **spot** GPUs.
+Mixed **CPU+GPU Ollama-compatible fleet proxy** (Axum / Tokio). The router
+process needs **no GPU**. One listen URL (`:11434`) load-balances generate,
+chat, and embed across `fleet.yaml` hosts and optional Verda Cloud NVIDIA
+**spot** GPUs.
 
 This repo is **not** the Illumination Laravel app. Do not add Sail, PHP, Python
 services, Thunder, or RunPod.
@@ -11,16 +12,17 @@ services, Thunder, or RunPod.
 
 - **Verda spots only.** Forbidden: Thunder, RunPod, `THUNDER_*` / `RUNPOD_*` env,
   `**/thunder/**`, `**/runpod/**`, admin routes or tests for those providers.
-- **Inventory is env-first.** `OLLAMA_HOST_NN_*` + durable FleetState + Verda
-  manager. YAML is tunables-only. Top-level YAML `nodes:` is a hard config error.
-  Compact test override: `OLLAMA_ROUTER_NODES` only.
+- **Inventory is fleet.yaml.** `OLLAMA_ROUTER_FLEET` (default
+  `/etc/ollama-router/fleet.yaml`) + durable FleetState + Verda manager.
+  YAML tunables overlays are tunables-only. Top-level YAML `nodes:` is a hard
+  config error (wrong file). Verda spots are not listed in fleet.yaml.
 - **Tailscale-only cloud URLs.** Public `:11434` is `public_url_blocked` and never
   healthy. There is no public-proxy exception.
 - **Idle timer = client forwards only.** `last_client_request_at` is written solely
   from `inflight_inc` on generate / chat / embed. Health, `/api/ps`, capacity
   probes, admin, and the warm-keeper do not count. After idle destroy: async Verda
-  `ensure`; the client gets **503 + `Retry-After`**. Env permanent hosts are never
-  torn down. Destroy Verda instances with `delete_permanently`.
+  `ensure`; the client gets **503 + `Retry-After`**. **Never destroy fleet.yaml
+  hosts.** Destroy Verda instances with `delete_permanently`.
 - **Capacity agent is a sibling, not this crate.** Probe
   `GET http://{ollama-host}:11436/v1/capacity` and `/v1/pressure`. Soft-fail.
   GiB = bytes / `1024³`. Do not reimplement the agent here.
@@ -53,7 +55,8 @@ Axum 0.7 GraphQL/WS guides.
 | `crates/ollama-router-core/src/routing/` | Utilization WLC + class preference (pure fns) |
 | `crates/ollama-router-verda/src/` | OAuth2 client, selector, manager (`delete_permanently`) |
 | `crates/ollama-router-core/src/config/` | YAML tunables + env knobs; reject `nodes:` |
-| `crates/ollama-router-core/src/fleet/` | Registry, env inventory, FleetState |
+| `crates/ollama-router-core/src/fleet/` | Registry, fleet.yaml inventory, FleetState |
+| `crates/ollama-mock/` | Compose CPU/GPU Ollama mock (no inference) |
 | `crates/ollama-router-core/src/cloud/` | Idle reconcile (Verda-only manager) |
 | `crates/ollama-router-core/src/capacity/` | HTTP client to `:11436` |
 | `crates/ollama-router-core/src/jobs/` | SQLite durable pull/delete |
@@ -78,6 +81,7 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
 task docker         # docker build -t ollama-router:local .
+task compose:up     # mock CPU+GPU fleet on host :11435
 ```
 
 Before finishing a coding task, run `task check` and do not stop while it fails.
