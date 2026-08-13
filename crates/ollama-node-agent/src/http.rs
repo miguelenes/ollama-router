@@ -3,6 +3,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -17,6 +18,7 @@ use tower_http::trace::TraceLayer;
 
 use crate::collect::StatusPayload;
 use crate::config::AgentConfig;
+use crate::listen::{format_host_port, resolve_bind, AddrSource, HostAddrs};
 use crate::metrics::{AgentMetrics, METRICS_CONTENT_TYPE};
 
 const COLLECT_TTL: Duration = Duration::from_secs(2);
@@ -154,10 +156,41 @@ fn spawn_cpu_sampler(slot: Arc<std::sync::RwLock<Option<f64>>>) {
     });
 }
 
+pub fn prepare_serve(
+    config: Option<&std::path::Path>,
+    host: Option<String>,
+    port: Option<u16>,
+) -> anyhow::Result<(AgentConfig, std::net::SocketAddr, String)> {
+    let mut cfg = AgentConfig::load(config).context("load config")?;
+    if let Some(h) = host {
+        cfg.listen = crate::config::BindSpec::Address(h);
+    }
+    if let Some(p) = port {
+        cfg.port = p;
+    }
+    let token_set = cfg.bearer_token().is_some();
+    let addrs = HostAddrs;
+    let addrs: &dyn AddrSource = &addrs;
+    let agent_ip = resolve_bind(&cfg.listen, addrs, token_set)?;
+    let ollama_ip = resolve_bind(&cfg.ollama.listen, addrs, token_set)?;
+    let bind = std::net::SocketAddr::new(agent_ip, cfg.port);
+    let ollama_listen = format_host_port(ollama_ip, 11434);
+    Ok((cfg, bind, ollama_listen))
+}
+
 pub async fn serve(
     config: AgentConfig,
     bind: std::net::SocketAddr,
     ollama_listen: String,
+) -> anyhow::Result<()> {
+    serve_with_shutdown(config, bind, ollama_listen, shutdown_signal()).await
+}
+
+pub async fn serve_with_shutdown(
+    config: AgentConfig,
+    bind: std::net::SocketAddr,
+    ollama_listen: String,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     if matches!(bind.ip(), std::net::IpAddr::V4(v) if v.is_unspecified())
         && config.bearer_token().is_none()
@@ -178,6 +211,35 @@ pub async fn serve(
     crate::register::spawn_if_configured(state);
     let listener = tokio::net::TcpListener::bind(bind).await?;
     tracing::info!(addr = %bind, "ollama-node-agent listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await?;
     Ok(())
+}
+
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(error) = tokio::signal::ctrl_c().await {
+            tracing::warn!(%error, "ctrl_c listener failed");
+        }
+    };
+    #[cfg(unix)]
+    {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).ok();
+        tokio::select! {
+            () = ctrl_c => {}
+            () = async {
+                if let Some(ref mut stream) = sigterm {
+                    stream.recv().await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        ctrl_c.await;
+    }
 }

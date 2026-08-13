@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Per-node health, load, VRAM, RAM, GPU util, and routing. Grafana uses router /metrics for fleet telemetry (RAM, GPU util, known-vs-zero VRAM). Local compose may also scrape mock node-agent :11436 for ollama_up; do not add production :11436 scrape jobs. Duration histogram is class-only (not per-node). Do not query by model name. vram_free_gb=0 is empty only when vram_free_known=1.",
+  "description": "Per-node health, load, VRAM, RAM, GPU util, and routing. Grafana uses router /metrics for fleet telemetry (RAM, GPU util, known-vs-zero VRAM). Local compose may also scrape mock node-agent :11436 for ollama_up; do not add production :11436 scrape jobs. Duration histogram is class-only (not per-node). Do not query by model name. vram_free_gb=0 is empty only when vram_free_known=1. VRAM ledger / placement (reserved, loaded, used, free, total) is collapsed by default.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -31,6 +31,30 @@
       "tooltip": "Pull/delete jobs and auto_pull_on_miss",
       "type": "link",
       "url": "/d/ollama-router-jobs/ollama-router-jobs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Logs",
+      "tooltip": "Router container logs (allowlisted fields)",
+      "type": "link",
+      "url": "/d/ollama-router-logs/ollama-router-logs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Verda",
+      "tooltip": "Spot lifecycle and cost",
+      "type": "link",
+      "url": "/d/ollama-router-verda/ollama-router-verda"
     }
   ],
   "liveNow": false,
@@ -2522,17 +2546,342 @@
           "range": true
         }
       ],
-      "title": "Estimated VRAM used GiB (when free is known)",
+      "title": "Estimated VRAM used GiB (total − free, not the ledger)",
       "type": "timeseries",
-      "description": "total − free, gated on vram_free_known=1 (full GPU shows used=total). Also see loaded_vram_gb and reserved_vram_gb."
+      "description": "Estimate = total − free, gated on vram_free_known=1 (full GPU shows used=total). This is not reserved (ledger), loaded (/api/ps), or agent-reported used. See the VRAM ledger / placement row for those series. GiB = bytes/1024³."
     },
+    {
+      "collapsed": true,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 83
+      },
+      "id": 55,
+      "title": "VRAM ledger / placement",
+      "type": "row",
+      "panels": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 0,
+            "y": 84
+          },
+          "id": 56,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "expr": "ollama_router_node_reserved_vram_gb and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+              "legendFormat": "{{node}}",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "title": "Reserved VRAM GiB (ledger)",
+          "type": "timeseries",
+          "description": "GiB = bytes/1024³. Reservation ledger (inflight admission holds), not /api/ps loaded and not agent used. 0 is an empty ledger, not unknown."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 8,
+            "y": 84
+          },
+          "id": 57,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "expr": "(ollama_router_node_loaded_vram_gb * on(node) (ollama_router_node_loaded_vram_known == 1)) and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+              "legendFormat": "{{node}}",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "title": "Loaded VRAM GiB (/api/ps, known only)",
+          "type": "timeseries",
+          "description": "GiB = bytes/1024³. Loaded is /api/ps merge. Plotted only when loaded_vram_known=1; omitted when unknown (not a zero load)."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 8,
+            "x": 16,
+            "y": 84
+          },
+          "id": 58,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "expr": "(ollama_router_node_vram_used_gb * on(node) (ollama_router_node_vram_used_known == 1)) and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+              "legendFormat": "{{node}}",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "title": "Used VRAM GiB (agent, known only)",
+          "type": "timeseries",
+          "description": "GiB = bytes/1024³. Agent-reported used VRAM. Plotted only when vram_used_known=1; omitted when unknown (not empty)."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 0,
+            "y": 92
+          },
+          "id": 59,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "expr": "(ollama_router_node_vram_free_gb * on(node) (ollama_router_node_vram_free_known == 1)) and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+              "legendFormat": "{{node}}",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "title": "Free VRAM GiB (agent, known only)",
+          "type": "timeseries",
+          "description": "GiB = bytes/1024³. Agent-reported free VRAM. Plotted only when vram_free_known=1: 0 then means a full GPU, not unknown. When known=0, the series is omitted."
+        },
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "fieldConfig": {
+            "defaults": {
+              "color": {
+                "mode": "palette-classic"
+              },
+              "custom": {
+                "drawStyle": "line",
+                "fillOpacity": 15,
+                "lineWidth": 1,
+                "pointSize": 5,
+                "showPoints": "never",
+                "spanNulls": false,
+                "stacking": {
+                  "group": "A",
+                  "mode": "none"
+                }
+              },
+              "mappings": [],
+              "min": 0
+            },
+            "overrides": []
+          },
+          "gridPos": {
+            "h": 8,
+            "w": 12,
+            "x": 12,
+            "y": 92
+          },
+          "id": 60,
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "none"
+            }
+          },
+          "targets": [
+            {
+              "datasource": {
+                "type": "prometheus",
+                "uid": "prometheus"
+              },
+              "editorMode": "code",
+              "expr": "ollama_router_node_vram_gb and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+              "legendFormat": "{{node}}",
+              "refId": "A",
+              "range": true
+            }
+          ],
+          "title": "Total VRAM GiB",
+          "type": "timeseries",
+          "description": "GiB = bytes/1024³. Effective VRAM capacity per node (router re-export). CPU/Metal without discrete inventory is often 0."
+        }
+      ]
+    },
+
     {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 83
+        "y": 100
       },
       "id": 44,
       "title": "Host resources",
@@ -2569,7 +2918,7 @@
         "h": 8,
         "w": 8,
         "x": 0,
-        "y": 84
+        "y": 101
       },
       "id": 45,
       "options": {
@@ -2632,7 +2981,7 @@
         "h": 8,
         "w": 8,
         "x": 8,
-        "y": 84
+        "y": 101
       },
       "id": 46,
       "options": {
@@ -2694,7 +3043,7 @@
         "h": 8,
         "w": 8,
         "x": 16,
-        "y": 84
+        "y": 101
       },
       "id": 47,
       "options": {
@@ -2755,7 +3104,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 92
+        "y": 109
       },
       "id": 48,
       "options": {
@@ -2816,7 +3165,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 92
+        "y": 109
       },
       "id": 49,
       "options": {
@@ -2874,7 +3223,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 100
+        "y": 117
       },
       "id": 50,
       "title": "GPU",
@@ -2912,7 +3261,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 101
+        "y": 118
       },
       "id": 51,
       "options": {
@@ -2974,7 +3323,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 101
+        "y": 118
       },
       "id": 52,
       "options": {
@@ -3036,7 +3385,7 @@
         "h": 8,
         "w": 12,
         "x": 0,
-        "y": 109
+        "y": 126
       },
       "id": 53,
       "options": {
@@ -3108,7 +3457,7 @@
         "h": 8,
         "w": 12,
         "x": 12,
-        "y": 109
+        "y": 126
       },
       "id": 54,
       "options": {
@@ -3144,7 +3493,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 117
+        "y": 134
       },
       "id": 32,
       "title": "Routing pressure",
@@ -3182,7 +3531,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 118
+        "y": 135
       },
       "id": 33,
       "options": {
@@ -3219,7 +3568,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 126
+        "y": 143
       },
       "id": 34,
       "title": "Verda",
@@ -3257,7 +3606,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 127
+            "y": 144
           },
           "id": 35,
           "options": {
@@ -3320,7 +3669,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 127
+            "y": 144
           },
           "id": 36,
           "options": {
@@ -3383,7 +3732,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 127
+            "y": 144
           },
           "id": 37,
           "options": {
@@ -3422,7 +3771,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 135
+        "y": 152
       },
       "id": 40,
       "title": "Models",
@@ -3461,7 +3810,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 136
+        "y": 153
       },
       "id": 41,
       "options": {
@@ -3526,7 +3875,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 136
+        "y": 153
       },
       "id": 42,
       "options": {
@@ -3588,7 +3937,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 136
+        "y": 153
       },
       "id": 43,
       "options": {
@@ -3635,7 +3984,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 144
+        "y": 161
       },
       "id": 38,
       "title": "Logs",
@@ -3646,12 +3995,12 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines — they are not Prometheus labels.",
+      "description": "Short strip. Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines — they are not Prometheus labels. Filtered explorer: Logs dashboard (/d/ollama-router-logs).",
       "gridPos": {
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 145
+        "y": 162
       },
       "id": 39,
       "options": {
@@ -3797,6 +4146,6 @@
   "timezone": "browser",
   "title": "Ollama Router — Nodes",
   "uid": "ollama-router-nodes",
-  "version": 1,
+  "version": 2,
   "weekStart": ""
 }

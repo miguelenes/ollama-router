@@ -18,6 +18,8 @@
       ".json",
       ".sh",
       ".bash",
+      ".plist",
+      ".wxs",
       "dockerfile",
       "containerfile",
       ".dockerfile",
@@ -30,6 +32,7 @@
       ".git",
       "dist",
       "build",
+      ".local",
       "__pycache__",
       ".venv",
       ".agents",
@@ -43,7 +46,8 @@
       ".opencode/rag_db",
       ".opencode/node_modules",
       ".opencode/plugins",
-      ".cursor/skills"
+      ".cursor/skills",
+      "deploy/observability/grafana/dashboards/stack"
     ],
     "excludeFiles": [
       "Cargo.lock",

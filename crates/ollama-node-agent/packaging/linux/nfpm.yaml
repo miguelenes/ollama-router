@@ -1,0 +1,33 @@
+# nfpm config. AGENT_VERSION and AGENT_ARCH must be in the environment.
+# Run from a staging directory that contains the gnu binary, unit, config, and scripts.
+name: ollama-node-agent
+arch: ${AGENT_ARCH}
+platform: linux
+version: ${AGENT_VERSION}
+section: net
+priority: optional
+maintainer: ollama-router maintainers
+description: Node-local Ollama capacity agent (HTTP :11436)
+homepage: https://github.com/miguelenes/ollama-router
+license: proprietary
+contents:
+  - src: ollama-node-agent
+    dst: /usr/local/bin/ollama-node-agent
+    file_info:
+      mode: 0755
+  - src: ollama-node-agent.service
+    dst: /usr/lib/systemd/system/ollama-node-agent.service
+    file_info:
+      mode: 0644
+  - src: config.yaml
+    dst: /etc/ollama-node-agent/config.yaml
+    type: config
+    file_info:
+      mode: 0644
+  - dst: /var/lib/ollama-node-agent
+    type: dir
+    file_info:
+      mode: 0755
+scripts:
+  postinstall: postinst.sh
+  preremove: prerm.sh

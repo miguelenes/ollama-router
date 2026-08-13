@@ -36,6 +36,15 @@ pub enum FleetStateError {
     Io(#[from] io::Error),
 }
 
+impl FleetStateError {
+    pub(crate) fn is_permission_denied(&self) -> bool {
+        match self {
+            Self::Io(err) | Self::Lock(err) => err.kind() == io::ErrorKind::PermissionDenied,
+            _ => false,
+        }
+    }
+}
+
 /// Fields written by [`FleetState::persist_verda_node`].
 #[derive(Clone, Debug)]
 pub struct VerdaNodePersist<'a> {
@@ -92,6 +101,23 @@ impl FleetState {
         Self {
             path: path.as_ref().to_path_buf(),
         }
+    }
+
+    /// Create parent dirs and an empty `{}` mapping if neither primary nor backup exists.
+    ///
+    /// No-op when a file is already present. Callers that cannot write the
+    /// default `/var/lib/ollama-router` path should treat permission errors as
+    /// "stay in-memory empty" rather than failing startup.
+    pub fn ensure_created(&self) -> Result<(), FleetStateError> {
+        if self.path.exists() || self.backup_path().exists() {
+            return Ok(());
+        }
+        let _lock = self.lock_exclusive()?;
+        if self.path.exists() || self.backup_path().exists() {
+            return Ok(());
+        }
+        atomic_write(&self.path, &BTreeMap::new())?;
+        Ok(())
     }
 
     fn lock_path(&self) -> PathBuf {
@@ -361,6 +387,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = FleetState::new(dir.path().join("fleet-state.json"));
         assert!(state.load().unwrap().is_empty());
+    }
+
+    #[test]
+    fn ensure_created_writes_empty_object_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("state").join("fleet-state.json");
+        let state = FleetState::new(&nested);
+        assert!(!nested.exists());
+        state.ensure_created().unwrap();
+        let value: Value = serde_json::from_str(&fs::read_to_string(&nested).unwrap()).unwrap();
+        assert_eq!(value, serde_json::json!({}));
+        fs::write(&nested, r#"{"kept":{}}"#).unwrap();
+        state.ensure_created().unwrap();
+        assert!(fs::read_to_string(&nested).unwrap().contains("kept"));
     }
 
     #[test]

@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# Contrib only. `setup` does not install this file; copy it onto OpenRC hosts.
+description="Ollama node agent"
+command="/usr/local/bin/ollama-node-agent"
+command_args="serve --config /etc/ollama-node-agent/config.yaml"
+command_user="ollama-node-agent:ollama-node-agent"
+command_background="yes"
+pidfile="/run/ollama-node-agent.pid"
+
+depend() {
+	need net
+	after ollama
+}

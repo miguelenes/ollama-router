@@ -13,25 +13,235 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  NFPM_VERSION: "2.47.0"
+  WIX_VERSION: "5.0.2"
+
 jobs:
-  build:
-    name: ${{ matrix.asset }}
+  meta:
+    name: Version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - id: ver
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          else
+            ver=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+            echo "version=${ver}" >> "$GITHUB_OUTPUT"
+          fi
+
+  linux-tarball:
+    name: tarball-${{ matrix.arch }}
+    needs: meta
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
         include:
           - runner: ubuntu-latest
-            asset: ollama-node-agent-linux-amd64
+            target: x86_64-unknown-linux-musl
+            arch: amd64
           - runner: ubuntu-24.04-arm
-            asset: ollama-node-agent-linux-arm64
-          - runner: macos-13
-            asset: ollama-node-agent-darwin-amd64
-          - runner: macos-14
-            asset: ollama-node-agent-darwin-arm64
-          - runner: windows-latest
-            asset: ollama-node-agent-windows-amd64.exe
+            target: aarch64-unknown-linux-musl
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: musl toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            musl-tools cmake clang libclang-dev nasm pkg-config binutils
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.target }}
+
+      - name: cargo build musl
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+          CC_aarch64_unknown_linux_musl: musl-gcc
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: musl-gcc
+        run: cargo build --release --locked -p ollama-node-agent --target ${{ matrix.target }}
+
+      - name: Pack tarball
+        run: |
+          bash crates/ollama-node-agent/packaging/linux/pack-tarball.sh \
+            "target/${{ matrix.target }}/release/ollama-node-agent" \
+            "${{ matrix.arch }}" \
+            dist/agent
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ollama-node-agent-linux-${{ matrix.arch }}.tar.gz
+          path: dist/agent/ollama-node-agent-linux-${{ matrix.arch }}.tar.gz
+
+  linux-deb:
+    name: deb-${{ matrix.arch }}
+    needs: meta
+    runs-on: ${{ matrix.runner }}
+    container: rust:1.97-slim-bookworm
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            arch: amd64
+            nfpm_asset: Linux_x86_64
+          - runner: ubuntu-24.04-arm
+            arch: arm64
+            nfpm_asset: Linux_arm64
+    steps:
+      - name: Install bookworm build deps
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            ca-certificates curl git gcc g++ make cmake clang libclang-dev \
+            nasm pkg-config perl xz-utils binutils
+
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: rustc pin
+        run: rustc --version | grep -F '1.97'
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-gnu-bookworm-${{ matrix.arch }}
+
+      - name: cargo build gnu
+        run: cargo build --release --locked -p ollama-node-agent
+
+      - name: Install nfpm
+        run: |
+          curl -fsSL -o /tmp/nfpm.tgz \
+            "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${{ matrix.nfpm_asset }}.tar.gz"
+          tar -xzf /tmp/nfpm.tgz -C /tmp nfpm
+          install -m 755 /tmp/nfpm /usr/local/bin/nfpm
+          nfpm --version
+
+      - name: Pack deb
+        run: |
+          bash crates/ollama-node-agent/packaging/linux/pack-deb.sh \
+            target/release/ollama-node-agent \
+            "${{ matrix.arch }}" \
+            "${{ needs.meta.outputs.version }}" \
+            dist/agent
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ollama-node-agent_${{ needs.meta.outputs.version }}_${{ matrix.arch }}.deb
+          path: dist/agent/ollama-node-agent_${{ needs.meta.outputs.version }}_${{ matrix.arch }}.deb
+
+  macos:
+    name: pkg-${{ matrix.arch }}
+    needs: meta
+    runs-on: macos-14
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            arch: arm64
+          - target: x86_64-apple-darwin
+            arch: amd64
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.target }}
+
+      - name: cargo build
+        run: cargo build --release --locked -p ollama-node-agent --target ${{ matrix.target }}
+
+      - name: Pack pkg and zip
+        run: |
+          bash crates/ollama-node-agent/packaging/macos/pack-pkg.sh \
+            "target/${{ matrix.target }}/release/ollama-node-agent" \
+            "${{ matrix.arch }}" \
+            "${{ needs.meta.outputs.version }}" \
+            dist/agent
+
+      - name: Maybe notarize
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_SIGN_IDENTITY: ${{ secrets.APPLE_SIGN_IDENTITY }}
+        run: |
+          pkg="dist/agent/ollama-node-agent-${{ needs.meta.outputs.version }}-darwin-${{ matrix.arch }}.pkg"
+          if [ -z "${APPLE_CERTIFICATE_P12}" ] || [ -z "${APPLE_CERTIFICATE_PASSWORD}" ] \
+            || [ -z "${APPLE_ID}" ] || [ -z "${APPLE_TEAM_ID}" ] \
+            || [ -z "${APPLE_APP_SPECIFIC_PASSWORD}" ] || [ -z "${APPLE_SIGN_IDENTITY}" ]; then
+            echo "Apple signing secrets absent; skip notarize"
+            exit 0
+          fi
+          cert="$(mktemp)"
+          printf '%s' "${APPLE_CERTIFICATE_P12}" | base64 --decode > "$cert"
+          keychain="${RUNNER_TEMP}/agent-signing.keychain-db"
+          security create-keychain -p "runner" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "runner" "$keychain"
+          security import "$cert" -k "$keychain" -P "${APPLE_CERTIFICATE_PASSWORD}" -T /usr/bin/productsign -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "runner" "$keychain"
+          security list-keychain -d user -s "$keychain"
+          signed="${pkg}.signed"
+          productsign --sign "${APPLE_SIGN_IDENTITY}" "$pkg" "$signed"
+          mv "$signed" "$pkg"
+          xcrun notarytool submit "$pkg" \
+            --apple-id "${APPLE_ID}" \
+            --team-id "${APPLE_TEAM_ID}" \
+            --password "${APPLE_APP_SPECIFIC_PASSWORD}" \
+            --wait
+          xcrun stapler staple "$pkg"
+          rm -f "$cert"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ollama-node-agent-${{ needs.meta.outputs.version }}-darwin-${{ matrix.arch }}.pkg
+          path: dist/agent/ollama-node-agent-${{ needs.meta.outputs.version }}-darwin-${{ matrix.arch }}.pkg
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ollama-node-agent-darwin-${{ matrix.arch }}.zip
+          path: dist/agent/ollama-node-agent-darwin-${{ matrix.arch }}.zip
+
+  windows:
+    name: msi-amd64
+    needs: meta
+    runs-on: windows-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,25 +254,85 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: agent-${{ matrix.asset }}
+          key: agent-windows-amd64
 
       - name: cargo build
         run: cargo build --release --locked -p ollama-node-agent
 
-      - name: Package
+      - name: Pack exe and MSI
         shell: bash
         run: |
-          src="target/release/ollama-node-agent"
-          if [ -f "${src}.exe" ]; then src="${src}.exe"; fi
-          cp "$src" "${{ matrix.asset }}"
+          mkdir -p dist/agent
+          cp target/release/ollama-node-agent.exe dist/agent/ollama-node-agent-windows-amd64.exe
+          dotnet tool install --global wix --version "${WIX_VERSION}"
+          export PATH="${PATH}:${HOME}/.dotnet/tools:/c/Users/runneradmin/.dotnet/tools"
+          bash crates/ollama-node-agent/packaging/windows/pack-msi.sh \
+            target/release/ollama-node-agent.exe \
+            "${{ needs.meta.outputs.version }}" \
+            dist/agent
+
+      - name: Maybe Authenticode
+        shell: bash
+        env:
+          WINDOWS_PFX_BASE64: ${{ secrets.WINDOWS_PFX_BASE64 }}
+          WINDOWS_PFX_PASSWORD: ${{ secrets.WINDOWS_PFX_PASSWORD }}
+        run: |
+          if [ -z "${WINDOWS_PFX_BASE64}" ] || [ -z "${WINDOWS_PFX_PASSWORD}" ]; then
+            echo "Authenticode secrets absent; skip signtool"
+            exit 0
+          fi
+          pfx="$(mktemp).pfx"
+          printf '%s' "${WINDOWS_PFX_BASE64}" | base64 --decode > "$pfx"
+          signtool sign /fd SHA256 /p "${WINDOWS_PFX_PASSWORD}" /f "$pfx" \
+            dist/agent/ollama-node-agent-windows-amd64.exe \
+            dist/agent/ollama-node-agent-${{ needs.meta.outputs.version }}-windows-amd64.msi
+          rm -f "$pfx"
 
       - uses: actions/upload-artifact@v7
         with:
-          name: ${{ matrix.asset }}
-          path: ${{ matrix.asset }}
+          name: ollama-node-agent-windows-amd64.exe
+          path: dist/agent/ollama-node-agent-windows-amd64.exe
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ollama-node-agent-${{ needs.meta.outputs.version }}-windows-amd64.msi
+          path: dist/agent/ollama-node-agent-${{ needs.meta.outputs.version }}-windows-amd64.msi
+
+  release:
+    name: Checksums and GitHub Release
+    needs: [meta, linux-tarball, linux-deb, macos, windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum -- * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            artifacts/*.tar.gz
+            artifacts/*.deb
+            artifacts/*.pkg
+            artifacts/*.zip
+            artifacts/*.exe
+            artifacts/*.msi
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.asset }}
+          files: artifacts/*

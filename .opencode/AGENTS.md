@@ -36,9 +36,12 @@ segment**; entries with `/` match **prefixes**. Never exclude `.opencode`
 wholesale — wiki and skills live there; keep `.opencode/rag_db`,
 `.opencode/node_modules`, and `.opencode/plugins`.
 
-Leave `"mcp": { "enabled": false }` unless an external MCP client must connect.
-Do not register the plugin via an OpenCode `"plugin"` config key (use
-`.opencode/plugins/*.js` auto-discovery).
+Leave `"mcp": { "enabled": false }` in `opencode-rag.json` unless an external
+MCP client must connect to the RAG plugin. Project MCP servers (docsrs,
+grafana, prometheus) live in `opencode.json` under `"mcp"` — see skills
+`docsrs-mcp`, `grafana-mcp`, `prometheus-mcp` and `.cursor/rules/project-mcps.mdc`.
+Do not register the OpenCodeRAG plugin via an OpenCode `"plugin"` config key
+(use `.opencode/plugins/*.js` auto-discovery).
 
 ```text
 # BAD — excludeDirs: [".opencode"]

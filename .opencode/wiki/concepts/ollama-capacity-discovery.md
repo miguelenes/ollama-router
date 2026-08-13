@@ -49,7 +49,7 @@ booleans mark a real sample. A full GPU is `vram_free_gb=0` **and**
 `ollama_router_node_*` on `GET /metrics`. Prometheus scrapes the **router**
 only for fleet dashboards. Do not add production scrape jobs for agent
 `:11436` (agents do not know the fleet.yaml node id; Verda spots churn).
-Local compose may still scrape mock `:11436` for `ollama_up`. Grafana gates
+`task compose:mock` may still scrape mock `:11436` for `ollama_up`. Grafana gates
 VRAM panels on `vram_free_known == 1`, not `vram_free_gb > 0`.
 
 **Collect.** `/v1/*` and `/metrics` share a 2s TTL cache so router probes do
@@ -78,6 +78,35 @@ CUDA VRAM (`vram_gb=0` on Apple unless a real discrete inventory exists).
 Remote provision (later): upload the agent binary and run `setup`. Do not keep
 embedding Ubuntu Ollama install logic in `provision-ollama-gpu.sh` once that
 handoff exists.
+
+## Packages
+
+Release workflow [`.github/workflows/release-agent.yml`](../../../.github/workflows/release-agent.yml)
+(not `ci.yml`) builds OS-native daemon artifacts. Local: `task agent:release`
+(plus `agent:release:linux` / `:deb` / `:macos` / `:windows`). Linux local
+recipes run in Docker `rust:1.97-slim-bookworm` (musl-tools in that image for
+the tarball; gnu `.deb` is bookworm glibc). GHA compiles on native
+`ubuntu-latest` / `ubuntu-24.04-arm` and packages in the same job; the `.deb`
+job uses a `rust:1.97-slim-bookworm` container. GHA never installs Task.
+
+| Artifact | Role |
+| --- | --- |
+| `ollama-node-agent-linux-<arch>.tar.gz` | musl-static binary + unit + README + optional OpenRC contrib; installer is `sudo ./ollama-node-agent setup` |
+| `ollama-node-agent_<ver>_<arch>.deb` | gnu (glibc ≥ bookworm); unit in `/usr/lib/systemd/system`; postinst enables the service when `/run/systemd/system` exists |
+| `ollama-node-agent-<ver>-darwin-<arch>.pkg` | binary + LaunchDaemon `com.ollama.node-agent`; postinstall `launchctl bootstrap` |
+| `ollama-node-agent-darwin-<arch>.zip` | unsigned binary for source-style `setup` (not the install path) |
+| `ollama-node-agent-windows-amd64.exe` | portable; elevated `setup` registers a LocalSystem SCM service |
+| `ollama-node-agent-<ver>-windows-amd64.msi` | `ServiceInstall` LocalSystem; starts/stops the service |
+| `SHA256SUMS.txt` | checksums of the files above |
+
+Unit, plist, and Windows service name/args live under
+`crates/ollama-node-agent/packaging/` and are `include_str!` into `setup`
+(`setup --print-unit` prints the systemd unit). Packages do **not** run full
+`setup` (that still downloads Ollama). Without `/run/systemd/system`, Linux
+`setup` and `.deb` postinst do not bail: they install the binary and print a
+`serve` command. OpenRC is contrib-in-tarball only. `uninstall` ignores
+`systemctl`/`sc`/`launchctl` failures. The first SCM release deletes leftover
+scheduled task `ollama-node-agent`.
 
 ## Effective capacity
 

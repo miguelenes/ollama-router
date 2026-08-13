@@ -14,7 +14,15 @@ use crate::config::AgentConfig;
 use crate::listen::{format_host_port, resolve_bind, AddrSource, HostAddrs};
 use crate::redact::redact_authkey;
 
-pub use state::{ConvergeState, STATE_SCHEMA};
+pub use state::{
+    ConvergeState, STATE_SCHEMA, SUPERVISOR_LAUNCHD, SUPERVISOR_MANUAL, SUPERVISOR_SCM,
+    SUPERVISOR_SYSTEMD,
+};
+
+/// Systemd unit text. Same bytes `setup` writes and the Linux tarball/.deb ship.
+pub fn agent_unit_text() -> &'static str {
+    include_str!("../../packaging/linux/ollama-node-agent.service")
+}
 
 /// Official Inno flags from ollama `scripts/install.ps1`.
 pub fn windows_silent_args() -> &'static [&'static str] {
@@ -111,18 +119,60 @@ pub async fn run(ctx: SetupContext<'_>) -> anyhow::Result<ConvergeState> {
     }
 }
 
+/// systemd is present when the runtime dir exists or `is-system-running` reports
+/// an active state. Do not use that command's exit code: `degraded` is systemd
+/// and returns non-zero.
+pub fn systemd_present(run_dir_exists: bool, is_system_running: Option<&str>) -> bool {
+    if run_dir_exists {
+        return true;
+    }
+    matches!(
+        is_system_running.map(str::trim),
+        Some("initializing" | "starting" | "running" | "degraded" | "maintenance" | "stopping")
+    )
+}
+
+/// Live probe. Dry-run callers should not use this.
+#[cfg(target_os = "linux")]
+pub fn systemd_detected() -> bool {
+    systemd_present(
+        Path::new("/run/systemd/system").exists(),
+        systemctl_is_system_running_stdout().as_deref(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn systemctl_is_system_running_stdout() -> Option<String> {
+    std::process::Command::new("systemctl")
+        .arg("is-system-running")
+        .output()
+        .ok()
+        .and_then(|out| String::from_utf8(out.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn privileged_io(err: std::io::Error) -> anyhow::Error {
+    if err.kind() == std::io::ErrorKind::PermissionDenied {
+        anyhow::anyhow!("setup requires root (sudo)")
+    } else {
+        anyhow::Error::from(err)
+    }
+}
+
 /// Write token file 0600 when a bearer is configured.
 pub fn write_token_file(path: &Path, token: Option<&str>) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(privileged_io)?;
     }
     match token.filter(|t| !t.is_empty()) {
         Some(t) => {
-            std::fs::write(path, t)?;
+            std::fs::write(path, t).map_err(privileged_io)?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .map_err(privileged_io)?;
             }
         }
         None => {
@@ -134,7 +184,7 @@ pub fn write_token_file(path: &Path, token: Option<&str>) -> anyhow::Result<()> 
 
 pub fn write_bytes_idempotent(path: &Path, contents: &[u8]) -> anyhow::Result<bool> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent).map_err(privileged_io)?;
     }
     if path.exists() {
         if let Ok(existing) = std::fs::read(path) {
@@ -143,8 +193,31 @@ pub fn write_bytes_idempotent(path: &Path, contents: &[u8]) -> anyhow::Result<bo
             }
         }
     }
-    std::fs::write(path, contents)?;
+    std::fs::write(path, contents).map_err(privileged_io)?;
     Ok(true)
+}
+
+/// Copy this process onto `dest`. Skip when the bytes already match.
+pub fn install_self_binary(dest: &Path) -> anyhow::Result<()> {
+    let exe = std::env::current_exe().map_err(privileged_io)?;
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(privileged_io)?;
+    }
+    if dest.exists() {
+        if let (Ok(a), Ok(b)) = (std::fs::read(&exe), std::fs::read(dest)) {
+            if a == b {
+                return Ok(());
+            }
+        }
+    }
+    std::fs::copy(&exe, dest).map_err(privileged_io)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))
+            .map_err(privileged_io)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -176,6 +249,35 @@ mod tests {
         assert_eq!(
             crate::setup::windows_silent_args(),
             &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"]
+        );
+    }
+
+    #[test]
+    fn systemd_present_table() {
+        assert!(systemd_present(true, None));
+        assert!(systemd_present(true, Some("offline")));
+        assert!(systemd_present(false, Some("running")));
+        assert!(systemd_present(false, Some("degraded")));
+        assert!(systemd_present(false, Some(" starting\n")));
+        assert!(systemd_present(false, Some("initializing")));
+        assert!(systemd_present(false, Some("maintenance")));
+        assert!(systemd_present(false, Some("stopping")));
+        assert!(!systemd_present(false, Some("offline")));
+        assert!(!systemd_present(false, Some("unknown")));
+        assert!(!systemd_present(false, None));
+        assert!(!systemd_present(false, Some("")));
+    }
+
+    #[test]
+    fn install_self_binary_skips_identical() {
+        let dir = tempdir().unwrap();
+        let dest = dir.path().join("agent");
+        install_self_binary(&dest).unwrap();
+        assert!(dest.exists());
+        install_self_binary(&dest).unwrap();
+        assert_eq!(
+            std::fs::read(&dest).unwrap(),
+            std::fs::read(std::env::current_exe().unwrap()).unwrap()
         );
     }
 }

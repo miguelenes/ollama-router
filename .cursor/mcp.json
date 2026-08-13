@@ -1,3 +1,33 @@
 {
-  "mcpServers": {}
+  "mcpServers": {
+    "docsrs": {
+      "type": "local",
+      "command": [
+        "/home/menes/.cargo/bin/docsrs-mcp"
+      ],
+      "enabled": true
+    },
+    "grafana": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "mcp-grafana"
+      ],
+      "environment": {
+        "GRAFANA_URL": "http://127.0.0.1:3000"
+      },
+      "enabled": true
+    },
+    "prometheus": {
+      "type": "local",
+      "command": [
+        "uvx",
+        "prometheus-mcp-server"
+      ],
+      "environment": {
+        "PROMETHEUS_URL": "http://127.0.0.1:9090"
+      },
+      "enabled": true
+    }
+  }
 }

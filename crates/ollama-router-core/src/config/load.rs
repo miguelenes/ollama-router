@@ -61,6 +61,16 @@ pub fn load_config_from(
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_STATE_PATH.to_string());
     let state = FleetState::new(&state_path);
+    match state.ensure_created() {
+        Ok(()) => {}
+        Err(err) if err.is_permission_denied() => {
+            tracing::debug!(
+                path = %state_path,
+                "fleet state file not created (permission denied)"
+            );
+        }
+        Err(err) => return Err(err.into()),
+    }
     hydrate_node_urls(&mut nodes, &state)?;
 
     let mut config = RouterConfig::from_tunables(tunables, nodes);
@@ -447,6 +457,11 @@ ready_requires_embedding_model: true
         assert_eq!(config.policy.default_max_inflight, None);
         assert!(config.provision_defaults.ts_ephemeral);
         assert!(config.fleet_missing_is_error);
+        let created = dir.path().join("fleet-state.json");
+        assert!(
+            created.is_file(),
+            "first load should create an empty fleet-state.json"
+        );
     }
 
     #[test]

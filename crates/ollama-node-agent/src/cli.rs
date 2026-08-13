@@ -24,6 +24,9 @@ pub enum Commands {
         /// Tailscale auth key env name (setup only; never written into serve).
         #[arg(long, env = "TS_AUTHKEY")]
         ts_authkey: Option<String>,
+        /// Print the systemd unit (`agent_unit_text`) and exit. No filesystem writes.
+        #[arg(long)]
+        print_unit: bool,
     },
     /// Unprivileged HTTP on :11436.
     Serve {
@@ -49,4 +52,18 @@ pub enum Commands {
         #[arg(long)]
         purge_ollama: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn setup_print_unit_parses() {
+        let cli = Cli::try_parse_from(["ollama-node-agent", "setup", "--print-unit"]).unwrap();
+        match cli.command {
+            Commands::Setup { print_unit, .. } => assert!(print_unit),
+            other => panic!("expected setup, got {other:?}"),
+        }
+    }
 }

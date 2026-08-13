@@ -1,0 +1,5 @@
+#!/bin/sh
+set -e
+PLIST="/Library/LaunchDaemons/com.ollama.node-agent.plist"
+launchctl bootout system/com.ollama.node-agent 2>/dev/null || true
+launchctl bootstrap system "$PLIST"

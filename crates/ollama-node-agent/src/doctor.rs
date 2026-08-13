@@ -55,6 +55,12 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
             "macOS LaunchDaemon often runs as root; GPU backend is Metal (no nvidia-smi)".into(),
         );
     }
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(note) = linux_no_systemd_note(crate::setup::systemd_detected()) {
+            notes.push(note.into());
+        }
+    }
     let ts = addrs_have_tailscale();
     Ok(DoctorReport {
         os: std::env::consts::OS.into(),
@@ -70,6 +76,13 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
     })
 }
 
+pub const NO_SYSTEMD_NOTE: &str =
+    "no systemd; start `ollama-node-agent serve` under your supervisor";
+
+pub(crate) fn linux_no_systemd_note(systemd: bool) -> Option<&'static str> {
+    (!systemd).then_some(NO_SYSTEMD_NOTE)
+}
+
 fn addrs_have_tailscale() -> bool {
     let addrs = HostAddrs;
     let addrs: &dyn AddrSource = &addrs;
@@ -77,4 +90,19 @@ fn addrs_have_tailscale() -> bool {
         .ipv4s()
         .into_iter()
         .any(crate::listen::is_tailscale_ipv4)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn no_systemd_note_is_stable() {
+        assert_eq!(
+            NO_SYSTEMD_NOTE,
+            "no systemd; start `ollama-node-agent serve` under your supervisor"
+        );
+        assert_eq!(linux_no_systemd_note(true), None);
+        assert_eq!(linux_no_systemd_note(false), Some(NO_SYSTEMD_NOTE));
+    }
 }

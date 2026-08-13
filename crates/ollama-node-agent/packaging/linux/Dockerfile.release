@@ -1,0 +1,45 @@
+# Toolchain for local `task agent:release:linux` / `:deb`.
+# Not the serve image (`Dockerfile.agent`) and not the router (`Dockerfile`).
+#
+#   docker build -f crates/ollama-node-agent/packaging/linux/Dockerfile.release \
+#     -t ollama-node-agent-release:local \
+#     crates/ollama-node-agent/packaging/linux
+
+FROM rust:1.97-slim-bookworm
+
+ARG NFPM_VERSION=2.47.0
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        gcc \
+        g++ \
+        make \
+        cmake \
+        clang \
+        libclang-dev \
+        nasm \
+        pkg-config \
+        perl \
+        xz-utils \
+        musl-tools \
+        binutils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+         x86_64) nfpm_asset=Linux_x86_64 ;; \
+         aarch64|arm64) nfpm_asset=Linux_arm64 ;; \
+         *) echo "unsupported arch $arch" >&2; exit 1 ;; \
+       esac \
+    && curl -fsSL -o /tmp/nfpm.tgz \
+         "https://github.com/goreleaser/nfpm/releases/download/v${NFPM_VERSION}/nfpm_${NFPM_VERSION}_${nfpm_asset}.tar.gz" \
+    && tar -xzf /tmp/nfpm.tgz -C /usr/local/bin nfpm \
+    && rm /tmp/nfpm.tgz \
+    && nfpm --version
+
+WORKDIR /src

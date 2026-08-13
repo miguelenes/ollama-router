@@ -30,6 +30,43 @@
       "tooltip": "Pull/delete jobs and auto_pull_on_miss",
       "type": "link",
       "url": "/d/ollama-router-jobs/ollama-router-jobs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Logs",
+      "tooltip": "Router container logs (allowlisted fields)",
+      "type": "link",
+      "url": "/d/ollama-router-logs/ollama-router-logs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Verda",
+      "tooltip": "Spot lifecycle and cost",
+      "type": "link",
+      "url": "/d/ollama-router-verda/ollama-router-verda"
+    },
+    {
+      "asDropdown": true,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [
+        "stack"
+      ],
+      "targetBlank": false,
+      "title": "Stack",
+      "tooltip": "Compose Prometheus, Alloy, Loki, Alertmanager (additive; not home)",
+      "type": "dashboards"
     }
   ],
   "liveNow": false,
@@ -1388,7 +1425,8 @@
         }
       ],
       "title": "Router logs (allowlisted fields)",
-      "type": "logs"
+      "type": "logs",
+      "description": "Short strip. Filtered explorer: Logs dashboard (/d/ollama-router-logs). Allowlisted fields only."
     }
   ],
   "refresh": "10s",
@@ -1409,5 +1447,5 @@
   "uid": "ollama-router",
   "version": 1,
   "weekStart": "",
-  "description": "Fleet RED, inventory, RAM/GPU util, and Verda. Router scrape only for fleet telemetry; compose mock :11436 is local-only. Duration is class-only. Do not query model names. vram_free_gb=0 is empty only when vram_free_known=1."
+  "description": "Fleet RED, inventory, RAM/GPU util, and Verda. Router scrape only for fleet telemetry. Duration is class-only. Do not query model names. vram_free_gb=0 is empty only when vram_free_known=1."
 }

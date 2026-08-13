@@ -1,0 +1,6 @@
+# Native local-dev inventory. Host Ollama is a service on loopback :11434.
+# The router listens on :11435 so it does not collide with that daemon.
+version: 1
+nodes:
+  - id: local
+    url: http://127.0.0.1:11434

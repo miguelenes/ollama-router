@@ -40,36 +40,94 @@ tasks:
       - docker build -t ollama-router:local .
 
   compose:up:
-    desc: Build and start the mock fleet plus Grafana/Prometheus/Loki (loopback :11435 / :3000 / :9090)
+    desc: Start Grafana/Prometheus/Loki (loopback :3000 / :9090); scrape native router on host :11435
     cmds:
-      - docker compose -f deploy/compose.yaml up --build -d
+      - docker compose -f deploy/compose.yaml up -d
+      - cmd: |
+          if curl -fsS http://127.0.0.1:11435/healthz >/dev/null; then
+            echo "Grafana http://127.0.0.1:3000 — Prometheus scrape of host :11435 is up"
+          else
+            echo "Grafana http://127.0.0.1:3000 will show 0 nodes until the native router is up." >&2
+            echo "Host Ollama stays on :11434. In another terminal: task dev" >&2
+            echo "(router :11435 → Ollama :11434, agent :11436)" >&2
+          fi
+        sh: [bash, -euo, pipefail, -c]
+
+  compose:mock:
+    desc: Build and start the canned mock CPU+GPU fleet plus Grafana/Prometheus/Loki (loopback :11435 / :3000 / :9090)
+    cmds:
+      - docker compose -f deploy/compose.mock.yaml up --build -d
 
   compose:down:
-    desc: Stop compose (keeps grafana-data; no -v)
+    desc: Stop compose and mock compose (keeps grafana-data; no -v)
     cmds:
       - docker compose -f deploy/compose.yaml down --remove-orphans
+      - docker compose -f deploy/compose.mock.yaml down --remove-orphans
 
   compose:restart:
-    desc: Restart compose services
+    desc: Restart compose observability services
     cmds:
       - docker compose -f deploy/compose.yaml restart
 
   compose:ps:
-    desc: Show compose mock fleet status
+    desc: Show compose observability status
     cmds:
       - docker compose -f deploy/compose.yaml ps
 
   compose:logs:
-    desc: Follow compose mock fleet logs
+    desc: Follow compose observability logs
     cmds:
       - docker compose -f deploy/compose.yaml logs -f
 
   obs:open:
-    desc: Print local Grafana dashboard URLs (fleet overview, nodes, model operations)
+    desc: Print local Grafana dashboard URLs (fleet overview, nodes, model operations, logs, verda, stack)
     cmds:
       - echo http://127.0.0.1:3000/d/ollama-router/ollama-router
       - echo http://127.0.0.1:3000/d/ollama-router-nodes/ollama-router-nodes
       - echo http://127.0.0.1:3000/d/ollama-router-jobs/ollama-router-jobs
+      - echo http://127.0.0.1:3000/d/ollama-router-logs/ollama-router-logs
+      - echo http://127.0.0.1:3000/d/ollama-router-verda/ollama-router-verda
+      - echo http://127.0.0.1:3000/d/compose-scrapes/compose-scrapes
+      - echo http://127.0.0.1:3000/dashboards?tag=stack
+
+  agent:serve:
+    desc: Native node-agent on loopback :11436 (deploy/agent.local.yaml; does not run setup)
+    cmds:
+      - cargo run -p ollama-node-agent --locked -- serve --config deploy/agent.local.yaml --host 127.0.0.1 --port 11436
+
+  router:serve:
+    desc: Native router on :11435 against host Ollama (deploy/fleet.local.yaml)
+    env:
+      OLLAMA_ROUTER_FLEET: deploy/fleet.local.yaml
+      OLLAMA_ROUTER_CONFIG: deploy/router.local.yaml
+      OLLAMA_ROUTER_STATE_FILE: .local/ollama-router/fleet-state.json
+      OLLAMA_ROUTER_HOST: "0.0.0.0"
+      OLLAMA_ROUTER_PORT: "11435"
+    cmds:
+      - mkdir -p .local/ollama-router
+      - cargo run -p ollama-router --locked -- serve --host 0.0.0.0 --port 11435
+
+  dev:
+    desc: Build once, then agent :11436 + router :11435 against host Ollama :11434
+    cmds:
+      - cargo build --locked -p ollama-router -p ollama-node-agent
+      - cmd: |
+          if ! curl -fsS http://127.0.0.1:11434/api/tags >/dev/null; then
+            echo "host Ollama is not reachable at http://127.0.0.1:11434" >&2
+            exit 1
+          fi
+          mkdir -p .local/ollama-router
+          ./target/debug/ollama-node-agent serve --config deploy/agent.local.yaml --host 127.0.0.1 --port 11436 &
+          AGENT_PID=$!
+          trap 'kill "$AGENT_PID" 2>/dev/null || true' EXIT INT TERM
+          export OLLAMA_ROUTER_FLEET=deploy/fleet.local.yaml
+          export OLLAMA_ROUTER_CONFIG=deploy/router.local.yaml
+          export OLLAMA_ROUTER_STATE_FILE=.local/ollama-router/fleet-state.json
+          export OLLAMA_ROUTER_HOST=0.0.0.0
+          export OLLAMA_ROUTER_PORT=11435
+          echo "Ollama :11434 → router :11435, agent :11436" >&2
+          ./target/debug/ollama-router serve --host 0.0.0.0 --port 11435
+        sh: [bash, -euo, pipefail, -c]
 
   agent:build:
     desc: Build ollama-node-agent
@@ -85,3 +143,70 @@ tasks:
     desc: Read-only node-agent report for this machine (no side effects)
     cmds:
       - cargo run -p ollama-node-agent --locked -- doctor
+
+  agent:release:
+    desc: Host-OS agent artifacts into dist/agent
+    cmds:
+      - task: agent:release:linux
+        platforms: [linux]
+      - task: agent:release:deb
+        platforms: [linux]
+      - task: agent:release:macos
+        platforms: [darwin]
+      - task: agent:release:windows
+        platforms: [windows]
+
+  agent:release:linux:
+    desc: musl tarball for this host via Docker rust:1.97-slim-bookworm
+    cmds:
+      - cmd: |
+          case "$(uname -m)" in
+            x86_64) ARCH=amd64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          bash crates/ollama-node-agent/packaging/linux/release-in-docker.sh \
+            musl "$ARCH" dist/agent
+        sh: [bash, -euo, pipefail, -c]
+
+  agent:release:deb:
+    desc: gnu bookworm .deb for this host via Docker rust:1.97-slim-bookworm
+    cmds:
+      - cmd: |
+          case "$(uname -m)" in
+            x86_64) ARCH=amd64 ;;
+            aarch64|arm64) ARCH=arm64 ;;
+            *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          VER=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+          bash crates/ollama-node-agent/packaging/linux/release-in-docker.sh \
+            gnu "$ARCH" dist/agent "$VER"
+        sh: [bash, -euo, pipefail, -c]
+
+  agent:release:macos:
+    desc: .pkg plus unsigned zip for this host (macOS)
+    cmds:
+      - cmd: |
+          case "$(uname -m)" in
+            x86_64) ARCH=amd64; TARGET=x86_64-apple-darwin ;;
+            arm64) ARCH=arm64; TARGET=aarch64-apple-darwin ;;
+            *) echo "unsupported arch $(uname -m)" >&2; exit 1 ;;
+          esac
+          VER=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+          rustup target add "$TARGET"
+          cargo build --release --locked -p ollama-node-agent --target "$TARGET"
+          bash crates/ollama-node-agent/packaging/macos/pack-pkg.sh \
+            "target/${TARGET}/release/ollama-node-agent" "$ARCH" "$VER" dist/agent
+        sh: [bash, -euo, pipefail, -c]
+
+  agent:release:windows:
+    desc: portable exe plus MSI (needs WiX v5 on PATH)
+    cmds:
+      - cmd: |
+          VER=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
+          cargo build --release --locked -p ollama-node-agent
+          mkdir -p dist/agent
+          cp target/release/ollama-node-agent.exe dist/agent/ollama-node-agent-windows-amd64.exe
+          bash crates/ollama-node-agent/packaging/windows/pack-msi.sh \
+            target/release/ollama-node-agent.exe "$VER" dist/agent
+        sh: [bash, -euo, pipefail, -c]

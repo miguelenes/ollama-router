@@ -1,0 +1,51 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="Ollama Node Agent"
+    Manufacturer="ollama-router"
+    Version="$(var.ProductVersion)"
+    UpgradeCode="9F3A2C10-8B7E-4D61-A5C4-1E8F0B2D6A73"
+    Scope="perMachine">
+    <MajorUpgrade DowngradeErrorMessage="A newer version is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Feature Id="Main" Title="Ollama Node Agent" Level="1">
+      <ComponentGroupRef Id="ProductComponents" />
+    </Feature>
+  </Package>
+  <Fragment>
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="ollama-node-agent">
+        <Component Id="AgentExe" Guid="B2E4C1A8-7D5F-4A93-9E10-3C8B5D6F2A11">
+          <File Id="AgentExeFile" Source="$(var.ExePath)" Name="ollama-node-agent.exe" KeyPath="yes" />
+          <ServiceInstall
+            Id="ServiceInstaller"
+            Name="ollama-node-agent"
+            DisplayName="Ollama Node Agent"
+            Description="Capacity agent and supervisor for a local Ollama node"
+            Type="ownProcess"
+            Start="auto"
+            Account="LocalSystem"
+            ErrorControl="normal"
+            Arguments="serve --windows-service --config &quot;C:\ProgramData\ollama-node-agent\config.yaml&quot;" />
+          <ServiceControl
+            Id="ServiceController"
+            Name="ollama-node-agent"
+            Start="install"
+            Stop="both"
+            Remove="uninstall"
+            Wait="yes" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="AgentData" Name="ollama-node-agent">
+        <Component Id="AgentDataDir" Guid="C3F5D2B9-8E6A-4B04-AF21-4D9C6E7A3B22">
+          <CreateFolder />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <ComponentGroup Id="ProductComponents">
+      <ComponentRef Id="AgentExe" />
+      <ComponentRef Id="AgentDataDir" />
+    </ComponentGroup>
+  </Fragment>
+</Wix>

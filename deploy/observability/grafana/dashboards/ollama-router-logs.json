@@ -1,0 +1,346 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Router container Loki logs (compose service router only; no node-agent). Alloy promotes the level stream label; node, reason, path, request_class, request_id, and timestamp are JSON fields — queries use | json, not invented Loki labels. line_format is allowlisted fields only (no prompt, messages, body, embeddings, tokens, Authorization, or secrets). All / .* is match-all; label_format treats missing JSON fields as empty so All does not hide lines that omit node or reason. Alloy sensitive_keys drop counts are not in Loki — do not fake them here.",
+  "editable": false,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Fleet overview",
+      "tooltip": "Fleet-wide RED and Verda",
+      "type": "link",
+      "url": "/d/ollama-router/ollama-router"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Nodes",
+      "tooltip": "Per-node health, load, and capacity",
+      "type": "link",
+      "url": "/d/ollama-router-nodes/ollama-router-nodes"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Model operations",
+      "tooltip": "Pull/delete jobs and auto_pull_on_miss",
+      "type": "link",
+      "url": "/d/ollama-router-jobs/ollama-router-jobs"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Verda",
+      "tooltip": "Spot lifecycle and cost",
+      "type": "link",
+      "url": "/d/ollama-router-verda/ollama-router-verda"
+    }
+  ],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "title": "Volume",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "count_over_time on the same {container=\"router\"} | json stream. keep drops extra JSON keys (including model) before the metric so this is not a body scrape and does not label by model name. Alloy drop counters are not in Loki.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 50,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "(?i)error"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "red",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byRegexp",
+              "options": "(?i)warn"
+            },
+            "properties": [
+              {
+                "id": "color",
+                "value": {
+                  "fixedColor": "orange",
+                  "mode": "fixed"
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 1
+      },
+      "id": 2,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "sum by (level) (count_over_time({container=\"router\"} | json | label_format level=`{{.level}}`, node=`{{.node}}`, reason=`{{.reason}}`, path=`{{.path}}`, request_class=`{{.request_class}}` | keep level, node, reason, path, request_class | level=~\"(?i)(${level:regex})\" | node=~\"${node:regex}\" | reason=~\"$reason\" | path=~\"$path\" | request_class=~\"${request_class:regex}\" [1m]))",
+          "legendFormat": "{{level}}",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Log lines by level",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 9
+      },
+      "id": 3,
+      "title": "Logs",
+      "type": "row"
+    },
+    {
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "description": "Allowlisted fields only: timestamp, level, node, reason, request_id, path, request_class. Do not parse or display prompt, messages, body, embeddings, tokens, or secrets. Filters apply to JSON fields after | json (level is also an Alloy stream label).",
+      "gridPos": {
+        "h": 16,
+        "w": 24,
+        "x": 0,
+        "y": 10
+      },
+      "id": 4,
+      "options": {
+        "dedupStrategy": "none",
+        "enableLogDetails": false,
+        "prettifyLogMessage": false,
+        "showCommonLabels": false,
+        "showLabels": false,
+        "showTime": true,
+        "sortOrder": "Descending",
+        "wrapLogMessage": true
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "editorMode": "code",
+          "expr": "{container=\"router\"} | json | label_format level=`{{.level}}`, node=`{{.node}}`, reason=`{{.reason}}`, path=`{{.path}}`, request_class=`{{.request_class}}` | level=~\"(?i)(${level:regex})\" | node=~\"${node:regex}\" | reason=~\"$reason\" | path=~\"$path\" | request_class=~\"${request_class:regex}\" | line_format \"{{.timestamp}} {{.level}} node={{.node}} reason={{.reason}} request_id={{.request_id}} path={{.path}} request_class={{.request_class}}\"",
+          "queryType": "range",
+          "refId": "A"
+        }
+      ],
+      "title": "Router logs (allowlisted fields)",
+      "type": "logs"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": [
+    "ollama-router"
+  ],
+  "templating": {
+    "list": [
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Level",
+        "multi": true,
+        "name": "level",
+        "options": [],
+        "query": "debug,info,warn,error",
+        "queryValue": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(ollama_router_node_info, node)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Node",
+        "multi": true,
+        "name": "node",
+        "options": [],
+        "query": "label_values(ollama_router_node_info, node)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": ".*",
+          "value": ".*"
+        },
+        "hide": 0,
+        "label": "Reason (regex; .* = all)",
+        "name": "reason",
+        "options": [
+          {
+            "selected": true,
+            "text": ".*",
+            "value": ".*"
+          }
+        ],
+        "query": ".*",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "current": {
+          "selected": false,
+          "text": ".*",
+          "value": ".*"
+        },
+        "hide": 0,
+        "label": "Path (regex; .* = all)",
+        "name": "path",
+        "options": [
+          {
+            "selected": true,
+            "text": ".*",
+            "value": ".*"
+          }
+        ],
+        "query": ".*",
+        "skipUrlSync": false,
+        "type": "textbox"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
+        "datasource": {
+          "type": "prometheus",
+          "uid": "prometheus"
+        },
+        "definition": "label_values(ollama_router_requests_total, class)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Request class",
+        "multi": true,
+        "name": "request_class",
+        "options": [],
+        "query": "label_values(ollama_router_requests_total, class)",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-15m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "Ollama Router - Logs",
+  "uid": "ollama-router-logs",
+  "version": 1,
+  "weekStart": ""
+}

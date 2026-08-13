@@ -257,4 +257,13 @@ mod tests {
         assert_eq!(cfg.listen, BindSpec::Mode(ListenMode::Loopback));
         assert_eq!(cfg.port, 11436);
     }
+
+    #[test]
+    fn packaged_linux_config_is_tailscale() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("packaging/linux/config.yaml");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let cfg: AgentConfig = serde_yaml::from_str(&raw).unwrap();
+        assert_eq!(cfg.listen, BindSpec::Mode(ListenMode::Tailscale));
+        assert_eq!(cfg.port, 11436);
+    }
 }

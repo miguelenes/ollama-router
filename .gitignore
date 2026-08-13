@@ -17,6 +17,12 @@ id_rsa*
 
 .task/
 
+# Local `task agent:release` output
+/dist
+
+# Native `task dev` job store + fleet state
+.local/
+
 # AICode index transaction scratch (durable segments stay tracked)
 .aicode/index/tmp/
 

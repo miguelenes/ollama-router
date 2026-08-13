@@ -1,13 +1,15 @@
 //! Linux systemd converge.
 
 use std::net::IpAddr;
-use std::path::Path;
 use std::time::Duration;
 
 use tokio::process::Command;
 use tokio::time::timeout;
 
-use super::{write_bytes_idempotent, write_token_file, ConvergeState, SetupContext};
+use super::{
+    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
+    SUPERVISOR_MANUAL, SUPERVISOR_SYSTEMD,
+};
 use crate::collect::ollama_version;
 
 const INSTALL_SH: &str = "https://ollama.com/install.sh";
@@ -17,9 +19,7 @@ pub async fn converge(
     ollama_bind: &str,
     agent_ip: IpAddr,
 ) -> anyhow::Result<ConvergeState> {
-    if !Path::new("/run/systemd/system").exists() && !ctx.dry_commands {
-        anyhow::bail!("systemd is required on Linux (no /run/systemd/system)");
-    }
+    let systemd = systemd_available(ctx.dry_commands);
 
     let mut state = ConvergeState::load(&ctx.paths.state);
     state.schema = super::STATE_SCHEMA;
@@ -41,25 +41,34 @@ pub async fn converge(
 
     write_token_file(&ctx.paths.token_file, ctx.config.bearer_token())?;
 
-    let dropin_dir = ctx.paths.unit_dir.join("ollama.service.d");
-    std::fs::create_dir_all(&dropin_dir)?;
-    let dropin = ollama_dropin(
-        ollama_bind,
-        ctx.config.ollama.models_dir.as_deref(),
-        &ctx.config.ollama.extra_env,
-    );
-    write_bytes_idempotent(
-        &dropin_dir.join("ollama-node-agent.conf"),
-        dropin.as_bytes(),
-    )?;
+    if systemd {
+        let dropin_dir = ctx.paths.unit_dir.join("ollama.service.d");
+        std::fs::create_dir_all(&dropin_dir)?;
+        let dropin = ollama_dropin(
+            ollama_bind,
+            ctx.config.ollama.models_dir.as_deref(),
+            &ctx.config.ollama.extra_env,
+        );
+        write_bytes_idempotent(
+            &dropin_dir.join("ollama-node-agent.conf"),
+            dropin.as_bytes(),
+        )?;
 
-    let agent_unit = agent_unit_text();
-    let unit_changed = write_bytes_idempotent(
-        &ctx.paths.unit_dir.join("ollama-node-agent.service"),
-        agent_unit.as_bytes(),
-    )?;
-    tracing::info!(unit_changed, "agent systemd unit");
-    state.unit_written = true;
+        let unit_changed = write_bytes_idempotent(
+            &ctx.paths.unit_dir.join("ollama-node-agent.service"),
+            super::agent_unit_text().as_bytes(),
+        )?;
+        tracing::info!(unit_changed, "agent systemd unit");
+        state.unit_written = true;
+        state.supervisor = Some(SUPERVISOR_SYSTEMD.into());
+    } else {
+        tracing::info!(
+            config = %ctx.paths.config.display(),
+            "systemd not detected; binary will be installed without a unit"
+        );
+        state.unit_written = false;
+        state.supervisor = Some(SUPERVISOR_MANUAL.into());
+    }
 
     if ctx.config.tailscale.enable {
         if let Some(key) = ctx.ts_authkey.filter(|k| !k.is_empty()) {
@@ -70,15 +79,32 @@ pub async fn converge(
     }
 
     if !ctx.dry_commands {
-        ensure_agent_user().await?;
-        install_self_binary(&ctx.paths.bin_dir.join("ollama-node-agent")).await?;
-        systemctl(&["daemon-reload"]).await?;
-        systemctl(&["enable", "--now", "ollama"]).await?;
-        wait_ollama_tags(ollama_bind).await?;
-        systemctl(&["enable", "--now", "ollama-node-agent"]).await?;
+        let dest = ctx.paths.bin_dir.join("ollama-node-agent");
+        if systemd {
+            ensure_agent_user().await?;
+            let _ = Command::new("systemctl")
+                .args(["stop", "ollama-node-agent"])
+                .status()
+                .await;
+        }
+        install_self_binary(&dest)?;
+        if systemd {
+            systemctl(&["daemon-reload"]).await?;
+            systemctl(&["enable", "--now", "ollama"]).await?;
+            wait_ollama_tags(ollama_bind).await?;
+            systemctl(&["enable", "--now", "ollama-node-agent"]).await?;
+        } else {
+            tracing::info!(
+                bin = %dest.display(),
+                config = %ctx.paths.config.display(),
+                "no systemd; start under your supervisor: {} serve --config {}",
+                dest.display(),
+                ctx.paths.config.display()
+            );
+        }
     }
 
-    let _ = agent_ip;
+    tracing::info!(agent_ip = %agent_ip, systemd, "linux setup converge done");
     state.last_converge = Some(now_rfc3339());
     state.store(&ctx.paths.state)?;
     Ok(state)
@@ -103,25 +129,8 @@ fn ollama_dropin(
     out
 }
 
-fn agent_unit_text() -> String {
-    r#"[Unit]
-Description=Ollama node agent
-After=network-online.target ollama.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=ollama-node-agent
-ExecStart=/usr/local/bin/ollama-node-agent serve --config /etc/ollama-node-agent/config.yaml
-Restart=on-failure
-RestartSec=2
-NoNewPrivileges=true
-EnvironmentFile=-/etc/ollama-node-agent/env
-
-[Install]
-WantedBy=multi-user.target
-"#
-    .into()
+fn systemd_available(dry_commands: bool) -> bool {
+    dry_commands || super::systemd_detected()
 }
 
 async fn install_ollama() -> anyhow::Result<()> {
@@ -169,27 +178,6 @@ async fn ensure_agent_user() -> anyhow::Result<()> {
         .await?;
     if !status.success() {
         anyhow::bail!("useradd ollama-node-agent failed");
-    }
-    Ok(())
-}
-
-async fn install_self_binary(dest: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if dest.exists() {
-        if let (Ok(a), Ok(b)) = (std::fs::read(&exe), std::fs::read(dest)) {
-            if a == b {
-                return Ok(());
-            }
-        }
-    }
-    std::fs::copy(&exe, dest)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755))?;
     }
     Ok(())
 }
@@ -255,9 +243,15 @@ mod tests {
 
     #[test]
     fn unit_has_nonewprivileges() {
-        let u = agent_unit_text();
+        let u = crate::setup::agent_unit_text();
         assert!(u.contains("NoNewPrivileges=true"));
         assert!(u.contains("User=ollama-node-agent"));
+        assert!(u.contains("ExecStart=/usr/local/bin/ollama-node-agent"));
+    }
+
+    #[test]
+    fn dry_commands_count_as_systemd_for_unit_writes() {
+        assert!(systemd_available(true));
     }
 
     #[tokio::test]
@@ -279,6 +273,7 @@ mod tests {
             .await
             .unwrap();
         assert!(state.unit_written);
+        assert_eq!(state.supervisor.as_deref(), Some(SUPERVISOR_SYSTEMD));
         assert!(paths.state.exists());
         let unit =
             std::fs::read_to_string(paths.unit_dir.join("ollama-node-agent.service")).unwrap();
@@ -294,5 +289,6 @@ mod tests {
             .await
             .unwrap();
         assert!(again.unit_written);
+        assert_eq!(again.supervisor.as_deref(), Some(SUPERVISOR_SYSTEMD));
     }
 }

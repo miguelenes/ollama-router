@@ -1,49 +1,13 @@
-# Mixed CPU + GPU Ollama mock fleet plus local observability.
-# Host ports bind loopback only. 11435 avoids colliding with a local Ollama on :11434.
-# The router process needs no GPU. Observability is on by default (no compose profile).
+# Local Grafana / Prometheus / Loki / Alloy / Alertmanager.
+# Native `task dev` runs the router on the host (:11435 → host Ollama :11434).
+# This file does not start mock-cpu, mock-gpu, or a router container.
+# Host ports bind loopback only. Observability is on by default (no compose profile).
+# Optional canned fleet: `task compose:mock` (do not run both stacks at once).
 services:
-  mock-cpu:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: mock
-    environment:
-      MOCK_ROLE: cpu
-      OLLAMA_MOCK_PORT: "11434"
-      CAPACITY_PORT: "11436"
-
-  mock-gpu:
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: mock
-    environment:
-      MOCK_ROLE: gpu
-      OLLAMA_MOCK_PORT: "11434"
-      CAPACITY_PORT: "11436"
-
-  router:
-    image: ollama-router:local
-    build:
-      context: ..
-      dockerfile: Dockerfile
-      target: router
-    ports:
-      - "127.0.0.1:11435:11434"
-    volumes:
-      - ./fleet.yaml:/etc/ollama-router/fleet.yaml:ro
-    environment:
-      OLLAMA_ROUTER_FLEET: /etc/ollama-router/fleet.yaml
-      OLLAMA_ROUTER_HOST: 0.0.0.0
-      OLLAMA_ROUTER_PORT: "11434"
-      OLLAMA_ROUTER_AUTO_PULL_ON_MISS: "true"
-      RUST_LOG: ollama_router=info
-    depends_on:
-      - mock-cpu
-      - mock-gpu
-
   prometheus:
     image: prom/prometheus:v3.2.1
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
@@ -58,9 +22,9 @@ services:
       - /prometheus
     user: "0"
     depends_on:
-      - router
       - alloy
       - alertmanager
+      - loki
 
   alertmanager:
     image: prom/alertmanager:v0.28.1

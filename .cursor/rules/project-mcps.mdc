@@ -1,0 +1,22 @@
+---
+description: When and how to use project MCPs docsrs, grafana, and prometheus
+alwaysApply: true
+---
+
+# Project MCPs
+
+Configured in `.cursor/mcp.json` and `.opencode/opencode.json`. Read the matching skill before nontrivial use.
+
+| MCP | Skill | Use for | Not for |
+|-----|-------|---------|---------|
+| **docsrs** | `docsrs-mcp` | Rust signatures, fields, methods, trait impls from rustdoc | Narrative guides (use Context7); in-tree types (read source) |
+| **grafana** | `grafana-mcp` | Dashboards, panels, Loki via Grafana, deeplinks (`:3000`) | Raw PromQL-only work (use **prometheus**) |
+| **prometheus** | `prometheus-mcp` | PromQL, targets, `ollama_router_*` discovery (`:9090`) | Dashboard JSON edits; scrape YAML (use `prometheus-configuration`) |
+
+## Defaults
+
+- Call `GetMcpTools` for the server before first invoke in a session.
+- Grafana writes / alert creates only when the user asks.
+- Prefer `get_dashboard_summary` / `patch_dashboard` over full dashboard JSON.
+- Prom queries need a bounded time range; scrape **router** `:11435` only — never node-agent `:11436`.
+- Compose home dashboard UID: `ollama-router`.

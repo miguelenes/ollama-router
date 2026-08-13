@@ -1,0 +1,4 @@
+# Native local-dev tunables overlay (`OLLAMA_ROUTER_CONFIG`).
+# Do not add `nodes:` — membership is deploy/fleet.local.yaml.
+# Writable paths: the process cannot create /var/lib/ollama-router.
+job_store_path: .local/ollama-router/model-operations.sqlite3

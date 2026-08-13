@@ -88,8 +88,11 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
 task docker         # docker build -t ollama-router:local .
-task compose:up     # mock CPU+GPU fleet on host :11435
+task dev            # host Ollama :11434 → router :11435 + agent :11436
+task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
+task compose:mock   # optional canned CPU+GPU mock fleet on host :11435
 task agent:doctor   # read-only node-agent report for this machine
+task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97-slim-bookworm; GHA never installs task)
 ```
 
 Before finishing a coding task, run `task check` and do not stop while it fails.
@@ -128,7 +131,7 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 - Verda `ensure` is adopt-first; demand scale coalesces `create_additional` only (never `ensure`). Tag instances `managed_by=ollama-router` and reject `illumination-*`; FleetState ownership is `managed_by=verda`.
 - Hot Prometheus metrics use the `prometheus` crate in the binary only and must not label by model name; `/metrics` and `/healthz` stay unauthenticated. Scrape the router only — do not add a Prometheus job for node-agent `:11436`. Treat `vram_free_gb=0` as unknown, not an empty GPU; do not add labels to `node_info` (`node`, `origin`, `role`).
 - Model jobs: `auto_pull_on_miss` exists (default **false**, placement-gated via `static_capacity_fits`); still no `unsafe_single_node_mutate`. SQLite stores operation metadata only (no bodies or provider error text).
-- Local compose publishes the router on host `:11435`; document Grafana `:3000` and Prometheus `:9090`.
+- Local-dev is native `task dev` (host Ollama `:11434`, router `:11435`, agent `:11436`). `task compose:up` is Grafana `:3000` / Prometheus `:9090` only. `task compose:mock` is the canned fleet.
 
 <!-- BEGIN opencode-rag -->
 ## OpenCodeRAG (OpenCode only)

@@ -1,0 +1,4 @@
+# Default agent config (dpkg conffile). This package does not install Ollama;
+# run `sudo ollama-node-agent setup` to converge Ollama and the listen drop-in.
+listen: tailscale
+port: 11436

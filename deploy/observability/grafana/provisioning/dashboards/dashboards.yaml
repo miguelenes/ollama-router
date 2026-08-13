@@ -10,4 +10,6 @@ providers:
     allowUiUpdates: false
     options:
       path: /var/lib/grafana/dashboards
-      foldersFromFilesStructure: false
+      # Product JSON at this path root stays in General (home is still
+      # ollama-router.json). Nested stack/*.json become folder "stack".
+      foldersFromFilesStructure: true

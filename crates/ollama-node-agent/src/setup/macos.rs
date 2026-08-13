@@ -6,7 +6,10 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use super::{write_bytes_idempotent, write_token_file, ConvergeState, SetupContext};
+use super::{
+    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
+    SUPERVISOR_LAUNCHD,
+};
 use crate::collect::{ollama_tags_ok, ollama_version};
 
 pub async fn converge(
@@ -38,13 +41,22 @@ pub async fn converge(
         &ctx.config.ollama.extra_env,
     )?;
 
-    let plist = agent_plist(agent_ip, ctx.config.port);
     let plist_path = ctx.paths.unit_dir.join("com.ollama.node-agent.plist");
-    write_bytes_idempotent(&plist_path, plist.as_bytes())?;
+    write_bytes_idempotent(&plist_path, agent_plist().as_bytes())?;
     state.unit_written = true;
+    state.supervisor = Some(SUPERVISOR_LAUNCHD.into());
+    tracing::info!(
+        agent_ip = %agent_ip,
+        port = ctx.config.port,
+        "LaunchDaemon bind comes from config.yaml / OLLAMA_NODE_AGENT_*"
+    );
 
     if !ctx.dry_commands {
-        install_self_binary(&ctx.paths.bin_dir.join("ollama-node-agent")).await?;
+        let _ = Command::new("launchctl")
+            .args(["bootout", "system/com.ollama.node-agent"])
+            .status()
+            .await;
+        install_self_binary(&ctx.paths.bin_dir.join("ollama-node-agent"))?;
         let running = ollama_tags_ok(&format!("http://{ollama_bind}")).await;
         if running {
             tracing::info!("ollama already serving; not launching a second process");
@@ -53,10 +65,6 @@ pub async fn converge(
                 "ollama not listening on {ollama_bind}; start Ollama.app or `brew services` then re-run setup"
             );
         }
-        let _ = Command::new("launchctl")
-            .args(["bootout", "system/com.ollama.node-agent"])
-            .status()
-            .await;
         let status = Command::new("launchctl")
             .args(["bootstrap", "system", plist_path.to_str().unwrap_or("")])
             .status()
@@ -96,36 +104,8 @@ fn write_macos_env(
     Ok(())
 }
 
-fn agent_plist(agent_ip: IpAddr, port: u16) -> String {
-    format!(
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.ollama.node-agent</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/usr/local/bin/ollama-node-agent</string>
-    <string>serve</string>
-    <string>--config</string>
-    <string>/Library/Application Support/ollama-node-agent/config.yaml</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>OLLAMA_NODE_AGENT_HOST</key>
-    <string>{agent_ip}</string>
-    <key>OLLAMA_NODE_AGENT_PORT</key>
-    <string>{port}</string>
-  </dict>
-</dict>
-</plist>
-"#
-    )
+fn agent_plist() -> &'static str {
+    include_str!("../../packaging/macos/com.ollama.node-agent.plist")
 }
 
 async fn install_ollama_macos() -> anyhow::Result<()> {
@@ -146,15 +126,6 @@ async fn install_ollama_macos() -> anyhow::Result<()> {
     anyhow::bail!("install Ollama.app or `brew install ollama`, then re-run setup")
 }
 
-async fn install_self_binary(dest: &std::path::Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(&exe, dest)?;
-    Ok(())
-}
-
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -164,12 +135,14 @@ fn now_rfc3339() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
 
     #[test]
     fn plist_contains_label() {
-        let p = agent_plist(IpAddr::V4(Ipv4Addr::LOCALHOST), 11436);
+        let p = agent_plist();
         assert!(p.contains("com.ollama.node-agent"));
-        assert!(p.contains("11436"));
+        assert!(p.contains("/usr/local/bin/ollama-node-agent"));
+        assert!(p.contains("<key>KeepAlive</key>"));
+        assert!(p.contains("<key>RunAtLoad</key>"));
+        assert!(!p.contains("OLLAMA_NODE_AGENT_HOST"));
     }
 }

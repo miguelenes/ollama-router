@@ -22,10 +22,13 @@ serde_yaml.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
 time.workspace = true
-tokio = { workspace = true, features = ["process", "fs"] }
+tokio = { workspace = true, features = ["process", "fs", "signal"] }
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.8"
 
 [dev-dependencies]
 http-body-util.workspace = true

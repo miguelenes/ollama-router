@@ -91,7 +91,7 @@ patterns:
 
   "mock|ollama-mock":
     - "crates/ollama-mock/src/main.rs"
-    - "deploy/compose.yaml"
+    - "deploy/compose.mock.yaml"
 
   "warm.?keep|keepalive":
     - "crates/ollama-router/src/warm.rs"

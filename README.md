@@ -112,12 +112,12 @@ docker run --rm -p 11434:11434 ollama-router:local
 curl -fsS http://127.0.0.1:11434/healthz
 # {"status":"ok","version":"0.1.0"}
 
-task compose:up
+# Host Ollama already on :11434 — router :11435, agent :11436 (does not run setup)
+task dev
 curl -fsS http://127.0.0.1:11435/healthz
 curl -fsS http://127.0.0.1:11435/api/tags
 curl -fsS http://127.0.0.1:11435/metrics | grep ollama_router_inflight
 
-# generate → gpu mock, embed → cpu mock (both nodes show on Overview / Fleet)
 curl -fsS http://127.0.0.1:11435/api/generate \
   -H 'Content-Type: application/json' \
   -d '{"model":"llama3.2:3b","prompt":"hi","stream":false}'
@@ -125,13 +125,22 @@ curl -fsS http://127.0.0.1:11435/api/embed \
   -H 'Content-Type: application/json' \
   -d '{"model":"qwen3-embedding:8b","input":"hi"}'
 
+task compose:up
 task obs:open
 # http://127.0.0.1:3000/d/ollama-router/ollama-router
 # http://127.0.0.1:3000/d/ollama-router-nodes/ollama-router-nodes
 # http://127.0.0.1:3000/d/ollama-router-jobs/ollama-router-jobs
+# http://127.0.0.1:3000/d/ollama-router-logs/ollama-router-logs
+# http://127.0.0.1:3000/d/ollama-router-verda/ollama-router-verda
+# http://127.0.0.1:3000/d/compose-scrapes/compose-scrapes
+# http://127.0.0.1:3000/dashboards?tag=stack
 ```
 
-Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Prometheus scrapes the router and mock `:11436` (`ollama_up`, `ollama_models`; counts only, no model names). Grafana is anonymous Admin on loopback (no login form). The Model operations dashboard (`/d/ollama-router-jobs`) shows terminal pull/delete counters, auto-pull wait, and placement/disk — it does not replace the fleet overview home dashboard. Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
+`task dev` preflights host Ollama (`GET /api/tags` on `:11434`), then runs `ollama-node-agent serve` on loopback `:11436` and the router on `:11435` with [`deploy/fleet.local.yaml`](deploy/fleet.local.yaml). It does **not** run `setup`. `auto_pull_on_miss` stays **false** so a miss does not pull Hub models onto the real disk.
+
+`task compose:up` is Grafana **3000** / Prometheus **9090** only (loopback). Loki, Alloy, and Alertmanager stay on the compose network. Prometheus scrapes the native router at `host.docker.internal:11435` (router binds `0.0.0.0:11435` so the scrape works). It does **not** scrape `:11436`. Grafana is anonymous Admin on loopback (no login form). Grafana **:3000** home is still the fleet overview (`ollama-router.json`). Stack dashboards (Prometheus, Alloy, Loki ingest, Alertmanager, Compose scrapes) are additive — they do not replace home. The Model operations dashboard (`/d/ollama-router-jobs`) shows terminal pull/delete counters, auto-pull wait, and placement/disk — it does not replace the fleet overview home dashboard. The Logs dashboard (`/d/ollama-router-logs`) filters router-container Loki lines (allowlisted fields); native `task dev` has no compose `router` container, so that dashboard is empty unless you use `task compose:mock`. The Verda dashboard (`/d/ollama-router-verda`) covers spot lifecycle and fleet-sum cost; it does not replace the home dashboard or the Nodes inventory table. Alloy mounts the Docker socket **read-only** so it can tail a compose `router` container — mock stack only. `task compose:down` also stops `compose.mock.yaml` and keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403.
+
+No host Ollama: `task compose:mock` builds the canned CPU+GPU mock fleet and a router container on host **11435**. Do not run it at the same time as `task compose:up` (same Grafana/Prometheus ports). Mock compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
 
 ## Develop
 
@@ -139,6 +148,9 @@ Local recipes live in [`Taskfile.yml`](Taskfile.yml) (not Make). `check` is sequ
 
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
+task dev            # host Ollama :11434 → router :11435 + agent :11436
+task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
+task compose:mock   # optional canned CPU+GPU mock fleet (no host Ollama)
 cargo test --workspace --locked
 ```
 
@@ -153,10 +165,23 @@ Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (
 
 ```bash
 task agent:doctor   # read-only: backend, Ollama health, listen addresses
+task agent:serve    # loopback :11436 via deploy/agent.local.yaml (no setup)
 task agent:build
 ```
 
-`setup` is privileged and idempotent (systemd / LaunchDaemon / Windows scheduled task). `serve` is unprivileged. Do not bind `:11436` to `0.0.0.0` / `listen: all` without a bearer token.
+`setup` is privileged and idempotent (systemd / LaunchDaemon / Windows Service). `serve` is unprivileged. Do not bind `:11436` to `0.0.0.0` / `listen: all` without a bearer token.
+
+### Node agent packages
+
+Release artifacts (`.github/workflows/release-agent.yml`; locally `task agent:release`, which on Linux uses Docker `rust:1.97-slim-bookworm`):
+
+| OS | Install path | Portable |
+| --- | --- | --- |
+| Linux amd64/arm64 | `ollama-node-agent_<ver>_<arch>.deb` (`apt install`; gnu, glibc ≥ bookworm) | musl `ollama-node-agent-linux-<arch>.tar.gz` then `sudo ./ollama-node-agent setup` |
+| macOS amd64/arm64 | `ollama-node-agent-<ver>-darwin-<arch>.pkg` | unsigned zip + `sudo ollama-node-agent setup` |
+| Windows amd64 | `ollama-node-agent-<ver>-windows-amd64.msi` (LocalSystem service) | `ollama-node-agent-windows-amd64.exe` then elevated `setup` |
+
+The `.deb` and tarball install the **agent** (binary + unit + `/etc/ollama-node-agent/config.yaml`). They do not download Ollama; run `sudo ollama-node-agent setup` to converge Ollama. Without systemd, `apt`/`setup` still succeed and print how to run `serve`. The tarball includes optional `contrib/openrc/` (`setup` does not install it). First SCM release deletes leftover `schtasks` named `ollama-node-agent`. Checksums: `SHA256SUMS.txt`. Apple notarize / Authenticode run only when the corresponding secrets are set.
 
 ## Sensitivity
 

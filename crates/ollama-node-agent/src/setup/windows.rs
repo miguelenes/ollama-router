@@ -7,8 +7,14 @@ use std::time::Duration;
 
 use tokio::process::Command;
 
-use super::{write_bytes_idempotent, write_token_file, ConvergeState, SetupContext};
+use super::{
+    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
+    SUPERVISOR_MANUAL, SUPERVISOR_SCM,
+};
 use crate::collect::ollama_version;
+use crate::service_identity::{
+    service_bin_path, FIREWALL_RULE_11434, FIREWALL_RULE_11436, SERVICE_DISPLAY_NAME, SERVICE_NAME,
+};
 
 /// Inno Setup flags from ollama/ollama `scripts/install.ps1`.
 pub const SETUP_SILENT_ARGS: &[&str] = &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"];
@@ -58,12 +64,22 @@ pub async fn converge(
     );
 
     if !ctx.dry_commands {
-        install_self_binary(&ctx.paths.bin_dir.join("ollama-node-agent.exe")).await?;
-        register_scheduled_task(&ctx.paths.bin_dir.join("ollama-node-agent.exe")).await?;
-        let _ = set_firewall(ollama_bind).await;
+        let dest = ctx.paths.bin_dir.join("ollama-node-agent.exe");
+        stop_windows_service().await;
+        install_self_binary(&dest)?;
+        let registered = register_windows_service(&dest).await?;
+        state.unit_written = registered;
+        state.supervisor = Some(if registered {
+            SUPERVISOR_SCM.into()
+        } else {
+            SUPERVISOR_MANUAL.into()
+        });
+        let _ = set_firewall().await;
+    } else {
+        state.unit_written = true;
+        state.supervisor = Some(SUPERVISOR_SCM.into());
     }
 
-    state.unit_written = true;
     state.last_converge = Some(now_rfc3339());
     state.store(&ctx.paths.state)?;
     Ok(state)
@@ -133,47 +149,77 @@ async fn download_and_unzip() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn install_self_binary(dest: &Path) -> anyhow::Result<()> {
-    let exe = std::env::current_exe()?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::copy(&exe, dest)?;
-    Ok(())
-}
-
-async fn register_scheduled_task(exe: &Path) -> anyhow::Result<()> {
-    let exe_s = exe.display().to_string();
+async fn delete_legacy_scheduled_task() {
     let _ = Command::new("schtasks")
-        .args(["/Delete", "/TN", "ollama-node-agent", "/F"])
+        .args(["/Delete", "/TN", SERVICE_NAME, "/F"])
         .status()
         .await;
-    let status = Command::new("schtasks")
-        .args([
-            "/Create",
-            "/TN",
-            "ollama-node-agent",
-            "/SC",
-            "ONSTART",
-            "/RL",
-            "HIGHEST",
-            "/RU",
-            "SYSTEM",
-            "/TR",
-            &format!("\"{exe_s}\" serve"),
-            "/F",
-        ])
-        .status()
-        .await?;
-    if !status.success() {
-        tracing::warn!("schtasks create failed; start `ollama-node-agent serve` at login");
-    }
-    Ok(())
 }
 
-async fn set_firewall(_bind: &str) -> anyhow::Result<()> {
-    for port in ["11434", "11436"] {
-        let name = format!("ollama-node-agent-{port}");
+async fn stop_windows_service() {
+    delete_legacy_scheduled_task().await;
+    let _ = Command::new("sc.exe")
+        .args(["stop", SERVICE_NAME])
+        .status()
+        .await;
+}
+
+async fn register_windows_service(exe: &Path) -> anyhow::Result<bool> {
+    let bin_path = service_bin_path(exe);
+    let exists = Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .status()
+        .await
+        .is_ok_and(|s| s.success());
+    let status = if exists {
+        Command::new("sc.exe")
+            .args([
+                "config",
+                SERVICE_NAME,
+                "binPath=",
+                &bin_path,
+                "start=",
+                "auto",
+                "obj=",
+                "LocalSystem",
+                "DisplayName=",
+                SERVICE_DISPLAY_NAME,
+            ])
+            .status()
+            .await?
+    } else {
+        Command::new("sc.exe")
+            .args([
+                "create",
+                SERVICE_NAME,
+                "binPath=",
+                &bin_path,
+                "start=",
+                "auto",
+                "obj=",
+                "LocalSystem",
+                "DisplayName=",
+                SERVICE_DISPLAY_NAME,
+            ])
+            .status()
+            .await?
+    };
+    if !status.success() {
+        tracing::warn!("sc create/config failed; start `ollama-node-agent serve` as LocalSystem");
+        return Ok(false);
+    }
+    let _ = Command::new("sc.exe")
+        .args(["start", SERVICE_NAME])
+        .status()
+        .await;
+    Ok(true)
+}
+
+async fn set_firewall() -> anyhow::Result<()> {
+    for (port, name) in [
+        ("11434", FIREWALL_RULE_11434),
+        ("11436", FIREWALL_RULE_11436),
+    ] {
         let _ = Command::new("netsh")
             .args([
                 "advfirewall",

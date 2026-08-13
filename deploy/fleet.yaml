@@ -1,3 +1,5 @@
+# Canned mock inventory for `task compose:mock` (mock-cpu / mock-gpu).
+# Native local-dev uses deploy/fleet.local.yaml (`task dev`).
 version: 1
 nodes:
   - id: cpu

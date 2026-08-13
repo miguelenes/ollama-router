@@ -1,0 +1,16 @@
+[Unit]
+Description=Ollama node agent
+After=network-online.target ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ollama-node-agent
+ExecStart=/usr/local/bin/ollama-node-agent serve --config /etc/ollama-node-agent/config.yaml
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+EnvironmentFile=-/etc/ollama-node-agent/env
+
+[Install]
+WantedBy=multi-user.target
