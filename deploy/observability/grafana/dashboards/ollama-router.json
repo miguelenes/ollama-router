@@ -392,7 +392,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "prometheus" },
           "editorMode": "code",
-          "expr": "sum by (reason) (rate(ollama_router_route_reason_total{reason=~\"all_nodes_saturated|no_healthy_nodes|public_url_blocked|insufficient_capacity\"}[5m]))",
+          "expr": "sum by (reason) (rate(ollama_router_route_reason_total{reason=~\"all_nodes_saturated|no_healthy_nodes|public_url_blocked|insufficient_capacity|model_missing|pull_enqueued\"}[5m]))",
           "legendFormat": "{{reason}}",
           "range": true,
           "refId": "A"

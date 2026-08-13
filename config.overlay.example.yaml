@@ -12,6 +12,11 @@
 #   default_max_inflight: 2
 #   saturated_retry_after_seconds: 30
 #   provision_retry_after_seconds: 30
+#   # Opt-in: enqueue a fleet pull when generate/chat/embed miss a model.
+#   # Placement-gated (static VRAM/class). Default in router.defaults.yaml is false.
+#   auto_pull_on_miss: true
+#   pull_miss_retry_after_seconds: 10
+#   auto_pull_wait_seconds: 0
 
 # desired_model_tiers:
 #   - models:

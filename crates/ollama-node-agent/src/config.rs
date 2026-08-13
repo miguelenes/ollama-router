@@ -240,3 +240,21 @@ impl AgentConfig {
         self.token.as_deref().filter(|t| !t.is_empty())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unknown_yaml_field_is_denied() {
+        let err = serde_yaml::from_str::<AgentConfig>("foo: 1").unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn listen_mode_parses() {
+        let cfg: AgentConfig = serde_yaml::from_str("listen: loopback\nport: 11436\n").unwrap();
+        assert_eq!(cfg.listen, BindSpec::Mode(ListenMode::Loopback));
+        assert_eq!(cfg.port, 11436);
+    }
+}

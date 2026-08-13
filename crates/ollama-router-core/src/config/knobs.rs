@@ -55,6 +55,21 @@ const KNOBS: &[Knob] = &[
         kind: KnobKind::Float,
     },
     Knob {
+        env: "OLLAMA_ROUTER_AUTO_PULL_ON_MISS",
+        path: &["policy", "auto_pull_on_miss"],
+        kind: KnobKind::Bool,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_PULL_MISS_RETRY_AFTER_SECONDS",
+        path: &["policy", "pull_miss_retry_after_seconds"],
+        kind: KnobKind::Int,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_AUTO_PULL_WAIT_SECONDS",
+        path: &["policy", "auto_pull_wait_seconds"],
+        kind: KnobKind::Float,
+    },
+    Knob {
         env: "OLLAMA_CAPACITY_TOKEN",
         path: &["health", "capacity_probe_token"],
         kind: KnobKind::Str,

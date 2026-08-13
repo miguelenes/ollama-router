@@ -281,6 +281,9 @@ ready_requires_embedding_model: true
         assert_eq!(config.health.overload_fail_credit, 1);
         assert_eq!(config.policy.saturated_retry_after_seconds, 30);
         assert_eq!(config.policy.provision_retry_after_seconds, 30);
+        assert!(!config.policy.auto_pull_on_miss);
+        assert_eq!(config.policy.pull_miss_retry_after_seconds, 10);
+        assert_eq!(config.policy.auto_pull_wait_seconds, 0.0);
         assert!((config.health.probe_jitter_ratio - 0.2).abs() < f64::EPSILON);
         assert_eq!(config.health.max_concurrent_probes, 8);
         assert!(config.desired_model_tiers.is_empty());
@@ -324,6 +327,29 @@ ready_requires_embedding_model: true
     fn ram_policy_invalid_thresholds_rejected() {
         assert!(parse_yaml("policy:\n  ram_headroom: 1.5\n").is_err());
         assert!(parse_yaml("policy:\n  reject_on_ram_elevated_for_classes: [bogus]\n").is_err());
+    }
+
+    #[test]
+    fn auto_pull_policy_bounds_rejected() {
+        assert!(parse_yaml("policy:\n  auto_pull_wait_seconds: 121\n").is_err());
+        assert!(parse_yaml("policy:\n  pull_miss_retry_after_seconds: 0\n").is_err());
+        assert!(parse_yaml("policy:\n  pull_miss_retry_after_seconds: 901\n").is_err());
+    }
+
+    #[test]
+    fn env_auto_pull_on_miss_knob() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("OLLAMA_ROUTER_AUTO_PULL_ON_MISS".into(), "true".into());
+        env.insert(
+            "OLLAMA_ROUTER_PULL_MISS_RETRY_AFTER_SECONDS".into(),
+            "7".into(),
+        );
+        env.insert("OLLAMA_ROUTER_AUTO_PULL_WAIT_SECONDS".into(), "1.5".into());
+        let config = load_config_from(None, &env).unwrap();
+        assert!(config.policy.auto_pull_on_miss);
+        assert_eq!(config.policy.pull_miss_retry_after_seconds, 7);
+        assert!((config.policy.auto_pull_wait_seconds - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]

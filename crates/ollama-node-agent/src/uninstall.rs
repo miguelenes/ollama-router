@@ -14,8 +14,15 @@ pub async fn run(_config: &AgentConfig, purge_ollama: bool) -> anyhow::Result<()
             .status()
             .await;
         let _ = std::fs::remove_file(paths.unit_dir.join("ollama-node-agent.service"));
-        let _ = std::fs::remove_file(paths.unit_dir.join("ollama.service.d/ollama-node-agent.conf"));
-        let _ = Command::new("systemctl").args(["daemon-reload"]).status().await;
+        let _ = std::fs::remove_file(
+            paths
+                .unit_dir
+                .join("ollama.service.d/ollama-node-agent.conf"),
+        );
+        let _ = Command::new("systemctl")
+            .args(["daemon-reload"])
+            .status()
+            .await;
         if purge_ollama {
             tracing::warn!("--purge-ollama: not removing the ollama package automatically");
         }

@@ -56,7 +56,10 @@ pub async fn probe_nvidia_rich() -> Option<String> {
 pub async fn probe_nvidia_basic() -> Option<String> {
     run_csv(
         "nvidia-smi",
-        &["--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
+        &[
+            "--query-gpu=name,memory.total",
+            "--format=csv,noheader,nounits",
+        ],
     )
     .await
 }
@@ -98,7 +101,11 @@ pub async fn ollama_tags_ok(base: &str) -> bool {
     else {
         return false;
     };
-    client.get(url).send().await.is_ok_and(|r| r.status().is_success())
+    client
+        .get(url)
+        .send()
+        .await
+        .is_ok_and(|r| r.status().is_success())
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -190,7 +197,9 @@ fn sysinfo_snapshot(backend: GpuBackend) -> (Pressure, f64, i32, String, Option<
     let ram_gb = bytes_to_gib(sys.total_memory());
     let cpu_cores = sys.cpus().len() as i32;
     let pressure = pressure::from_sysinfo(&sys);
-    let cgroup = sys.cgroup_limits().map(|l| bytes_to_gib(cgroup_total_bytes(&l)))
+    let cgroup = sys
+        .cgroup_limits()
+        .map(|l| bytes_to_gib(cgroup_total_bytes(&l)))
         .or_else(read_cgroup_memory_limit_gb);
     let metal_gb = if backend == GpuBackend::Metal && sys.total_memory() > 0 {
         Some(bytes_to_gib(sys.available_memory()))
@@ -251,7 +260,12 @@ pub fn select_backend(policy: GpuPolicy, nvidia: bool, rocm: bool) -> GpuBackend
     }
 }
 
-pub fn gpu_from_probes(policy: GpuPolicy, nvidia_rich: Option<&str>, nvidia_basic: Option<&str>, rocm: Option<&str>) -> (GpuInventory, GpuBackend) {
+pub fn gpu_from_probes(
+    policy: GpuPolicy,
+    nvidia_rich: Option<&str>,
+    nvidia_basic: Option<&str>,
+    rocm: Option<&str>,
+) -> (GpuInventory, GpuBackend) {
     match policy {
         GpuPolicy::Cpu => (GpuInventory::default(), GpuBackend::Cpu),
         GpuPolicy::Metal => (GpuInventory::default(), GpuBackend::Metal),
@@ -323,15 +337,17 @@ pub async fn collect_live(cfg: &AgentConfig, ollama_listen: &str) -> Snapshot {
         )
     })
     .await
-    .unwrap_or_else(|_| collect_from_parts(
-        &AgentConfig::default(),
-        GpuInventory::default(),
-        GpuBackend::Unknown,
-        "127.0.0.1:11434",
-        false,
-        false,
-        None,
-    ))
+    .unwrap_or_else(|_| {
+        collect_from_parts(
+            &AgentConfig::default(),
+            GpuInventory::default(),
+            GpuBackend::Unknown,
+            "127.0.0.1:11434",
+            false,
+            false,
+            None,
+        )
+    })
 }
 
 /// nvidia-smi CSV rows for tests.
@@ -361,6 +377,26 @@ mod tests {
         assert_eq!(backend, GpuBackend::Cpu);
         assert_eq!(inv.gpus, 0);
         assert!((inv.vram_gb - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gpu_probe_trait_feeds_parser() {
+        struct MockNvidia(&'static str);
+        impl GpuProbe for MockNvidia {
+            fn nvidia_rich(&self) -> Option<String> {
+                Some(self.0.into())
+            }
+            fn nvidia_basic(&self) -> Option<String> {
+                None
+            }
+            fn rocm(&self) -> Option<String> {
+                None
+            }
+        }
+        let probe = MockNvidia("NVIDIA GeForce RTX 3070, 8192, 2304, 5888, 14, 28\n");
+        let inv = parse_nvidia_csv(&probe.nvidia_rich().unwrap()).unwrap();
+        assert!((inv.vram_gb - 8.0).abs() < 1e-9);
+        assert_eq!(inv.gpus, 1);
     }
 
     #[test]

@@ -23,6 +23,11 @@ On construction, persisted running operations rebuild the in-flight dedupe map.
 before pull/delete work. The next ensure/delete also starts recovery lazily, so
 an identical request receives the existing job rather than duplicating work.
 
+When `policy.auto_pull_on_miss` is true, generate/chat/embed `model_missing`
+calls `PullOrchestrator::start_ensure` (fire-and-forget, same stampede key as
+admin ensure). Native `POST /api/pull` still waits via `ModelOrchestrator::ensure`.
+SQLite still stores metadata only — never pull error text or bodies.
+
 Terminal jobs remain queryable across restarts and use TTL/count retention.
 Pruning deletes both the in-memory view and the SQLite row. Call
 `recover_incomplete_jobs` during Axum lifespan startup so recovery runs before

@@ -46,7 +46,7 @@ Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-
 - **Idle teardown** — router-owned. Only proxied client forwards reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count. **Never destroy fleet.yaml hosts.**
 - **Capacity miss** — coalesced async Verda `create_additional` (not adopt-first `ensure`). The client gets **503 + `Retry-After`**, never a blocked provision. **v1: one router replica** — two processes sharing FleetState can double-create; do not add Redis.
 
-The sibling capacity agent on `:11436` is not this crate. GiB = bytes / `1024³`.
+- **Node agent on each Ollama host** — `ollama-node-agent` (`setup` elevated, `serve` unprivileged on `:11436`). Shared JSON in `ollama-capacity-types`. GiB = bytes / `1024³`. The router does not install Ollama.
 
 ## Architecture
 
@@ -55,11 +55,11 @@ flowchart LR
   clients[Clients] --> router["ollama-router :11434"]
   router --> fleetFile[fleet.yaml]
   router --> verda[Verda spots]
-  fleetFile --> agent["capacity-agent :11436"]
+  fleetFile --> agent["ollama-node-agent :11436"]
   verda --> agent
 ```
 
-Cloud Ollama URLs are Tailscale-only. Register a node after OpenSSH and `/api/tags` succeed on the tailnet. Capacity probes are soft-fail and never fake client activity.
+Cloud Ollama URLs are Tailscale-only. Register a node after OpenSSH and `/api/tags` succeed on the tailnet. Capacity probes are soft-fail and never fake client activity. Mixed CPU/GPU hosts run **`ollama-node-agent`** (`doctor` / `setup` / `serve`); the router process does not.
 
 ## Inventory
 
@@ -129,7 +129,7 @@ task obs:open
 # http://127.0.0.1:3000/d/ollama-router/ollama-router
 ```
 
-Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403.
+Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
 
 ## Develop
 
@@ -147,7 +147,14 @@ cargo test --workspace --locked
 
 CLI: `serve`, `ensure`, `delete`, `nodes`, `reload`, `provision`. `ensure`/`delete` print one JSON object per job. `nodes` prints `origin`, id, and URL from fleet.yaml plus FleetState Verda rows. `reload` POSTs `/router/v1/reload` using `OLLAMA_ROUTER_ADMIN_TOKEN`.
 
-Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (config, fleet, routing, capacity, jobs), `crates/ollama-router-verda` (OAuth2 + spot manager), `crates/ollama-mock` (compose stand-in).
+Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (config, fleet, routing, capacity client, jobs), `crates/ollama-capacity-types` (shared `:11436` JSON), `crates/ollama-node-agent` (node setup + capacity HTTP), `crates/ollama-router-verda` (OAuth2 + spot manager), `crates/ollama-mock` (compose stand-in).
+
+```bash
+task agent:doctor   # read-only: backend, Ollama health, listen addresses
+task agent:build
+```
+
+`setup` is privileged and idempotent (systemd / LaunchDaemon / Windows scheduled task). `serve` is unprivileged. Do not bind `:11436` to `0.0.0.0` / `listen: all` without a bearer token.
 
 ## Sensitivity
 

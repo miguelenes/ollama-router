@@ -93,14 +93,12 @@ pub fn resolve_bind(
             }
             Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         }
-        BindSpec::Mode(ListenMode::Tailscale) => {
-            addrs
-                .ipv4s()
-                .into_iter()
-                .find(|ip| is_tailscale_ipv4(*ip))
-                .map(IpAddr::V4)
-                .ok_or(ListenError::TailscaleMissing)
-        }
+        BindSpec::Mode(ListenMode::Tailscale) => addrs
+            .ipv4s()
+            .into_iter()
+            .find(|ip| is_tailscale_ipv4(*ip))
+            .map(IpAddr::V4)
+            .ok_or(ListenError::TailscaleMissing),
         BindSpec::Mode(ListenMode::Lan) => addrs
             .ipv4s()
             .into_iter()
@@ -149,8 +147,7 @@ mod tests {
     #[test]
     fn all_requires_token() {
         let addrs = Fixed(vec![]);
-        let err =
-            resolve_bind(&BindSpec::Mode(ListenMode::All), &addrs, false).expect_err("token");
+        let err = resolve_bind(&BindSpec::Mode(ListenMode::All), &addrs, false).expect_err("token");
         assert!(matches!(err, ListenError::AllRequiresToken));
         let ip = resolve_bind(&BindSpec::Mode(ListenMode::All), &addrs, true).unwrap();
         assert_eq!(ip, IpAddr::V4(Ipv4Addr::UNSPECIFIED));

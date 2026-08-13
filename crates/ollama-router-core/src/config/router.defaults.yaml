@@ -40,6 +40,13 @@ policy:
   saturated_retry_after_seconds: 30
   provision_retry_after_seconds: 30
 
+  # Placement-aware miss hook (Python auto_pull_on_miss). Default false:
+  # arbitrary Hub pulls are a disk/abuse vector. Enable in compose/production
+  # overlay or OLLAMA_ROUTER_AUTO_PULL_ON_MISS. Not gated by desired_model_tiers.
+  auto_pull_on_miss: false
+  pull_miss_retry_after_seconds: 10
+  auto_pull_wait_seconds: 0
+
   # Model warm-keeper
   model_warm_enabled: true
   model_warm_interval_seconds: 60

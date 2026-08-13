@@ -20,10 +20,10 @@ use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
 use ollama_router_core::fleet::{NodeId, NodeSnapshot, Registry};
-use ollama_router_core::jobs::{JobStatus, ModelOrchestrator, OrchestratorError};
+use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify, estimate_request_ram_gb, estimate_request_vram_gb,
-    rank_nodes, RequestClass, RoutingError,
+    placement_eligible_node_ids, rank_nodes, RankOutcome, RequestClass, RoutingError, TargetSpec,
 };
 use serde_json::{json, Value};
 use tokio::sync::OwnedSemaphorePermit;
@@ -43,6 +43,8 @@ const HOP_BY_HOP: &[&str] = &[
     "transfer-encoding",
     "upgrade",
 ];
+
+const AUTO_PULL_POLL: Duration = Duration::from_millis(250);
 
 /// Catch-all Ollama-compatible reverse proxy.
 pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
@@ -128,7 +130,8 @@ async fn proxy_ranked(
     request_class: RequestClass,
 ) -> Response {
     let start = Instant::now();
-    let policy = &state.config.policy;
+    let config = Arc::clone(&state.config);
+    let policy = &config.policy;
     let mut excluded: HashSet<NodeId> = HashSet::new();
 
     let mut outcome = rank(state, request_class, model.as_deref(), &excluded);
@@ -166,6 +169,19 @@ async fn proxy_ranked(
         outcome = rank(state, request_class, model.as_deref(), &excluded);
     }
 
+    if !outcome.ok() {
+        let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
+        if reason == RoutingError::ModelMissing && policy.auto_pull_on_miss {
+            if let Some(model_name) = model.as_deref() {
+                match auto_pull_on_miss(state, path, request_class, model_name, start).await {
+                    AutoPullResult::Forward(next) => {
+                        outcome = next;
+                    }
+                    AutoPullResult::Done(response) => return response,
+                }
+            }
+        }
+    }
     if !outcome.ok() {
         let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
         tracing::warn!(
@@ -793,6 +809,207 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
             json!({"error": format!("ollama-router: {other}")}),
             None,
         ),
+    }
+}
+
+enum AutoPullResult {
+    Forward(RankOutcome),
+    Done(Response),
+}
+
+struct WaitMetricGuard {
+    metrics: Arc<crate::http::Metrics>,
+    outcome: Option<&'static str>,
+}
+
+impl WaitMetricGuard {
+    fn record(&mut self, outcome: &'static str) {
+        self.outcome = Some(outcome);
+    }
+}
+
+impl Drop for WaitMetricGuard {
+    fn drop(&mut self) {
+        self.metrics
+            .observe_auto_pull_wait(self.outcome.unwrap_or("disconnected"));
+    }
+}
+
+fn observe_reject(
+    state: &AppState,
+    request_class: RequestClass,
+    start: Instant,
+    response: Response,
+) -> Response {
+    state.metrics.observe_request(
+        request_class.as_str(),
+        response.status().as_u16(),
+        "-",
+        start.elapsed(),
+    );
+    response
+}
+
+fn pull_enqueued_response(
+    model: &str,
+    job_id: &JobId,
+    nodes: &[NodeId],
+    retry_after: u32,
+) -> Response {
+    let node_ids: Vec<&str> = nodes.iter().map(NodeId::as_str).collect();
+    let nodes_fmt = node_ids.join(", ");
+    json_error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        json!({
+            "error": format!(
+                "ollama-router: model {model} missing; pull enqueued on placement nodes {nodes_fmt} (job {job_id}, retry in {retry_after}s)"
+            ),
+            "reason": "pull_enqueued",
+            "job_id": job_id.to_string(),
+            "model": model,
+            "nodes": node_ids,
+            "retry_after_seconds": retry_after,
+        }),
+        Some(retry_after),
+    )
+}
+
+async fn auto_pull_on_miss(
+    state: &AppState,
+    path: &str,
+    request_class: RequestClass,
+    model: &str,
+    start: Instant,
+) -> AutoPullResult {
+    let policy = &state.config.policy;
+    let eligible =
+        placement_eligible_node_ids(&state.registry.snapshot(), model, policy, false, false);
+    if eligible.is_empty() {
+        tracing::warn!(
+            model,
+            request_class = %request_class,
+            reason = RoutingError::Capacity.as_reason_code(),
+            "auto_pull_no_capacity"
+        );
+        DemandScale::request_scale_up(state.demand.as_ref(), RoutingError::Capacity);
+        state
+            .metrics
+            .route_reason(RoutingError::Capacity.as_reason_code());
+        let response =
+            no_candidate_response(RoutingError::Capacity, Some(model), request_class, policy);
+        return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+    }
+
+    let job = match state.orchestrator.start_ensure(
+        &[model.to_string()],
+        TargetSpec::Placement,
+        false,
+        false,
+    ) {
+        Ok(job) => job,
+        Err(_) => {
+            tracing::warn!(
+                path,
+                request_class = %request_class,
+                model,
+                reason = RoutingError::ModelMissing.as_reason_code(),
+                "route_rejected"
+            );
+            state
+                .metrics
+                .route_reason(RoutingError::ModelMissing.as_reason_code());
+            let response = no_candidate_response(
+                RoutingError::ModelMissing,
+                Some(model),
+                request_class,
+                policy,
+            );
+            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        }
+    };
+
+    let node_ids: Vec<&str> = eligible.iter().map(NodeId::as_str).collect();
+    tracing::info!(
+        event = "pull_enqueued",
+        model,
+        request_class = %request_class,
+        job_id = %job.id,
+        nodes = ?node_ids,
+        "pull_enqueued"
+    );
+    state.metrics.route_reason("pull_enqueued");
+
+    let retry_after = policy.pull_miss_retry_after_seconds;
+    let wait = policy.auto_pull_wait_seconds;
+    if wait <= 0.0 {
+        let response = pull_enqueued_response(model, &job.id, &eligible, retry_after);
+        return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+    }
+
+    wait_for_pull(
+        state,
+        request_class,
+        model,
+        start,
+        job.id,
+        &eligible,
+        retry_after,
+        wait,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_pull(
+    state: &AppState,
+    request_class: RequestClass,
+    model: &str,
+    start: Instant,
+    job_id: JobId,
+    eligible: &[NodeId],
+    retry_after: u32,
+    wait_seconds: f64,
+) -> AutoPullResult {
+    let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
+    let mut guard = WaitMetricGuard {
+        metrics: Arc::clone(&state.metrics),
+        outcome: None,
+    };
+    loop {
+        if Instant::now() >= deadline {
+            guard.record("timeout");
+            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        }
+
+        let snap = state.registry.snapshot();
+        let holders = placement_eligible_node_ids(&snap, model, &state.config.policy, false, false);
+        let present = holders.iter().any(|id| {
+            snap.iter()
+                .any(|node| node.id == *id && node.healthy && node.has_model(model))
+        });
+        if present {
+            let ranked = rank(state, request_class, Some(model), &HashSet::new());
+            if ranked.ok() {
+                guard.record("forwarded");
+                return AutoPullResult::Forward(ranked);
+            }
+            guard.record("pull_finished");
+            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        }
+
+        if state
+            .orchestrator
+            .get_job(&job_id)
+            .is_some_and(|job| !job.status.is_incomplete())
+        {
+            guard.record("pull_finished");
+            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        }
+
+        tokio::time::sleep(AUTO_PULL_POLL).await;
     }
 }
 

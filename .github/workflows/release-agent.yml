@@ -1,0 +1,68 @@
+name: Release node agent
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.asset }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            asset: ollama-node-agent-linux-amd64
+          - runner: ubuntu-24.04-arm
+            asset: ollama-node-agent-linux-arm64
+          - runner: macos-13
+            asset: ollama-node-agent-darwin-amd64
+          - runner: macos-14
+            asset: ollama-node-agent-darwin-arm64
+          - runner: windows-latest
+            asset: ollama-node-agent-windows-amd64.exe
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.97"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: agent-${{ matrix.asset }}
+
+      - name: cargo build
+        run: cargo build --release --locked -p ollama-node-agent
+
+      - name: Package
+        shell: bash
+        run: |
+          src="target/release/ollama-node-agent"
+          if [ -f "${src}.exe" ]; then src="${src}.exe"; fi
+          cp "$src" "${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+      - name: Attach to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset }}

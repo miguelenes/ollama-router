@@ -25,10 +25,19 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 
 ## Capacity miss
 
-Map `no_nodes` / `no_healthy` / `model_missing` / `capacity` / `ram` /
-`ram_pressure` / `saturated` to Ollama-shaped **503** JSON and set
-`Retry-After` (30s). Kick coalesced async Verda `ensure`. Never block the
-client on provision.
+Map `no_nodes` / `no_healthy` / `capacity` / `ram` / `ram_pressure` /
+`saturated` to Ollama-shaped **503** JSON and set `Retry-After`. Kick coalesced
+async Verda demand-scale (`create_additional`) for those reasons. Never block
+the client on provision.
+
+`model_missing` has **no** Retry-After when `auto_pull_on_miss` is false (default).
+When the flag is on, the proxy enqueues `start_ensure(Placement)` on
+`placement_eligible_node_ids` only (static VRAM/class — LARGE never lands on
+CPU). Empty placement → `insufficient_capacity` + provision Retry-After + demand
+scale. Else 503 JSON `reason=pull_enqueued` + `Retry-After` from
+`pull_miss_retry_after_seconds`. Optional `auto_pull_wait_seconds` may re-rank
+and forward; `inflight_inc` only on that forward. Never forward a miss to a node
+that lacks the model (Ollama would native-pull). Never `unsafe_single_node_mutate`.
 
 ## Streaming and retry
 

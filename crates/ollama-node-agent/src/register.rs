@@ -23,7 +23,9 @@ pub fn spawn_if_configured(state: AppState) {
         let mut tick = tokio::time::interval(interval);
         loop {
             tick.tick().await;
-            let token = std::env::var(&token_env).ok().filter(|s| !s.trim().is_empty());
+            let token = std::env::var(&token_env)
+                .ok()
+                .filter(|s| !s.trim().is_empty());
             let Some(token) = token else {
                 tracing::warn!("register skipped: token env unset");
                 continue;

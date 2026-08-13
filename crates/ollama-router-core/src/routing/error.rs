@@ -43,7 +43,8 @@ impl RoutingError {
         }
     }
 
-    /// `Retry-After` seconds for capacity-miss 503s. `model_missing` has none.
+    /// `Retry-After` seconds for capacity-miss 503s. `model_missing` has none
+    /// (the proxy `auto_pull_on_miss` path uses a separate `pull_enqueued` body).
     pub fn retry_after_seconds(self, policy: &crate::config::PolicyConfig) -> Option<u32> {
         match self {
             Self::ModelMissing => None,

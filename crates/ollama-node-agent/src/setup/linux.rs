@@ -43,8 +43,15 @@ pub async fn converge(
 
     let dropin_dir = ctx.paths.unit_dir.join("ollama.service.d");
     std::fs::create_dir_all(&dropin_dir)?;
-    let dropin = ollama_dropin(ollama_bind, &ctx.config.ollama.extra_env);
-    write_bytes_idempotent(&dropin_dir.join("ollama-node-agent.conf"), dropin.as_bytes())?;
+    let dropin = ollama_dropin(
+        ollama_bind,
+        ctx.config.ollama.models_dir.as_deref(),
+        &ctx.config.ollama.extra_env,
+    );
+    write_bytes_idempotent(
+        &dropin_dir.join("ollama-node-agent.conf"),
+        dropin.as_bytes(),
+    )?;
 
     let agent_unit = agent_unit_text();
     let unit_changed = write_bytes_idempotent(
@@ -77,11 +84,18 @@ pub async fn converge(
     Ok(state)
 }
 
-fn ollama_dropin(bind: &str, extra: &std::collections::BTreeMap<String, String>) -> String {
+fn ollama_dropin(
+    bind: &str,
+    models_dir: Option<&str>,
+    extra: &std::collections::BTreeMap<String, String>,
+) -> String {
     let mut out = String::from("[Service]\n");
     out.push_str(&format!("Environment=OLLAMA_HOST={bind}\n"));
+    if let Some(dir) = models_dir.filter(|d| !d.is_empty()) {
+        out.push_str(&format!("Environment=OLLAMA_MODELS={dir}\n"));
+    }
     for (k, v) in extra {
-        if k.eq_ignore_ascii_case("OLLAMA_HOST") {
+        if k.eq_ignore_ascii_case("OLLAMA_HOST") || k.eq_ignore_ascii_case("OLLAMA_MODELS") {
             continue;
         }
         out.push_str(&format!("Environment={k}={v}\n"));
@@ -115,7 +129,13 @@ async fn install_ollama() -> anyhow::Result<()> {
         .use_rustls_tls()
         .timeout(Duration::from_secs(60))
         .build()?;
-    let bytes = client.get(INSTALL_SH).send().await?.error_for_status()?.bytes().await?;
+    let bytes = client
+        .get(INSTALL_SH)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let path = std::env::temp_dir().join("ollama-install.sh");
     std::fs::write(&path, &bytes)?;
     #[cfg(unix)]
@@ -181,7 +201,12 @@ async fn wait_ollama_tags(bind: &str) -> anyhow::Result<()> {
         .timeout(Duration::from_secs(2))
         .build()?;
     for _ in 0..30 {
-        if client.get(&url).send().await.is_ok_and(|r| r.status().is_success()) {
+        if client
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|r| r.status().is_success())
+        {
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
@@ -221,8 +246,9 @@ mod tests {
         let mut extra = BTreeMap::new();
         extra.insert("OLLAMA_NUM_PARALLEL".into(), "2".into());
         extra.insert("OLLAMA_HOST".into(), "0.0.0.0:11434".into());
-        let text = ollama_dropin("100.64.1.2:11434", &extra);
+        let text = ollama_dropin("100.64.1.2:11434", Some("/var/lib/ollama/models"), &extra);
         assert!(text.contains("Environment=OLLAMA_HOST=100.64.1.2:11434"));
+        assert!(text.contains("Environment=OLLAMA_MODELS=/var/lib/ollama/models"));
         assert!(text.contains("OLLAMA_NUM_PARALLEL=2"));
         assert_eq!(text.matches("OLLAMA_HOST=").count(), 1);
     }
@@ -232,5 +258,41 @@ mod tests {
         let u = agent_unit_text();
         assert!(u.contains("NoNewPrivileges=true"));
         assert!(u.contains("User=ollama-node-agent"));
+    }
+
+    #[tokio::test]
+    async fn dry_converge_writes_state_under_temp_root() {
+        use crate::config::AgentConfig;
+        use crate::setup::{SetupContext, SetupPaths};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SetupPaths::under_root(dir.path());
+        let cfg = AgentConfig::default();
+        let ctx = SetupContext {
+            config: &cfg,
+            paths: &paths,
+            ts_authkey: None,
+            dry_commands: true,
+        };
+        let state = converge(&ctx, "127.0.0.1:11434", IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .await
+            .unwrap();
+        assert!(state.unit_written);
+        assert!(paths.state.exists());
+        let unit =
+            std::fs::read_to_string(paths.unit_dir.join("ollama-node-agent.service")).unwrap();
+        assert!(unit.contains("NoNewPrivileges=true"));
+        let dropin = std::fs::read_to_string(
+            paths
+                .unit_dir
+                .join("ollama.service.d/ollama-node-agent.conf"),
+        )
+        .unwrap();
+        assert!(dropin.contains("OLLAMA_HOST=127.0.0.1:11434"));
+        let again = converge(&ctx, "127.0.0.1:11434", IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .await
+            .unwrap();
+        assert!(again.unit_written);
     }
 }

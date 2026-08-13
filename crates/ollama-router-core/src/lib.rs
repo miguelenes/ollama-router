@@ -9,9 +9,9 @@ pub mod provision;
 pub mod routing;
 
 pub use capacity::{
-    bytes_to_gib, capacity_target, merge_capacity, CapacityClient, CapacityError, CapacityInventory,
-    CapacityProbe, CapacityReport, CapacitySource, CapacityTarget, MergeOutcome, Pressure,
-    PressureEnvelope, BYTES_PER_GIB,
+    bytes_to_gib, capacity_target, merge_capacity, CapacityClient, CapacityError,
+    CapacityInventory, CapacityProbe, CapacityReport, CapacitySource, CapacityTarget, GpuBackend,
+    GpuDetail, MergeOutcome, Pressure, PressureEnvelope, BYTES_PER_GIB,
 };
 pub use cloud::{
     idle_scale_down_candidates, should_destroy_on_shutdown, DemandScale, FleetEvents,

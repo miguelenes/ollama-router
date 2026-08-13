@@ -29,6 +29,7 @@ pub struct Metrics {
     verda_spot_price: Gauge,
     verda_events: IntCounterVec,
     job_operations: IntCounterVec,
+    auto_pull_wait: IntCounterVec,
 }
 
 impl Metrics {
@@ -124,6 +125,13 @@ impl Metrics {
             ),
             &["kind", "status"],
         )?;
+        let auto_pull_wait = IntCounterVec::new(
+            Opts::new(
+                "ollama_router_auto_pull_wait_total",
+                "auto_pull_on_miss wait outcomes (no model label)",
+            ),
+            &["outcome"],
+        )?;
 
         registry.register(Box::new(requests.clone()))?;
         registry.register(Box::new(duration.clone()))?;
@@ -139,6 +147,7 @@ impl Metrics {
         registry.register(Box::new(verda_spot_price.clone()))?;
         registry.register(Box::new(verda_events.clone()))?;
         registry.register(Box::new(job_operations.clone()))?;
+        registry.register(Box::new(auto_pull_wait.clone()))?;
 
         Ok(Self {
             registry,
@@ -156,6 +165,7 @@ impl Metrics {
             verda_spot_price,
             verda_events,
             job_operations,
+            auto_pull_wait,
         })
     }
 
@@ -231,6 +241,12 @@ impl Metrics {
 
     pub fn route_reason(&self, reason: &str) {
         if let Ok(c) = self.route_reason.get_metric_with_label_values(&[reason]) {
+            c.inc();
+        }
+    }
+
+    pub fn observe_auto_pull_wait(&self, outcome: &str) {
+        if let Ok(c) = self.auto_pull_wait.get_metric_with_label_values(&[outcome]) {
             c.inc();
         }
     }

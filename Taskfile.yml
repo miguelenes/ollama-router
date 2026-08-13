@@ -68,3 +68,18 @@ tasks:
     desc: Print the local Grafana Ollama Router dashboard URL
     cmds:
       - echo http://127.0.0.1:3000/d/ollama-router/ollama-router
+
+  agent:build:
+    desc: Build ollama-node-agent
+    cmds:
+      - cargo build -p ollama-node-agent --locked
+
+  agent:test:
+    desc: Test ollama-node-agent (workspace `check` already covers this crate)
+    cmds:
+      - cargo test -p ollama-node-agent --locked
+
+  agent:doctor:
+    desc: Read-only node-agent report for this machine (no side effects)
+    cmds:
+      - cargo run -p ollama-node-agent --locked -- doctor

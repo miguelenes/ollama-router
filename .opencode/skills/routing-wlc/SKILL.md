@@ -19,6 +19,10 @@ Code: `crates/ollama-router-core/src/routing/` (pure functions, unit + proptest)
 All eligible saturated → `all_nodes_saturated` → 503. Never pick a saturated node
 as fallback.
 
+A generate/chat/embed miss (`model_missing`) is not a rank bypass: the model must
+be on disk before scoring. Optional proxy `auto_pull_on_miss` enqueues a
+placement-gated fleet pull, then the next rank still applies these filters.
+
 ## Sort key (lower is better)
 
 1. `(inflight / base_cap) * inflight_weight`

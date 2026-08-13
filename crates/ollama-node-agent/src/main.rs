@@ -2,7 +2,7 @@ use anyhow::Context;
 use clap::Parser;
 use ollama_node_agent::cli::{Cli, Commands};
 use ollama_node_agent::config::AgentConfig;
-use ollama_node_agent::listen::{format_host_port, resolve_bind, HostAddrs};
+use ollama_node_agent::listen::{format_host_port, resolve_bind, AddrSource, HostAddrs};
 use ollama_node_agent::setup::{SetupContext, SetupPaths};
 
 fn init_tracing() {
@@ -36,8 +36,9 @@ async fn main() -> anyhow::Result<()> {
             }
             let token_set = cfg.bearer_token().is_some();
             let addrs = HostAddrs;
-            let agent_ip = resolve_bind(&cfg.listen, &addrs, token_set)?;
-            let ollama_ip = resolve_bind(&cfg.ollama.listen, &addrs, token_set)?;
+            let addrs: &dyn AddrSource = &addrs;
+            let agent_ip = resolve_bind(&cfg.listen, addrs, token_set)?;
+            let ollama_ip = resolve_bind(&cfg.ollama.listen, addrs, token_set)?;
             let bind = std::net::SocketAddr::new(agent_ip, cfg.port);
             let ollama_listen = format_host_port(ollama_ip, 11434);
             ollama_node_agent::http::serve(cfg, bind, ollama_listen).await

@@ -1,7 +1,7 @@
 schemaVersion: 1
 id: b7450045-8751-45b5-a6d0-7e88a10040c9
 title: Brainstorm new Feature
-description: Scout whether a feature is worth building — map the repo, surface options, recommend an MVP, and stop before implementation.
+description: Scout whether a feature is worth building — map the repo, surface options, recommend a new functionality, and stop before implementation.
 category: Planning
 tags:
   - brainstorm
@@ -29,9 +29,6 @@ body: |-
   Treat the selection as a hint (pain point, stub, comment, API, or adjacent code). Do not assume it is the full design.
   {{else}}
   No editor selection. Use the active file (if any) and a repo-wide search instead.
-  {{/if}}
-  {{#if filepath}}
-  Active file: {{filepath}} (language: {{lang}})
   {{/if}}
   {{#if file_content}}
   Active file contents (truncated in your reasoning if huge; do not paste the whole file back):

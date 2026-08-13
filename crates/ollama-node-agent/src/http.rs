@@ -29,7 +29,10 @@ fn require_token(expected: Option<&str>, headers: &HeaderMap) -> bool {
     let Some(token) = expected.filter(|t| !t.is_empty()) else {
         return true;
     };
-    let Some(auth) = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()) else {
+    let Some(auth) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+    else {
         return false;
     };
     let bearer = auth.strip_prefix("Bearer ").unwrap_or(auth);
@@ -90,11 +93,7 @@ async fn status(
 async fn metrics(State(state): State<AppState>) -> Response {
     let _ = snapshot(&state).await;
     match state.metrics.encode_text() {
-        Ok(body) => (
-            [(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)],
-            body,
-        )
-            .into_response(),
+        Ok(body) => ([(header::CONTENT_TYPE, METRICS_CONTENT_TYPE)], body).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
 }
@@ -112,8 +111,13 @@ pub fn make_app(state: AppState) -> Router {
         .with_state(state)
 }
 
-pub async fn serve(config: AgentConfig, bind: std::net::SocketAddr, ollama_listen: String) -> anyhow::Result<()> {
-    if matches!(bind.ip(), std::net::IpAddr::V4(v) if v.is_unspecified()) && config.bearer_token().is_none()
+pub async fn serve(
+    config: AgentConfig,
+    bind: std::net::SocketAddr,
+    ollama_listen: String,
+) -> anyhow::Result<()> {
+    if matches!(bind.ip(), std::net::IpAddr::V4(v) if v.is_unspecified())
+        && config.bearer_token().is_none()
     {
         anyhow::bail!("listen all requires a bearer token");
     }

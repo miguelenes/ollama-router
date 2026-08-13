@@ -53,8 +53,10 @@ the hooks.
 
 ## Capacity
 
-Production: sibling Rust `ollama-capacity-agent` on `:11436`. See
-[[concepts/ollama-capacity-discovery]]. Do not reimplement the agent in this repo.
+Production: `crates/ollama-node-agent` on `:11436` (`setup` elevated, `serve`
+unprivileged). Shared DTOs in `crates/ollama-capacity-types`. See
+[[concepts/ollama-capacity-discovery]]. The router owns only the HTTP client
+and merge policy; it does not install Ollama or reclassify `pressure_level`.
 
 ## Model operations
 

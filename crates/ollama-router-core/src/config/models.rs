@@ -387,6 +387,9 @@ pub struct PolicyConfig {
     pub admission_wait_ms: u32,
     pub saturated_retry_after_seconds: u32,
     pub provision_retry_after_seconds: u32,
+    pub auto_pull_on_miss: bool,
+    pub pull_miss_retry_after_seconds: u32,
+    pub auto_pull_wait_seconds: f64,
     pub model_warm_enabled: bool,
     pub model_warm_interval_seconds: f64,
     pub model_warm_min_free_vram_gb: f64,
@@ -434,6 +437,9 @@ impl Default for PolicyConfig {
             admission_wait_ms: 0,
             saturated_retry_after_seconds: 30,
             provision_retry_after_seconds: 30,
+            auto_pull_on_miss: false,
+            pull_miss_retry_after_seconds: 10,
+            auto_pull_wait_seconds: 0.0,
             model_warm_enabled: true,
             model_warm_interval_seconds: 60.0,
             model_warm_min_free_vram_gb: 4.0,
@@ -520,6 +526,16 @@ impl PolicyConfig {
         if !(1..=900).contains(&self.provision_retry_after_seconds) {
             return Err(ConfigError::invalid(
                 "provision_retry_after_seconds must be between 1 and 900",
+            ));
+        }
+        if !(1..=900).contains(&self.pull_miss_retry_after_seconds) {
+            return Err(ConfigError::invalid(
+                "pull_miss_retry_after_seconds must be between 1 and 900",
+            ));
+        }
+        if !(0.0..=120.0).contains(&self.auto_pull_wait_seconds) {
+            return Err(ConfigError::invalid(
+                "auto_pull_wait_seconds must be between 0 and 120",
             ));
         }
         if self.model_warm_interval_seconds <= 0.0 || self.model_warm_cooldown_seconds <= 0.0 {

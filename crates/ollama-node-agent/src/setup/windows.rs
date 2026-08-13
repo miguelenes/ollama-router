@@ -14,7 +14,8 @@ use crate::collect::ollama_version;
 pub const SETUP_SILENT_ARGS: &[&str] = &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"];
 
 const SETUP_URL: &str = "https://ollama.com/download/OllamaSetup.exe";
-const ZIP_URL: &str = "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip";
+const ZIP_URL: &str =
+    "https://github.com/ollama/ollama/releases/latest/download/ollama-windows-amd64.zip";
 
 pub async fn converge(
     ctx: &SetupContext<'_>,
@@ -39,7 +40,16 @@ pub async fn converge(
     }
 
     write_token_file(&ctx.paths.token_file, ctx.config.bearer_token())?;
-    let env_body = format!("OLLAMA_HOST={ollama_bind}\n");
+    let mut env_body = format!("OLLAMA_HOST={ollama_bind}\n");
+    if let Some(dir) = ctx
+        .config
+        .ollama
+        .models_dir
+        .as_deref()
+        .filter(|d| !d.is_empty())
+    {
+        env_body.push_str(&format!("OLLAMA_MODELS={dir}\n"));
+    }
     write_bytes_idempotent(&ctx.paths.unit_dir.join("ollama.env"), env_body.as_bytes())?;
 
     tracing::info!(
@@ -76,7 +86,13 @@ async fn download_setup_silent() -> anyhow::Result<()> {
         .use_rustls_tls()
         .timeout(Duration::from_secs(120))
         .build()?;
-    let bytes = client.get(SETUP_URL).send().await?.error_for_status()?.bytes().await?;
+    let bytes = client
+        .get(SETUP_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let path = std::env::temp_dir().join("OllamaSetup.exe");
     std::fs::write(&path, &bytes)?;
     let status = Command::new(&path).args(SETUP_SILENT_ARGS).status().await?;
@@ -91,13 +107,24 @@ async fn download_and_unzip() -> anyhow::Result<()> {
         .use_rustls_tls()
         .timeout(Duration::from_secs(120))
         .build()?;
-    let bytes = client.get(ZIP_URL).send().await?.error_for_status()?.bytes().await?;
+    let bytes = client
+        .get(ZIP_URL)
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?;
     let zip_path = std::env::temp_dir().join("ollama-windows-amd64.zip");
     std::fs::write(&zip_path, &bytes)?;
     let dest = Path::new(r"C:\Program Files\Ollama");
     std::fs::create_dir_all(dest)?;
     let status = Command::new("tar")
-        .args(["-xf", zip_path.to_str().unwrap_or(""), "-C", dest.to_str().unwrap_or("")])
+        .args([
+            "-xf",
+            zip_path.to_str().unwrap_or(""),
+            "-C",
+            dest.to_str().unwrap_or(""),
+        ])
         .status()
         .await?;
     if !status.success() {
@@ -145,20 +172,23 @@ async fn register_scheduled_task(exe: &Path) -> anyhow::Result<()> {
 }
 
 async fn set_firewall(_bind: &str) -> anyhow::Result<()> {
-    let _ = Command::new("netsh")
-        .args([
-            "advfirewall",
-            "firewall",
-            "add",
-            "rule",
-            "name=ollama-node-agent-11436",
-            "dir=in",
-            "action=allow",
-            "protocol=TCP",
-            "localport=11436",
-        ])
-        .status()
-        .await;
+    for port in ["11434", "11436"] {
+        let name = format!("ollama-node-agent-{port}");
+        let _ = Command::new("netsh")
+            .args([
+                "advfirewall",
+                "firewall",
+                "add",
+                "rule",
+                &format!("name={name}"),
+                "dir=in",
+                "action=allow",
+                "protocol=TCP",
+                &format!("localport={port}"),
+            ])
+            .status()
+            .await;
+    }
     Ok(())
 }
 

@@ -25,14 +25,14 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
     let addrs = HostAddrs;
     let addrs: &dyn AddrSource = &addrs;
     let mut notes = Vec::new();
-    let ollama_ip = match resolve_bind(&config.ollama.listen, &addrs, token_set) {
+    let ollama_ip = match resolve_bind(&config.ollama.listen, addrs, token_set) {
         Ok(ip) => ip,
         Err(err) => {
             notes.push(err.to_string());
             std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
         }
     };
-    let agent_ip = match resolve_bind(&config.listen, &addrs, token_set) {
+    let agent_ip = match resolve_bind(&config.listen, addrs, token_set) {
         Ok(ip) => ip,
         Err(err) => {
             notes.push(err.to_string());
@@ -73,5 +73,8 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
 fn addrs_have_tailscale() -> bool {
     let addrs = HostAddrs;
     let addrs: &dyn AddrSource = &addrs;
-    addrs.ipv4s().into_iter().any(crate::listen::is_tailscale_ipv4)
+    addrs
+        .ipv4s()
+        .into_iter()
+        .any(crate::listen::is_tailscale_ipv4)
 }

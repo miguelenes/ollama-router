@@ -1,6 +1,8 @@
 //! Tiny plaintext Ollama mock for compose: canned tags + short generate/chat/embed.
 
+use std::collections::BTreeSet;
 use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -43,6 +45,30 @@ impl MockRole {
     }
 }
 
+#[derive(Clone)]
+struct MockState {
+    models: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl MockState {
+    fn new(role: MockRole) -> Self {
+        let models = role
+            .models()
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        Self {
+            models: Arc::new(Mutex::new(models)),
+        }
+    }
+
+    fn lock_models(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
+        self.models
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[derive(Deserialize)]
 struct ModelBody {
     model: Option<String>,
@@ -60,7 +86,7 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .filter(|p| *p > 0);
 
-    let ollama = serve_ollama(role, ollama_port);
+    let ollama = serve_ollama(MockState::new(role), ollama_port);
     if let Some(port) = capacity_port {
         let capacity = serve_capacity(role, port);
         tokio::select! {
@@ -83,14 +109,15 @@ async fn main() {
     }
 }
 
-async fn serve_ollama(role: MockRole, port: u16) -> std::io::Result<()> {
+async fn serve_ollama(state: MockState, port: u16) -> std::io::Result<()> {
     let app = Router::new()
         .route("/api/tags", get(tags))
         .route("/api/generate", post(generate))
         .route("/api/chat", post(chat))
         .route("/api/embed", post(embed))
         .route("/api/embeddings", post(embed))
-        .with_state(role);
+        .route("/api/pull", post(pull))
+        .with_state(state);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
@@ -106,13 +133,30 @@ async fn serve_capacity(role: MockRole, port: u16) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-async fn tags(State(role): State<MockRole>) -> Json<Value> {
-    let models: Vec<Value> = role
-        .models()
+async fn tags(State(state): State<MockState>) -> Json<Value> {
+    let models: Vec<Value> = state
+        .lock_models()
         .iter()
         .map(|name| json!({"name": name, "model": name}))
         .collect();
     Json(json!({"models": models}))
+}
+
+async fn pull(State(state): State<MockState>, Json(body): Json<ModelBody>) -> Response {
+    let Some(model) = body.model.filter(|name| !name.is_empty()) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({"error": "model is required"})),
+        )
+            .into_response();
+    };
+    state.lock_models().insert(model);
+    (
+        StatusCode::OK,
+        [("content-type", "application/x-ndjson")],
+        "{\"status\":\"success\"}\n",
+    )
+        .into_response()
 }
 
 async fn generate(Json(body): Json<ModelBody>) -> Response {

@@ -32,7 +32,11 @@ pub async fn converge(
     }
 
     write_token_file(&ctx.paths.token_file, ctx.config.bearer_token())?;
-    write_macos_env(ollama_bind, &ctx.config.ollama.extra_env)?;
+    write_macos_env(
+        ollama_bind,
+        ctx.config.ollama.models_dir.as_deref(),
+        &ctx.config.ollama.extra_env,
+    )?;
 
     let plist = agent_plist(agent_ip, ctx.config.port);
     let plist_path = ctx.paths.unit_dir.join("com.ollama.node-agent.plist");
@@ -70,13 +74,20 @@ pub async fn converge(
     Ok(state)
 }
 
-fn write_macos_env(bind: &str, extra: &std::collections::BTreeMap<String, String>) -> anyhow::Result<()> {
+fn write_macos_env(
+    bind: &str,
+    models_dir: Option<&str>,
+    extra: &std::collections::BTreeMap<String, String>,
+) -> anyhow::Result<()> {
     let dir = Path::new("/Library/Application Support/Ollama");
     let _ = std::fs::create_dir_all(dir);
     let env_path = dir.join("env");
     let mut body = format!("OLLAMA_HOST={bind}\n");
+    if let Some(models) = models_dir.filter(|d| !d.is_empty()) {
+        body.push_str(&format!("OLLAMA_MODELS={models}\n"));
+    }
     for (k, v) in extra {
-        if k.eq_ignore_ascii_case("OLLAMA_HOST") {
+        if k.eq_ignore_ascii_case("OLLAMA_HOST") || k.eq_ignore_ascii_case("OLLAMA_MODELS") {
             continue;
         }
         body.push_str(&format!("{k}={v}\n"));
@@ -118,8 +129,16 @@ fn agent_plist(agent_ip: IpAddr, port: u16) -> String {
 }
 
 async fn install_ollama_macos() -> anyhow::Result<()> {
-    if Command::new("brew").arg("--version").status().await.is_ok_and(|s| s.success()) {
-        let status = Command::new("brew").args(["install", "ollama"]).status().await?;
+    if Command::new("brew")
+        .arg("--version")
+        .status()
+        .await
+        .is_ok_and(|s| s.success())
+    {
+        let status = Command::new("brew")
+            .args(["install", "ollama"])
+            .status()
+            .await?;
         if status.success() {
             return Ok(());
         }
