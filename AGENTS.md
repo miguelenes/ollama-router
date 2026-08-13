@@ -114,11 +114,12 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 
 ## Learned User Preferences
 
-- Keep Context7 and docsrs-mcp as global Cursor/OpenCode MCP servers; leave project `.cursor/mcp.json` `mcpServers` empty and never commit API keys there. OpenCodeRAG is OpenCode-only — do not register it in Cursor MCP or call its tools from Cursor.
+- Keep Context7 global; project `.cursor/mcp.json` / `.opencode/opencode.json` may pin docsrs, grafana, and prometheus for local compose (`GRAFANA_URL`/`PROMETHEUS_URL` only — never commit API keys or tokens). OpenCodeRAG is OpenCode-only — do not register it in Cursor MCP or call its tools from Cursor.
 - Pin GitHub Actions to version tags (`actions/checkout@v7`, `Swatinem/rust-cache@v2`, `github/codeql-action@v4`), never commit SHAs.
 - Prefer Grafana Alloy over a pile of promtails for local compose log shipping; do not add Elasticsearch, Jaeger, or Zipkin unless OTLP/Tempo is explicitly required.
-- Keep the fleet overview Grafana dashboard (`ollama-router.json`) as the compose home dashboard; the nodes dashboard is additive and must not replace it.
+- Keep the fleet overview Grafana dashboard (`ollama-router.json`) as the compose home dashboard; additive dashboards (nodes, jobs, etc.) must not replace it or change `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`.
 - Treat `fleet.yaml` as GitOps source of truth for permanent hosts; admin `PUT /router/v1/nodes` is debug/adopt only and must not write `fleet.yaml`.
+- Node-agent is headless only: no Tauri, tray, `.app`, or webview; OS packages wrap the same `setup`/`serve` binary.
 
 ## Learned Workspace Facts
 
@@ -129,9 +130,11 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 - Agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml + agent config), not Verda or capacity payloads.
 - SSH private keys come from `ssh.key_file` / Compose secrets / Verda `ssh_private_key_file` only — never add an SSH key env var.
 - Verda `ensure` is adopt-first; demand scale coalesces `create_additional` only (never `ensure`). Tag instances `managed_by=ollama-router` and reject `illumination-*`; FleetState ownership is `managed_by=verda`.
-- Hot Prometheus metrics use the `prometheus` crate in the binary only and must not label by model name; `/metrics` and `/healthz` stay unauthenticated. Scrape the router only — do not add a Prometheus job for node-agent `:11436`. Treat `vram_free_gb=0` as unknown, not an empty GPU; do not add labels to `node_info` (`node`, `origin`, `role`).
+- Hot Prometheus metrics use the `prometheus` crate in the binary only and must not label by model name; `/metrics` and `/healthz` stay unauthenticated. Scrape the router only — do not add a Prometheus job for node-agent `:11436`. Treat `vram_free_gb=0` as unknown unless `vram_free_known`; do not add labels to `node_info` (`node`, `origin`, `role`).
 - Model jobs: `auto_pull_on_miss` exists (default **false**, placement-gated via `static_capacity_fits`); still no `unsafe_single_node_mutate`. SQLite stores operation metadata only (no bodies or provider error text).
 - Local-dev is native `task dev` (host Ollama `:11434`, router `:11435`, agent `:11436`). `task compose:up` is Grafana `:3000` / Prometheus `:9090` only. `task compose:mock` is the canned fleet.
+- Node-agent GPU discovery: NVIDIA (`nvidia-smi`) and AMD ROCm (`rocm-smi`/`amd-smi`) are first-class; Auto order is NVIDIA inventory → macOS Metal → ROCm → CPU; never encode unmeasured VRAM as `0`.
+- Node-agent packaging: portable Linux tar.gz + `.deb` (nfpm), Windows MSI+SCM (not schtasks), macOS `.pkg`+LaunchDaemon; Linux `setup` must succeed without systemd (manual `serve`); ship via `task agent:release` / `release-agent.yml` (no Tauri).
 
 <!-- BEGIN opencode-rag -->
 ## OpenCodeRAG (OpenCode only)

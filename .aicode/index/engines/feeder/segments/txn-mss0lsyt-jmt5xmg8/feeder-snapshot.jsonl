@@ -57,7 +57,7 @@
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-phase-3-retry-and-memory-safety.md","sizeBytes":1357,"mtimeMs":1786617777039.1812,"sha256":"dd78dda249dee8275ab952e985587d92e8a2314e44ba5b9b763a368da2af3804"}
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-product.md","sizeBytes":2985,"mtimeMs":1786639007716.4036,"sha256":"321d4f47977c9a38e186355b6dce5ba331917f69e6c722e8eb2cb71f2f52423d"}
 {"path":"ollama-router/.opencode/wiki/index.md","sizeBytes":1044,"mtimeMs":1786617739520.2847,"sha256":"659ac0d2297b43a7df907d805f37c3a018e977ef6adc522bac2516ea6f067e42"}
-{"path":"ollama-router/AGENTS.md","sizeBytes":9706,"mtimeMs":1786649284166.268,"sha256":"b0f0ce9af67e0069c5a2e4b105af9bd2b5e19cad7ff305f6f6358c41d9cd9441"}
+{"path":"ollama-router/AGENTS.md","sizeBytes":10397,"mtimeMs":1786655584962.6182,"sha256":"ebe2dcdb26c9e85aac0de1f2ee155abcf2cca1a28e501604a354dff59dd0ff93"}
 {"path":"ollama-router/Cargo.lock","sizeBytes":100943,"mtimeMs":1786646779616.5095,"sha256":"a6a98ee6ce6bd541cd68231c852082550da01dc199c292817736ac1ca26ade9f"}
 {"path":"ollama-router/Cargo.toml","sizeBytes":1597,"mtimeMs":1786638160652.7385,"sha256":"90722b42d5bcfb510f890b2f582f92b86326ba6818e5bdaf1ba8cbef864fbcb7"}
 {"path":"ollama-router/config.overlay.example.yaml","sizeBytes":1286,"mtimeMs":1786639072824.5952,"sha256":"c428dafca742c4058fe1a57c91f1e9829c7269e183c321cbd93250d6066d8889"}
