@@ -5,12 +5,14 @@ use axum::{
     http::{Request, StatusCode},
 };
 use http_body_util::BodyExt;
-use ollama_router::http::make_app;
+use ollama_router::http::{make_app, AppState};
+use ollama_router_core::RouterConfig;
 use serde_json::Value;
 use tower::ServiceExt;
 
 async fn get(path: &str) -> (StatusCode, Value) {
-    let response = make_app()
+    let state = AppState::from_config(RouterConfig::default()).expect("state");
+    let response = make_app(state)
         .oneshot(Request::builder().uri(path).body(Body::empty()).unwrap())
         .await
         .unwrap();

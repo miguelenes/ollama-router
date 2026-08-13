@@ -726,6 +726,39 @@ impl TimeoutsConfig {
     }
 }
 
+/// reqwest / hyper connection-pool limits (Python httpx 256/32).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct UpstreamPoolConfig {
+    pub max_connections: u32,
+    pub max_keepalive_connections: u32,
+}
+
+impl Default for UpstreamPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 256,
+            max_keepalive_connections: 32,
+        }
+    }
+}
+
+impl UpstreamPoolConfig {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if self.max_connections < 1 {
+            return Err(ConfigError::invalid(
+                "upstream.max_connections must be >= 1",
+            ));
+        }
+        if self.max_keepalive_connections < 1 {
+            return Err(ConfigError::invalid(
+                "upstream.max_keepalive_connections must be >= 1",
+            ));
+        }
+        Ok(())
+    }
+}
+
 /// Verda Cloud spot GPU provisioning (opt-in; disabled by default).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -926,6 +959,7 @@ pub struct YamlTunables {
     pub listen_port: u16,
     pub provision_defaults: ProvisionDefaults,
     pub verda: VerdaConfig,
+    pub upstream: UpstreamPoolConfig,
 }
 
 impl Default for YamlTunables {
@@ -951,6 +985,7 @@ impl Default for YamlTunables {
             listen_port: 11434,
             provision_defaults: ProvisionDefaults::default(),
             verda: VerdaConfig::default(),
+            upstream: UpstreamPoolConfig::default(),
         }
     }
 }
@@ -962,6 +997,7 @@ impl YamlTunables {
         self.timeouts.validate()?;
         self.provision_defaults.validate()?;
         self.verda.validate()?;
+        self.upstream.validate()?;
         for tier in &self.desired_model_tiers {
             tier.validate()?;
         }
@@ -1021,6 +1057,7 @@ pub struct RouterConfig {
     pub listen_port: u16,
     pub provision_defaults: ProvisionDefaults,
     pub verda: VerdaConfig,
+    pub upstream: UpstreamPoolConfig,
 }
 
 impl Default for RouterConfig {
@@ -1053,6 +1090,7 @@ impl RouterConfig {
             listen_port: tunables.listen_port,
             provision_defaults: tunables.provision_defaults,
             verda: tunables.verda,
+            upstream: tunables.upstream,
         }
     }
 

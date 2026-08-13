@@ -17,6 +17,6 @@ pub use load::{load_config, load_config_from, parse_yaml, DEFAULTS_YAML};
 pub use models::{
     Capacity, HealthConfig, ModelTier, NodeConfig, NodeProvisionConfig, NodeSshConfig,
     PolicyConfig, ProvisionDefaults, RequestClass, RouterConfig, SelectionStrategy, TimeoutsConfig,
-    VerdaConfig, YamlTunables,
+    UpstreamPoolConfig, VerdaConfig, YamlTunables,
 };
 pub use nodes_env::parse_nodes_env;

@@ -262,6 +262,8 @@ ready_requires_embedding_model: true
         assert_eq!(config.verda.max_vram_gb, Some(80.0));
         assert!(config.policy.model_warm_enabled);
         assert_eq!(config.policy.model_warm_interval_seconds, 60.0);
+        assert_eq!(config.upstream.max_connections, 256);
+        assert_eq!(config.upstream.max_keepalive_connections, 32);
         assert_eq!(
             config.policy.reject_on_ram_elevated_for_classes,
             [RequestClass::Medium, RequestClass::Large]

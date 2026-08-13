@@ -2,11 +2,15 @@
 
 pub(crate) mod env;
 pub(crate) mod ids;
+pub(crate) mod registry;
 pub(crate) mod state;
 pub(crate) mod tailscale;
 
 pub use env::parse_host_environ;
 pub use ids::{NodeId, RouterId, VerdaInstanceId};
+pub use registry::{
+    model_base, normalize_model, suggested_max_inflight, NodeSnapshot, PressureLevel, Registry,
+};
 pub use state::{
     FleetState, FleetStateEntry, FleetStateError, VerdaNodePersist, DEFAULT_STATE_PATH,
 };

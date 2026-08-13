@@ -6,7 +6,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use fs4::fs_std::FileExt;
+use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -218,7 +218,7 @@ impl FleetState {
             .create(true)
             .truncate(false)
             .open(self.lock_path())?;
-        file.lock_exclusive().map_err(FleetStateError::Lock)?;
+        FileExt::lock(&file).map_err(FleetStateError::Lock)?;
         Ok(file)
     }
 }

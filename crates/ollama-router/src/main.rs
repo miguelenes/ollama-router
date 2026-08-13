@@ -1,7 +1,10 @@
+use std::path::PathBuf;
+
 use anyhow::Context;
 use clap::Parser;
 use ollama_router::cli::{Cli, Commands};
-use ollama_router::http::make_app;
+use ollama_router::http::{make_app, AppState};
+use ollama_router_core::load_config;
 
 fn not_implemented(command: &str) -> ! {
     eprintln!("error: {command} is not implemented yet");
@@ -19,9 +22,11 @@ fn init_tracing() {
         .init();
 }
 
-async fn serve(host: String, port: u16) -> anyhow::Result<()> {
+async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Result<()> {
     init_tracing();
-    let app = make_app();
+    let loaded = load_config(config.as_deref()).context("load config")?;
+    let state = AppState::from_config(loaded).context("build app state")?;
+    let app = make_app(state);
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
@@ -35,11 +40,7 @@ async fn serve(host: String, port: u16) -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Commands::Serve {
-            host,
-            port,
-            config: _,
-        } => serve(host, port).await,
+        Commands::Serve { host, port, config } => serve(host, port, config).await,
         Commands::Ensure { .. } => not_implemented("ensure"),
         Commands::Delete { .. } => not_implemented("delete"),
         Commands::Nodes { .. } => not_implemented("nodes"),

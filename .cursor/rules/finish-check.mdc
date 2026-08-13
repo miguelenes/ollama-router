@@ -1,0 +1,23 @@
+---
+description: Run task check and clear rust-analyzer before claiming a coding task done
+alwaysApply: true
+---
+
+# Finish check
+
+After any Rust, Cargo, Taskfile, or Dockerfile change, do **not** claim the task done until the local gate is green.
+
+1. Clear rust-analyzer / IDE diagnostics on edited files.
+2. Run **`task check`** (sequential `fmt --check`, clippy `-D warnings`, `cargo test --workspace --locked`, `cargo deny`).
+3. If fmt `--check` fails, run `cargo fmt --all`, then re-run `task check`.
+4. Fix clippy, test, deny, and analyzer failures. Do not leave warnings.
+
+Skip the cargo gate only for docs / rules / plan-only work with **no** code or lockfile changes. Keep using Task — do not add a Makefile, justfile, or npm scripts.
+
+```bash
+# BAD — stop after edits
+cargo check
+
+# GOOD — gate matches CI intent
+task check
+```

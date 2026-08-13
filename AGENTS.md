@@ -80,6 +80,8 @@ task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
 task docker         # docker build -t ollama-router:local .
 ```
 
+Before finishing a coding task, run `task check` and do not stop while it fails.
+
 CI runs the same cargo commands directly (no `task` binary on GitHub):
 
 ```bash

@@ -1,0 +1,626 @@
+//! Utilization WLC + class preference over a registry snapshot.
+
+use std::collections::HashSet;
+
+use crate::config::PolicyConfig;
+use crate::fleet::ids::NodeId;
+use crate::fleet::registry::NodeSnapshot;
+
+use super::classify::{parse_model_size_b, RequestClass};
+use super::error::RoutingError;
+
+const LARGE_VRAM_PER_B: f64 = 0.7;
+const LARGE_VRAM_FLOOR: f64 = 2.0;
+const LARGE_MIN_VRAM_FALLBACK: f64 = 16.0;
+
+/// Ordered candidates plus the rejection reason when the list is empty.
+#[derive(Clone, Debug)]
+pub struct RankOutcome {
+    pub ranked: Vec<NodeSnapshot>,
+    pub reason: Option<RoutingError>,
+    pub evaluated: Vec<NodeId>,
+}
+
+impl RankOutcome {
+    pub fn ok(&self) -> bool {
+        !self.ranked.is_empty()
+    }
+
+    pub fn rejection(&self) -> Option<RoutingError> {
+        if self.ranked.is_empty() {
+            self.reason
+        } else {
+            None
+        }
+    }
+}
+
+/// VRAM needed for a LARGE-class model (q4 rule of thumb).
+pub fn estimate_large_vram_gb(model: Option<&str>) -> f64 {
+    let Some(model) = model else {
+        return LARGE_MIN_VRAM_FALLBACK;
+    };
+    match parse_model_size_b(model) {
+        Some(size) => size * LARGE_VRAM_PER_B + LARGE_VRAM_FLOOR,
+        None => LARGE_MIN_VRAM_FALLBACK,
+    }
+}
+
+/// Admission-time VRAM estimate used for the reservation ledger.
+pub fn estimate_request_vram_gb(
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> f64 {
+    match request_class {
+        RequestClass::Embed => policy.embed_reserve_vram_gb,
+        RequestClass::Small => policy.small_reserve_vram_gb,
+        RequestClass::Medium => {
+            if let Some(model) = model {
+                if let Some(size) = parse_model_size_b(model) {
+                    let estimate = size * policy.vram_per_b + policy.vram_floor_gb;
+                    return estimate.max(policy.medium_reserve_min_gb);
+                }
+            }
+            policy.medium_reserve_min_gb
+        }
+        RequestClass::Large => estimate_large_vram_gb(model),
+        RequestClass::Pull | RequestClass::Generic => 0.0,
+    }
+}
+
+/// Estimate system RAM added by a cold request on a node.
+pub fn estimate_request_ram_gb(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> f64 {
+    match request_class {
+        RequestClass::Embed => policy.embed_reserve_ram_gb,
+        RequestClass::Small => policy.small_reserve_ram_gb,
+        RequestClass::Medium | RequestClass::Large => {
+            if node.vram_gb() <= 0.0 {
+                estimate_request_vram_gb(request_class, model, policy)
+            } else {
+                policy.gpu_system_ram_overhead_gb
+            }
+        }
+        RequestClass::Pull | RequestClass::Generic => 0.0,
+    }
+}
+
+fn ram_sensitive(request_class: RequestClass, policy: &PolicyConfig) -> bool {
+    request_class
+        .as_policy_class()
+        .is_some_and(|c| policy.ram_sensitive_classes.contains(&c))
+}
+
+fn reject_on_elevated(request_class: RequestClass, policy: &PolicyConfig) -> bool {
+    request_class
+        .as_policy_class()
+        .is_some_and(|c| policy.reject_on_ram_elevated_for_classes.contains(&c))
+}
+
+/// RAM hard-filter. Returns Ok or Ram / RamPressure.
+pub fn ram_fits(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> Result<(), RoutingError> {
+    if !ram_sensitive(request_class, policy) {
+        return Ok(());
+    }
+    if node.pressure_level == crate::fleet::registry::PressureLevel::Critical
+        && policy.reject_on_ram_critical
+    {
+        return Err(RoutingError::RamPressure);
+    }
+    if node.pressure_level == crate::fleet::registry::PressureLevel::Elevated
+        && reject_on_elevated(request_class, policy)
+    {
+        return Err(RoutingError::RamPressure);
+    }
+    let estimate = estimate_request_ram_gb(node, request_class, model, policy);
+    if estimate <= 0.0 || node.ram_available_gb.is_none() {
+        return Ok(());
+    }
+    if node.ram_gb() <= 0.0 {
+        return Ok(());
+    }
+    let ram_available = node.ram_available_gb.unwrap_or(0.0);
+    let projected = node.ram_gb() - ram_available + node.reserved_ram_gb + estimate;
+    if projected > node.ram_gb() * policy.ram_headroom {
+        return Err(RoutingError::Ram);
+    }
+    Ok(())
+}
+
+/// Static VRAM gate (no reservation ledger) — used by admission-wait.
+pub fn static_capacity_fits(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> bool {
+    match request_class {
+        RequestClass::Embed | RequestClass::Small | RequestClass::Generic | RequestClass::Pull => {
+            true
+        }
+        RequestClass::Medium => node.vram_gb() >= policy.medium_min_vram_gb,
+        RequestClass::Large => node.vram_gb() >= estimate_large_vram_gb(model),
+    }
+}
+
+/// Capacity gate using effective inventory plus live VRAM pressure.
+pub fn capacity_fits(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> bool {
+    if matches!(request_class, RequestClass::Generic | RequestClass::Pull) {
+        return true;
+    }
+    if request_class == RequestClass::Embed && policy.embed_reserve_vram_gb <= 0.0 {
+        return ram_fits(node, request_class, model, policy).is_ok();
+    }
+    if request_class == RequestClass::Small && policy.small_reserve_vram_gb <= 0.0 {
+        return ram_fits(node, request_class, model, policy).is_ok();
+    }
+    if request_class == RequestClass::Medium && node.vram_gb() < policy.medium_min_vram_gb {
+        return false;
+    }
+    if request_class == RequestClass::Large && node.vram_gb() < estimate_large_vram_gb(model) {
+        return false;
+    }
+
+    let request_estimate = estimate_request_vram_gb(request_class, model, policy);
+    if request_estimate <= 0.0 && node.reserved_vram_gb <= 0.0 {
+        return ram_fits(node, request_class, model, policy).is_ok();
+    }
+
+    if node.vram_gb() > 0.0 {
+        if let Some(loaded) = node.loaded_vram_gb {
+            let projected = loaded + node.reserved_vram_gb + request_estimate;
+            let limit = node.vram_gb() * policy.vram_headroom;
+            if projected > limit {
+                return false;
+            }
+        } else if node.reserved_vram_gb > 0.0 {
+            let projected = node.reserved_vram_gb + request_estimate;
+            let limit = node.vram_gb() * policy.vram_headroom;
+            if projected > limit {
+                return false;
+            }
+        }
+    }
+
+    ram_fits(node, request_class, model, policy).is_ok()
+}
+
+fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
+    if !policy.must_have_labels.is_empty() {
+        let have: HashSet<&str> = labels.iter().map(String::as_str).collect();
+        if !policy
+            .must_have_labels
+            .iter()
+            .all(|need| have.contains(need.as_str()))
+        {
+            return false;
+        }
+    }
+    if !policy.avoid_labels.is_empty() {
+        let have: HashSet<&str> = labels.iter().map(String::as_str).collect();
+        if policy
+            .avoid_labels
+            .iter()
+            .any(|avoid| have.contains(avoid.as_str()))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn capacity_preference(node: &NodeSnapshot, request_class: RequestClass) -> f64 {
+    match request_class {
+        RequestClass::Embed => {
+            let mut base = node.vram_gb();
+            if let Some(loaded) = node.loaded_vram_gb {
+                if node.vram_gb() > 0.0 && node.vram_gb() - loaded < 2.0 {
+                    base += 100.0;
+                }
+            }
+            base
+        }
+        RequestClass::Large => -node.vram_gb(),
+        RequestClass::Small => {
+            if node.gpus() > 0 {
+                node.vram_gb()
+            } else {
+                node.vram_gb() + 100.0
+            }
+        }
+        RequestClass::Medium | RequestClass::Generic | RequestClass::Pull => node.vram_gb(),
+    }
+}
+
+/// Sort key (lower is better). Sticky affinity may promote only on exact equality.
+pub fn load_key(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> (f64, f64, f64, f64) {
+    let warm = if policy.prefer_warm_models {
+        if let Some(model) = model {
+            if node.has_model_loaded(model) {
+                0.0
+            } else {
+                1.0
+            }
+        } else {
+            0.0
+        }
+    } else {
+        0.0
+    };
+    let pressure_penalty = match node.pressure_level {
+        crate::fleet::registry::PressureLevel::Critical => policy.ram_critical_score_penalty,
+        crate::fleet::registry::PressureLevel::Elevated => policy.ram_elevated_score_penalty,
+        crate::fleet::registry::PressureLevel::Unknown
+        | crate::fleet::registry::PressureLevel::Ok => 0.0,
+    };
+    let available = -(node.ram_available_ratio.unwrap_or(0.0));
+    let preference = capacity_preference(node, request_class);
+    let base_cap = node.base_inflight_cap(policy.default_max_inflight).max(1);
+    let utilization = f64::from(node.inflight) / f64::from(base_cap);
+    (
+        utilization * policy.inflight_weight,
+        pressure_penalty,
+        preference,
+        warm + available * 0.001,
+    )
+}
+
+/// Ordered candidate list (best first), rejection reason, evaluated ids.
+pub fn rank_nodes(
+    nodes: &[NodeSnapshot],
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+    sticky_owner: Option<&NodeId>,
+    excluded_node_ids: &HashSet<NodeId>,
+    tie_break: u64,
+) -> RankOutcome {
+    if nodes.is_empty() {
+        return RankOutcome {
+            ranked: Vec::new(),
+            reason: Some(RoutingError::NoNodes),
+            evaluated: Vec::new(),
+        };
+    }
+
+    let all_ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
+    let healthy: Vec<&NodeSnapshot> = nodes
+        .iter()
+        .filter(|n| n.healthy && !excluded_node_ids.contains(&n.id))
+        .collect();
+    if healthy.is_empty() {
+        return RankOutcome {
+            ranked: Vec::new(),
+            reason: Some(RoutingError::NoHealthy),
+            evaluated: all_ids,
+        };
+    }
+
+    let candidates: Vec<&NodeSnapshot> = if let Some(model) = model {
+        let with_model: Vec<&NodeSnapshot> = healthy
+            .iter()
+            .copied()
+            .filter(|n| n.has_model(model))
+            .collect();
+        if with_model.is_empty() {
+            return RankOutcome {
+                ranked: Vec::new(),
+                reason: Some(RoutingError::ModelMissing),
+                evaluated: healthy.iter().map(|n| n.id.clone()).collect(),
+            };
+        }
+        with_model
+    } else {
+        healthy
+    };
+
+    let labeled: Vec<&NodeSnapshot> = candidates
+        .iter()
+        .copied()
+        .filter(|n| label_ok(&n.labels, policy))
+        .collect();
+
+    let fitting: Vec<&NodeSnapshot> = labeled
+        .iter()
+        .copied()
+        .filter(|n| capacity_fits(n, request_class, model, policy))
+        .collect();
+    if fitting.is_empty() {
+        let mut reason = RoutingError::Capacity;
+        for node in &labeled {
+            if let Err(r) = ram_fits(node, request_class, model, policy) {
+                if r == RoutingError::RamPressure {
+                    reason = RoutingError::RamPressure;
+                    break;
+                }
+                if r == RoutingError::Ram {
+                    reason = RoutingError::Ram;
+                }
+            }
+        }
+        return RankOutcome {
+            ranked: Vec::new(),
+            reason: Some(reason),
+            evaluated: labeled.iter().map(|n| n.id.clone()).collect(),
+        };
+    }
+
+    let uncapped: Vec<&NodeSnapshot> = fitting
+        .iter()
+        .copied()
+        .filter(|n| !n.is_saturated(policy.default_max_inflight))
+        .collect();
+    if uncapped.is_empty() {
+        return RankOutcome {
+            ranked: Vec::new(),
+            reason: Some(RoutingError::Saturated),
+            evaluated: fitting.iter().map(|n| n.id.clone()).collect(),
+        };
+    }
+
+    let mut ranked: Vec<NodeSnapshot> = uncapped.into_iter().cloned().collect();
+    ranked.sort_by(|a, b| {
+        let ka = load_key(a, request_class, model, policy);
+        let kb = load_key(b, request_class, model, policy);
+        ka.partial_cmp(&kb)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.id.as_str().cmp(b.id.as_str()))
+    });
+
+    let best_key = load_key(&ranked[0], request_class, model, policy);
+    if let Some(owner_id) = sticky_owner {
+        if let Some(pos) = ranked.iter().position(|n| n.id == *owner_id) {
+            if pos != 0 && load_key(&ranked[pos], request_class, model, policy) == best_key {
+                let owner = ranked.remove(pos);
+                ranked.insert(0, owner);
+            }
+        }
+    }
+
+    let tied_len = ranked
+        .iter()
+        .filter(|n| load_key(n, request_class, model, policy) == best_key)
+        .count();
+    if tied_len > 1 && tie_break > 0 {
+        let rot = (tie_break as usize) % tied_len;
+        let mut tied: Vec<NodeSnapshot> = ranked.drain(..tied_len).collect();
+        tied.rotate_left(rot);
+        let rest = ranked;
+        ranked = tied;
+        ranked.extend(rest);
+    }
+
+    let evaluated: Vec<NodeId> = ranked.iter().map(|n| n.id.clone()).collect();
+    RankOutcome {
+        ranked,
+        reason: None,
+        evaluated,
+    }
+}
+
+/// True when `insufficient_capacity` would lift if the reservation ledger were empty.
+pub fn blocked_only_by_reservations(
+    nodes: &[NodeSnapshot],
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> bool {
+    for node in nodes {
+        if !node.healthy {
+            continue;
+        }
+        if let Some(model) = model {
+            if !node.has_model(model) {
+                continue;
+            }
+        }
+        if !label_ok(&node.labels, policy) {
+            continue;
+        }
+        if static_capacity_fits(node, request_class, model, policy) {
+            return true;
+        }
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{Capacity, NodeConfig, RouterConfig};
+    use crate::fleet::registry::{suggested_max_inflight, Registry};
+
+    fn nid(id: &str) -> NodeId {
+        NodeId::parse(id).expect("id")
+    }
+
+    fn node(id: &str, vram: f64, gpus: u32, max_inflight: Option<u32>) -> NodeConfig {
+        NodeConfig {
+            id: nid(id),
+            url: Some(format!("http://{id}:11434")),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: Some(vram),
+                ram_gb: Some(32.0),
+                gpus: Some(gpus),
+                cpu_cores: Some(8),
+            },
+            max_inflight,
+            ssh: None,
+            provision: None,
+        }
+    }
+
+    fn fleet() -> (Registry, PolicyConfig) {
+        let config = RouterConfig {
+            nodes: vec![
+                node("node-a", 8.0, 1, None),
+                node("node-b", 0.0, 0, None),
+                node("node-c", 24.0, 1, None),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["node-a", "node-b", "node-c"] {
+            registry.set_healthy(&nid(id));
+        }
+        registry.update_models(&nid("node-a"), ["qwen3-embedding:8b", "llama3.2:3b"]);
+        registry.update_models(
+            &nid("node-b"),
+            ["qwen3-embedding:0.6b", "moondream", "llama3.2:3b"],
+        );
+        registry.update_models(
+            &nid("node-c"),
+            ["qwen3-embedding:8b", "llama3.2:3b", "llama3.1:70b"],
+        );
+        (registry, config.policy)
+    }
+
+    #[test]
+    fn no_healthy_nodes() {
+        let config = RouterConfig {
+            nodes: vec![node("node-a", 8.0, 1, None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::NoHealthy));
+    }
+
+    #[test]
+    fn saturated_never_selected() {
+        let a = nid("node-a");
+        let c = nid("node-c");
+        let config = RouterConfig {
+            nodes: vec![
+                node("node-a", 8.0, 1, Some(1)),
+                node("node-b", 0.0, 0, None),
+                node("node-c", 24.0, 1, Some(1)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&a);
+        registry.set_healthy(&c);
+        registry.update_models(&a, ["qwen3-embedding:8b"]);
+        registry.update_models(&c, ["qwen3-embedding:8b"]);
+        registry.inflight_inc(&a);
+        registry.inflight_inc(&c);
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::Saturated));
+    }
+
+    #[test]
+    fn embed_prefers_smaller_gpu() {
+        let (registry, policy) = fleet();
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "node-a");
+    }
+
+    #[test]
+    fn sticky_does_not_override_better_load_key() {
+        let (registry, mut policy) = fleet();
+        policy.sticky_affinity = true;
+        registry.update_ps_state(&nid("node-c"), ["qwen3-embedding:8b"], Some(5.0));
+        let owner = registry.sticky_owner("qwen3-embedding:8b");
+        assert_eq!(owner.as_ref().map(|id| id.as_str()), Some("node-c"));
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &policy,
+            owner.as_ref(),
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "node-a");
+    }
+
+    #[test]
+    fn retry_exclusion_skips_attempted_id() {
+        let (registry, policy) = fleet();
+        let mut excluded = HashSet::new();
+        excluded.insert(nid("node-a"));
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &policy,
+            None,
+            &excluded,
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "node-c");
+        assert!(outcome.ranked.iter().all(|n| n.id.as_str() != "node-a"));
+    }
+
+    #[test]
+    fn large_model_insufficient_capacity() {
+        let (registry, policy) = fleet();
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Large,
+            Some("llama3.1:70b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::Capacity));
+    }
+
+    #[test]
+    fn suggested_max_inflight_reexport() {
+        assert_eq!(suggested_max_inflight(8.0), 2);
+    }
+}

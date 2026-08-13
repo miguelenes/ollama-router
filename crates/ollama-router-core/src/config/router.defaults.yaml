@@ -75,6 +75,11 @@ timeouts:
   generate_seconds: 600
   pull_seconds: 3600
 
+# reqwest pool keepalive + semaphore around each upstream send.
+upstream:
+  max_connections: 256
+  max_keepalive_connections: 32
+
 # SQLite metadata only: operation id/kind/models/nodes/status/timestamps.
 # No upstream request/response bodies or target error details are retained.
 job_store_path: /var/lib/ollama-router/model-operations.sqlite3
