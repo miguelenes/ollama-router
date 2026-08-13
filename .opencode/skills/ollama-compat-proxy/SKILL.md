@@ -1,6 +1,6 @@
 ---
 name: ollama-compat-proxy
-description: Implements the Ollama-compatible proxy surface for this fleet router — generate/chat/embed, /api/embeddings rewrite, aggregated /api/tags, fleet pull/delete, and 503+Retry-After on capacity miss. Use when adding or changing HTTP routes, proxy streaming, admin ensure/delete, or Ollama protocol compatibility.
+description: Implements the Ollama-compatible proxy surface for this fleet router — generate/chat/embed, /api/embeddings rewrite, aggregated /api/tags and /v1/models, fleet pull/delete, and 503+Retry-After on capacity miss. Use when adding or changing HTTP routes, proxy streaming, admin ensure/delete, or Ollama protocol compatibility.
 ---
 
 # Ollama-compatible proxy
@@ -17,10 +17,11 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `GET /api/tags` | Aggregated **union** of healthy nodes' tags. Not a single-node passthrough. |
+| `GET /v1/models` | Same union in OpenAI list format (`id` / `object` / `created: 0` / `owned_by: library`). |
 | `POST /api/pull`, `/api/delete` | Always fleet orchestrator (stub → 503 until jobs land). Prefer admin. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
-| `GET /metrics` | Prometheus. |
+| `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
 | `/router/v1/*` | Admin bearer. Unset token → 403. |
 
 ## Capacity miss

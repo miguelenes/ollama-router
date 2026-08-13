@@ -32,10 +32,34 @@ the HTTP client and merge policy in `crates/ollama-router-core/src/capacity/`.
 Wire: `GET /healthz`, `GET /metrics` (open); `GET /v1/capacity`, `/v1/pressure`,
 `/v1/status` (bearer if `token` / `OLLAMA_NODE_AGENT_TOKEN` is set). JSON field
 names stay compatible with the historical Illumination capacity agent;
-additive keys only (`gpu_backend` on capacity/status).
+additive keys only (`gpu_backend`, `vram_free_known`, RAM/GPU util, disk, loaded counts).
 
 **GiB = bytes / 1024³.** sysinfo reports RAM in bytes. Never divide by `1024²`.
 nvidia-smi memory is MiB (`/ 1024` → GiB).
+
+**Unknown vs measured.** Never encode unknown as `0` for VRAM free/used, GPU
+util, RAM available, or CPU%. Additive `vram_free_known` / `vram_used_known`
+booleans mark a real sample. A full GPU is `vram_free_gb=0` **and**
+`vram_free_known=true`. CPU / Metal-without-discrete is `gpus=0`, `vram_gb=0`,
+`vram_free_known=false`. Old agents without the flag: infer known iff
+`gpus > 0 && vram_gb > 0`.
+
+**Grafana display path.** The health probe already GETs `/v1/capacity` and
+`/v1/pressure`. The router persists fields on `NodeState` and re-exports
+`ollama_router_node_*` on `GET /metrics`. Prometheus scrapes the **router**
+only for fleet dashboards. Do not add production scrape jobs for agent
+`:11436` (agents do not know the fleet.yaml node id; Verda spots churn).
+Local compose may still scrape mock `:11436` for `ollama_up`. Grafana gates
+VRAM panels on `vram_free_known == 1`, not `vram_free_gb > 0`.
+
+**Collect.** `/v1/*` and `/metrics` share a 2s TTL cache so router probes do
+not stack `nvidia-smi`. GPU subprocesses stay at 2s timeout; sysinfo runs in
+`spawn_blocking`. A 1s sampler fills CPU%; omit CPU% until the second sample
+exists. Windows does not use load average (sysinfo reports 0). `ram_available_source`
+is `MemAvailable` on Linux and `sysinfo` elsewhere. Linux PSI `some avg10`
+amplifies elevated/critical. Auto GPU policy: NVIDIA inventory → CUDA (including
+macOS eGPU); else macOS Metal; else ROCm; else CPU. Metal never copies unified
+RAM into `vram_gb`.
 
 Agent-down is **soft-fail**: node health still follows Ollama `/api/tags`, the
 last discovered capacity is retained, `capacity_error` is populated, and routing
@@ -67,11 +91,13 @@ transiently ineligible.
 
 Each node tracks `pressure_level` (`ok | elevated | critical | unknown`).
 **The agent classifies** (worst-signal-wins: available-RAM ratio/GB, swap
-amplifier, load-per-CPU). The router **trusts** the wire token via
+amplifier, load-per-CPU on Unix, CPU% after the sampler, Linux PSI
+amplifiers). The router **trusts** the wire token via
 `PressureLevel::from_wire`. Do not port `classify_pressure` knobs into router
 `PolicyConfig`.
 
-No live MemAvailable and no usable load → `unknown` (permissive).
+No live available-RAM, no usable load, and no CPU% → `unknown` (permissive).
+Windows never treats load=0 as a signal.
 
 Critical nodes hard-reject when `reject_on_ram_critical`. Elevated nodes reject
 classes in `reject_on_ram_elevated_for_classes` (default medium/large). See

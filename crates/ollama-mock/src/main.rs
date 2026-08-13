@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::extract::State;
-use axum::http::StatusCode;
+use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -86,9 +86,10 @@ async fn main() {
         .and_then(|s| s.parse().ok())
         .filter(|p| *p > 0);
 
-    let ollama = serve_ollama(MockState::new(role), ollama_port);
+    let state = MockState::new(role);
+    let ollama = serve_ollama(state.clone(), ollama_port);
     if let Some(port) = capacity_port {
-        let capacity = serve_capacity(role, port);
+        let capacity = serve_capacity(role, state, port);
         tokio::select! {
             result = ollama => {
                 if let Err(error) = result {
@@ -123,14 +124,21 @@ async fn serve_ollama(state: MockState, port: u16) -> std::io::Result<()> {
     axum::serve(listener, app).await
 }
 
-async fn serve_capacity(role: MockRole, port: u16) -> std::io::Result<()> {
+async fn serve_capacity(role: MockRole, ollama: MockState, port: u16) -> std::io::Result<()> {
     let app = Router::new()
         .route("/v1/capacity", get(capacity))
         .route("/v1/pressure", get(pressure))
-        .with_state(role);
+        .route("/metrics", get(agent_metrics))
+        .with_state(CapacityState { role, ollama });
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await
+}
+
+#[derive(Clone)]
+struct CapacityState {
+    role: MockRole,
+    ollama: MockState,
 }
 
 async fn tags(State(state): State<MockState>) -> Json<Value> {
@@ -197,16 +205,39 @@ async fn embed(Json(body): Json<ModelBody>) -> Json<Value> {
     }))
 }
 
-async fn capacity(State(role): State<MockRole>) -> Json<Value> {
+async fn capacity(State(state): State<CapacityState>) -> Json<Value> {
     Json(json!({
         "pressure_level": "ok",
-        "vram_gb": role.vram_gb(),
+        "vram_gb": state.role.vram_gb(),
     }))
 }
 
-async fn pressure(State(role): State<MockRole>) -> Json<Value> {
+async fn pressure(State(state): State<CapacityState>) -> Json<Value> {
     Json(json!({
         "pressure_level": "ok",
-        "vram_gb": role.vram_gb(),
+        "vram_gb": state.role.vram_gb(),
     }))
+}
+
+async fn agent_metrics(State(state): State<CapacityState>) -> Response {
+    let n = state.ollama.lock_models().len();
+    let vram = state.role.vram_gb();
+    let body = format!(
+        "# HELP ollama_up 1 if GET /api/tags succeeded\n\
+         # TYPE ollama_up gauge\n\
+         ollama_up 1\n\
+         # HELP ollama_models On-disk model count from GET /api/tags (no names)\n\
+         # TYPE ollama_models gauge\n\
+         ollama_models {n}\n\
+         # HELP ollama_gpu_vram_gb Sum of GPU VRAM (GiB)\n\
+         # TYPE ollama_gpu_vram_gb gauge\n\
+         ollama_gpu_vram_gb {vram}\n\
+         # HELP ram_available_gb Available RAM (GiB)\n\
+         # TYPE ram_available_gb gauge\n\
+         ram_available_gb 0\n\
+         # HELP gpu_utilization_pct Mean GPU utilization percent\n\
+         # TYPE gpu_utilization_pct gauge\n\
+         gpu_utilization_pct 0\n"
+    );
+    ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }

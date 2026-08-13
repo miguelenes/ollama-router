@@ -15,6 +15,7 @@ fn test_state() -> AppState {
         ollama_listen: "127.0.0.1:11434".into(),
         metrics: Arc::new(AgentMetrics::new().expect("metrics")),
         last: Arc::new(RwLock::new(None)),
+        cpu_usage_pct: Arc::new(std::sync::RwLock::new(None)),
     }
 }
 
@@ -46,6 +47,7 @@ async fn v1_requires_bearer_when_token_set() {
         ollama_listen: "127.0.0.1:11434".into(),
         metrics: Arc::new(AgentMetrics::new().expect("metrics")),
         last: Arc::new(RwLock::new(None)),
+        cpu_usage_pct: Arc::new(std::sync::RwLock::new(None)),
     };
     let response = make_app(state)
         .oneshot(
@@ -142,6 +144,7 @@ async fn metrics_is_open() {
     .unwrap();
     for name in [
         "ollama_up",
+        "ollama_models",
         "ollama_gpu_vram_gb",
         "ram_available_gb",
         "gpu_utilization_pct",

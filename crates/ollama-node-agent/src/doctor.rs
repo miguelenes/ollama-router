@@ -43,7 +43,7 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
     let agent_listen = format_host_port(agent_ip, config.port);
     let version = ollama_version().await;
     let running = ollama_tags_ok(&format!("http://{ollama_listen}")).await;
-    let snap = crate::collect::collect_live(config, &ollama_listen).await;
+    let snap = crate::collect::collect_live(config, &ollama_listen, None).await;
     if cfg!(windows) {
         notes.push(
             "Windows: do not also run the tray app on :11434; NVIDIA services usually need LocalSystem"

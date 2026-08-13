@@ -30,7 +30,8 @@ pub fn spawn_if_configured(state: AppState) {
                 tracing::warn!("register skipped: token env unset");
                 continue;
             };
-            let snap = crate::collect::collect_live(&state.config, &state.ollama_listen).await;
+            let cpu = state.cpu_usage_pct.read().ok().and_then(|slot| *slot);
+            let snap = crate::collect::collect_live(&state.config, &state.ollama_listen, cpu).await;
             let client = match reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .use_rustls_tls()

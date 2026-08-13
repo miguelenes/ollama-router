@@ -394,6 +394,89 @@ async fn aggregated_tags_union() {
 }
 
 #[tokio::test]
+async fn aggregated_openai_models_union() {
+    let state = state_from(fleet_config(vec![
+        node("node-a", "http://127.0.0.1:9", 8.0, 1, None),
+        node("node-b", "http://127.0.0.1:9", 0.0, 0, None),
+    ]));
+    mark_ready(&state, "node-a", &["qwen3-embedding:8b", "llama3.2:3b"]);
+    mark_ready(&state, "node-b", &["qwen3-embedding:0.6b", "llama3.2:3b"]);
+    let (status, headers, body) = send(
+        state,
+        Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-aggregated")
+            .and_then(|v| v.to_str().ok()),
+        Some("true")
+    );
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["object"], "list");
+    let data = parsed["data"].as_array().unwrap();
+    let ids: Vec<&str> = data.iter().map(|m| m["id"].as_str().unwrap()).collect();
+    assert_eq!(ids.iter().filter(|id| **id == "llama3.2:3b").count(), 1);
+    assert!(ids.contains(&"qwen3-embedding:8b"));
+    assert!(ids.contains(&"qwen3-embedding:0.6b"));
+    assert!(ids.contains(&"llama3.2:3b"));
+    for item in data {
+        assert_eq!(item["object"], "model");
+        assert_eq!(item["created"], 0);
+        assert_eq!(item["owned_by"], "library");
+    }
+}
+
+#[tokio::test]
+async fn aggregated_models_gauges_and_discovery_counter() {
+    let state = state_from(fleet_config(vec![
+        node("node-a", "http://127.0.0.1:9", 8.0, 1, None),
+        node("node-b", "http://127.0.0.1:9", 0.0, 0, None),
+    ]));
+    mark_ready(&state, "node-a", &["qwen3-embedding:8b", "llama3.2:3b"]);
+    mark_ready(&state, "node-b", &["qwen3-embedding:0.6b", "llama3.2:3b"]);
+    let (ms, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ms, StatusCode::OK);
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("ollama_router_aggregated_models"), "{text}");
+    assert!(text.contains("ollama_router_node_models"), "{text}");
+    assert!(text.contains("ollama_router_aggregated_models 3"), "{text}");
+    let (status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("ollama_router_discovery_total") && text.contains("openai_models"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
 async fn no_healthy_returns_503_retry_after() {
     let state = state_from(fleet_config(vec![node(
         "gpu",

@@ -4,7 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
-use crate::capacity::{merge_capacity, CapacityInventory, CapacityReport, CapacitySource};
+use crate::capacity::{
+    merge_capacity, CapacityInventory, CapacityReport, CapacitySource, GpuBackend, GpuDetail,
+};
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
 
@@ -112,6 +114,18 @@ pub struct NodeSnapshot {
     pub ram_available_gb: Option<f64>,
     pub ram_available_ratio: Option<f64>,
     pub vram_free_gb: Option<f64>,
+    pub vram_free_known: bool,
+    pub vram_used_gb: Option<f64>,
+    pub vram_used_known: bool,
+    pub gpu_util_pct: Option<f64>,
+    pub gpu_util_known: bool,
+    pub gpu_backend: GpuBackend,
+    pub cpu_usage_pct: Option<f64>,
+    pub ollama_running: Option<bool>,
+    pub loaded_model_count: Option<u32>,
+    pub disk_total_gb: Option<f64>,
+    pub disk_available_gb: Option<f64>,
+    pub gpus_detail: Vec<GpuSnapshot>,
     pub pressure_level: PressureLevel,
     pub fail_streak: u32,
     pub draining: bool,
@@ -180,6 +194,42 @@ impl NodeSnapshot {
     pub fn is_saturated(&self, default_max_inflight: Option<u32>) -> bool {
         self.inflight >= self.max_inflight_effective(default_max_inflight)
     }
+
+    /// Loaded-model count for metrics (agent count, else `/api/ps` set length).
+    pub fn loaded_model_gauge(&self) -> u32 {
+        self.loaded_model_count
+            .unwrap_or(self.loaded_models.len() as u32)
+    }
+}
+
+/// Bounded per-GPU row for Prometheus `{node,gpu}` series. No marketing names.
+#[derive(Clone, Debug, Default)]
+pub struct GpuSnapshot {
+    pub index: i32,
+    pub vram_total_gb: f64,
+    pub vram_used_gb: f64,
+    pub vram_free_gb: f64,
+    pub vram_free_known: bool,
+    pub vram_used_known: bool,
+    pub utilization_gpu_pct: Option<f64>,
+    pub temperature_c: Option<f64>,
+}
+
+const MAX_GPU_METRIC_ROWS: usize = 8;
+
+impl GpuSnapshot {
+    fn from_detail(detail: &GpuDetail) -> Self {
+        Self {
+            index: detail.index,
+            vram_total_gb: detail.vram_total_gb,
+            vram_used_gb: detail.vram_used_gb,
+            vram_free_gb: detail.vram_free_gb,
+            vram_free_known: detail.vram_free_is_known(),
+            vram_used_known: detail.vram_used_is_known(),
+            utilization_gpu_pct: detail.utilization_gpu_pct,
+            temperature_c: detail.temperature_c,
+        }
+    }
 }
 
 struct NodeState {
@@ -201,6 +251,18 @@ struct NodeState {
     ram_available_gb: Option<f64>,
     ram_available_ratio: Option<f64>,
     vram_free_gb: Option<f64>,
+    vram_free_known: bool,
+    vram_used_gb: Option<f64>,
+    vram_used_known: bool,
+    gpu_util_pct: Option<f64>,
+    gpu_util_known: bool,
+    gpu_backend: GpuBackend,
+    cpu_usage_pct: Option<f64>,
+    ollama_running: Option<bool>,
+    loaded_model_count: Option<u32>,
+    disk_total_gb: Option<f64>,
+    disk_available_gb: Option<f64>,
+    gpus_detail: Vec<GpuSnapshot>,
     pressure_level: PressureLevel,
     capacity_effective: Capacity,
     capacity_discovered: Option<Capacity>,
@@ -235,6 +297,18 @@ impl NodeState {
             ram_available_gb: None,
             ram_available_ratio: None,
             vram_free_gb: None,
+            vram_free_known: false,
+            vram_used_gb: None,
+            vram_used_known: false,
+            gpu_util_pct: None,
+            gpu_util_known: false,
+            gpu_backend: GpuBackend::Unknown,
+            cpu_usage_pct: None,
+            ollama_running: None,
+            loaded_model_count: None,
+            disk_total_gb: None,
+            disk_available_gb: None,
+            gpus_detail: Vec::new(),
             pressure_level: PressureLevel::Unknown,
             capacity_effective: merged.capacity,
             capacity_discovered: None,
@@ -277,6 +351,18 @@ impl NodeState {
             ram_available_gb: self.ram_available_gb,
             ram_available_ratio: self.ram_available_ratio,
             vram_free_gb: self.vram_free_gb,
+            vram_free_known: self.vram_free_known,
+            vram_used_gb: self.vram_used_gb,
+            vram_used_known: self.vram_used_known,
+            gpu_util_pct: self.gpu_util_pct,
+            gpu_util_known: self.gpu_util_known,
+            gpu_backend: self.gpu_backend,
+            cpu_usage_pct: self.cpu_usage_pct,
+            ollama_running: self.ollama_running,
+            loaded_model_count: self.loaded_model_count,
+            disk_total_gb: self.disk_total_gb,
+            disk_available_gb: self.disk_available_gb,
+            gpus_detail: self.gpus_detail.clone(),
             pressure_level: self.pressure_level,
             fail_streak: self.fail_streak,
             draining: self.draining,
@@ -727,6 +813,38 @@ impl Registry {
         };
         node.capacity_discovered = Some(report.as_capacity());
         node.vram_free_gb = Some(report.vram_free_gb);
+        node.vram_free_known = report.vram_free_is_known();
+        node.vram_used_gb = Some(report.vram_used_gb);
+        node.vram_used_known = report.vram_used_is_known();
+        node.gpu_backend = report.gpu_backend.unwrap_or_default();
+        let utils: Vec<f64> = report
+            .gpus_detail
+            .iter()
+            .filter_map(|gpu| gpu.utilization_gpu_pct)
+            .collect();
+        if utils.is_empty() {
+            node.gpu_util_pct = None;
+            node.gpu_util_known = false;
+        } else {
+            node.gpu_util_pct = Some(utils.iter().sum::<f64>() / utils.len() as f64);
+            node.gpu_util_known = true;
+        }
+        node.cpu_usage_pct = report.cpu_usage_pct.or_else(|| {
+            report
+                .pressure
+                .as_ref()
+                .and_then(|pressure| pressure.cpu_usage_pct)
+        });
+        node.ollama_running = report.ollama_running;
+        node.loaded_model_count = report.loaded_model_count.map(|n| n.max(0) as u32);
+        node.disk_total_gb = report.disk_total_gb;
+        node.disk_available_gb = report.disk_available_gb;
+        node.gpus_detail = report
+            .gpus_detail
+            .iter()
+            .take(MAX_GPU_METRIC_ROWS)
+            .map(GpuSnapshot::from_detail)
+            .collect();
         if let Some(pressure) = report.pressure.as_ref() {
             node.ram_available_gb = pressure.ram_available_gb;
             node.ram_available_ratio = pressure.ram_available_ratio;
@@ -1149,5 +1267,80 @@ mod tests {
         registry.upsert_verda(node("spot", 24.0, 1));
         registry.remove_verda(&nid("spot"));
         assert!(registry.get(&nid("spot")).is_none());
+    }
+
+    #[test]
+    fn apply_capacity_report_stores_util_and_known_flags() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        let mut report = CapacityReport {
+            vram_gb: 8.0,
+            gpus: 1,
+            ram_gb: 32.0,
+            vram_used_gb: 8.0,
+            vram_free_gb: 0.0,
+            vram_free_known: Some(true),
+            vram_used_known: Some(true),
+            gpu_backend: Some(GpuBackend::Cuda),
+            cpu_usage_pct: Some(12.0),
+            ollama_running: Some(true),
+            loaded_model_count: Some(2),
+            ..CapacityReport::default()
+        };
+        report.gpus_detail.push(GpuDetail {
+            index: 0,
+            vram_total_gb: 8.0,
+            vram_used_gb: 8.0,
+            vram_free_gb: 0.0,
+            utilization_gpu_pct: Some(91.0),
+            vram_free_known: Some(true),
+            vram_used_known: Some(true),
+            util_known: Some(true),
+            ..GpuDetail::default()
+        });
+        report.pressure = Some(crate::capacity::Pressure {
+            ram_available_gb: Some(24.0),
+            ram_available_ratio: Some(0.75),
+            ..Default::default()
+        });
+        registry.apply_capacity_report(&id, &report, Some(PressureLevel::Ok));
+        let snap = registry.get(&id).unwrap();
+        assert!(snap.vram_free_known);
+        assert!((snap.vram_free_gb.unwrap() - 0.0).abs() < 1e-12);
+        assert!(snap.gpu_util_known);
+        assert!((snap.gpu_util_pct.unwrap() - 91.0).abs() < 1e-9);
+        assert_eq!(snap.gpu_backend, GpuBackend::Cuda);
+        assert_eq!(snap.cpu_usage_pct, Some(12.0));
+        assert_eq!(snap.loaded_model_gauge(), 2);
+        assert_eq!(snap.ram_available_gb, Some(24.0));
+        assert_eq!(snap.gpus_detail.len(), 1);
+    }
+
+    #[test]
+    fn apply_capacity_report_unknown_free_when_cpu_inventory() {
+        let config = RouterConfig {
+            nodes: vec![node("cpu", 0.0, 0)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("cpu");
+        let report = CapacityReport {
+            vram_gb: 0.0,
+            gpus: 0,
+            ram_gb: 16.0,
+            vram_free_gb: 0.0,
+            vram_free_known: Some(false),
+            gpu_backend: Some(GpuBackend::Cpu),
+            ..CapacityReport::default()
+        };
+        registry.apply_capacity_report(&id, &report, None);
+        let snap = registry.get(&id).unwrap();
+        assert!(!snap.vram_free_known);
+        assert!(!snap.gpu_util_known);
+        assert_eq!(snap.gpu_backend, GpuBackend::Cpu);
     }
 }

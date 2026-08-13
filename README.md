@@ -39,7 +39,7 @@
 
 Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-balances generate, chat, and embed across a mixed CPU+GPU fleet you already run (the router process itself needs **no GPU**), then optionally bursts onto Verda NVIDIA **spot** GPUs on Tailscale.
 
-- **Ollama surface** — `POST /api/generate`, `/api/chat`, `/api/embed` (plus `/api/embeddings` rewritten to `/api/embed` for Ollama ≤0.32). Aggregated `GET /api/tags`. NDJSON streaming.
+- **Ollama surface** — `POST /api/generate`, `/api/chat`, `/api/embed` (plus `/api/embeddings` rewritten to `/api/embed` for Ollama ≤0.32). Aggregated `GET /api/tags` and OpenAI-compatible `GET /v1/models`. NDJSON streaming.
 - **Utilization WLC** — rank by `inflight / capacity`, then RAM pressure, then class preference (embed / small / medium / large). Saturated nodes are never a fallback.
 - **fleet.yaml inventory** — `OLLAMA_ROUTER_FLEET` + durable FleetState + Verda. Tunables YAML is tunables only.
 - **Verda spots** — cheapest, then smallest GPU inside an inclusive 8–80 GiB VRAM window. Public `:11434` is never healthy.
@@ -127,9 +127,10 @@ curl -fsS http://127.0.0.1:11435/api/embed \
 
 task obs:open
 # http://127.0.0.1:3000/d/ollama-router/ollama-router
+# http://127.0.0.1:3000/d/ollama-router-nodes/ollama-router-nodes
 ```
 
-Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
+Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Prometheus scrapes the router and mock `:11436` (`ollama_up`, `ollama_models`; counts only, no model names). Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
 
 ## Develop
 

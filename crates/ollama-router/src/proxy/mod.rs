@@ -51,9 +51,13 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(str::to_string);
+    let clean = path.trim_end_matches('/');
 
-    if path.trim_end_matches('/') == "/api/tags" && method == Method::GET {
+    if clean == "/api/tags" && method == Method::GET {
         return aggregated_tags(state);
+    }
+    if clean == "/v1/models" && method == Method::GET {
+        return aggregated_openai_models(state);
     }
 
     let (parts, incoming_body) = req.into_parts();
@@ -96,7 +100,6 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
         }
     }
 
-    let clean = path.trim_end_matches('/');
     if clean == "/api/pull" && method == Method::POST {
         return fleet_pull(state, model.as_deref()).await;
     }
@@ -727,6 +730,36 @@ fn aggregated_tags(state: &AppState) -> Response {
             HeaderValue::from_static("true"),
         );
     }
+    state.metrics.observe_discovery("tags");
+    res
+}
+
+fn aggregated_openai_models(state: &AppState) -> Response {
+    let data: Vec<Value> = state
+        .registry
+        .aggregated_tags()
+        .into_iter()
+        .map(|(name, _nodes)| {
+            json!({
+                "id": name,
+                "object": "model",
+                "created": 0,
+                "owned_by": "library",
+            })
+        })
+        .collect();
+    let mut res = json_error(
+        StatusCode::OK,
+        json!({ "object": "list", "data": data }),
+        None,
+    );
+    if state.config.debug_headers {
+        res.headers_mut().insert(
+            HeaderName::from_static("x-ollama-router-aggregated"),
+            HeaderValue::from_static("true"),
+        );
+    }
+    state.metrics.observe_discovery("openai_models");
     res
 }
 

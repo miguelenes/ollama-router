@@ -1,6 +1,7 @@
 //! Axum 0.8 app: `/healthz`, `/v1/capacity`, `/v1/pressure`, `/v1/status`, `/metrics`.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
@@ -9,6 +10,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use ollama_capacity_types::{CapacityReport, PressureEnvelope};
 use serde::Serialize;
+use sysinfo::System;
 use tokio::sync::RwLock;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
@@ -17,12 +19,21 @@ use crate::collect::StatusPayload;
 use crate::config::AgentConfig;
 use crate::metrics::{AgentMetrics, METRICS_CONTENT_TYPE};
 
+const COLLECT_TTL: Duration = Duration::from_secs(2);
+
+#[derive(Clone)]
+pub struct CachedSnapshot {
+    pub snap: crate::collect::Snapshot,
+    pub at: Instant,
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<AgentConfig>,
     pub ollama_listen: String,
     pub metrics: Arc<AgentMetrics>,
-    pub last: Arc<RwLock<Option<crate::collect::Snapshot>>>,
+    pub last: Arc<RwLock<Option<CachedSnapshot>>>,
+    pub cpu_usage_pct: Arc<std::sync::RwLock<Option<f64>>>,
 }
 
 fn require_token(expected: Option<&str>, headers: &HeaderMap) -> bool {
@@ -53,10 +64,27 @@ async fn healthz() -> Json<HealthResponse> {
 }
 
 async fn snapshot(state: &AppState) -> crate::collect::Snapshot {
-    let snap = crate::collect::collect_live(&state.config, &state.ollama_listen).await;
-    state.metrics.observe(&snap);
+    {
+        let guard = state.last.read().await;
+        if let Some(cached) = guard.as_ref() {
+            if cached.at.elapsed() < COLLECT_TTL {
+                return cached.snap.clone();
+            }
+        }
+    }
     let mut guard = state.last.write().await;
-    *guard = Some(snap.clone());
+    if let Some(cached) = guard.as_ref() {
+        if cached.at.elapsed() < COLLECT_TTL {
+            return cached.snap.clone();
+        }
+    }
+    let cpu = state.cpu_usage_pct.read().ok().and_then(|slot| *slot);
+    let snap = crate::collect::collect_live(&state.config, &state.ollama_listen, cpu).await;
+    state.metrics.observe(&snap);
+    *guard = Some(CachedSnapshot {
+        snap: snap.clone(),
+        at: Instant::now(),
+    });
     snap
 }
 
@@ -111,6 +139,21 @@ pub fn make_app(state: AppState) -> Router {
         .with_state(state)
 }
 
+fn spawn_cpu_sampler(slot: Arc<std::sync::RwLock<Option<f64>>>) {
+    tokio::spawn(async move {
+        let mut sys = System::new();
+        sys.refresh_cpu_all();
+        loop {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            sys.refresh_cpu_all();
+            let pct = f64::from(sys.global_cpu_usage());
+            if let Ok(mut guard) = slot.write() {
+                *guard = Some(pct);
+            }
+        }
+    });
+}
+
 pub async fn serve(
     config: AgentConfig,
     bind: std::net::SocketAddr,
@@ -122,11 +165,14 @@ pub async fn serve(
         anyhow::bail!("listen all requires a bearer token");
     }
     let metrics = Arc::new(AgentMetrics::new()?);
+    let cpu_usage_pct = Arc::new(std::sync::RwLock::new(None));
+    spawn_cpu_sampler(Arc::clone(&cpu_usage_pct));
     let state = AppState {
         config: Arc::new(config.clone()),
         ollama_listen,
         metrics,
         last: Arc::new(RwLock::new(None)),
+        cpu_usage_pct,
     };
     let app = make_app(state.clone());
     crate::register::spawn_if_configured(state);

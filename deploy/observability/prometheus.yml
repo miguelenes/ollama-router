@@ -23,3 +23,13 @@ scrape_configs:
   - job_name: alloy
     static_configs:
       - targets: ["alloy:12345"]
+
+  - job_name: ollama-node-agent
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["mock-cpu:11436"]
+        labels:
+          node: cpu
+      - targets: ["mock-gpu:11436"]
+        labels:
+          node: gpu

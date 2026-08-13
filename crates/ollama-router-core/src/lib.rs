@@ -23,8 +23,8 @@ pub use config::{
 };
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, url_host_is_public_ipv4, FleetState, FleetStateError,
-    NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId, VerdaInstanceId,
-    VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    GpuSnapshot, NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId,
+    VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use jobs::{
     Job, JobId, JobKind, JobObserver, JobOutcome, JobStatus, JobStore, JobTarget,

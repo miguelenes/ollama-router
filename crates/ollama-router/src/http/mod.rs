@@ -1,4 +1,4 @@
-//! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags, proxy fallback.
+//! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags and `/v1/models`, proxy fallback.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -189,6 +189,7 @@ pub fn make_app(state: AppState) -> Router {
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
         .route("/api/tags", get(proxy_route))
+        .route("/v1/models", get(proxy_route))
         .route("/api/pull", post(proxy_route))
         .route("/api/delete", delete(proxy_route))
         .route(
