@@ -71,7 +71,11 @@ jobs:
           cache-from: type=gha,scope=ollama-router
           cache-to: type=gha,mode=max,scope=ollama-router
 
+      # Artifact attestations are unavailable on user-owned private repos.
+      # Re-enable automatically when the repository is public.
+      # https://docs.github.com/rest/repos/attestations#create-an-attestation
       - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
         uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
