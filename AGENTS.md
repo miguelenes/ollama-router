@@ -25,9 +25,11 @@ services, Thunder, or RunPod.
   destroy fleet.yaml hosts.** Destroy Verda instances with `delete_permanently`.
 - **One router replica.** Two processes sharing one FleetState file can double-create
   Verda spots. The file lock is same-host only. Do not add Redis or run HA replicas.
-- **Capacity agent is a sibling, not this crate.** Probe
-  `GET http://{ollama-host}:11436/v1/capacity` and `/v1/pressure`. Soft-fail.
-  GiB = bytes / `1024³`. Do not reimplement the agent here.
+- **Node agent on every Ollama host.** `crates/ollama-node-agent` (`setup` elevated,
+  `serve` unprivileged on `:11436`). Probe `GET /v1/capacity` and `/v1/pressure`
+  (plus `/v1/status`, `/metrics`). Soft-fail. GiB = bytes / `1024³`. Shared DTOs
+  in `crates/ollama-capacity-types`. The router does not install or supervise
+  Ollama.
 - **Sensitivity.** Never log bodies, prompts, embeddings, Tailscale keys, Verda
   tokens/secrets, SSH keys, or the admin bearer.
 
@@ -36,8 +38,9 @@ services, Thunder, or RunPod.
 Python tree (behavior only):
 `/home/menes/Projects/illumination/services/ollama-router/`
 
-Capacity-agent wire contract (Axum 0.8, edition 2021, tracing JSON):
-`/home/menes/Projects/illumination/services/ollama-capacity-agent/`
+Node agent (this repo): `crates/ollama-node-agent` (Axum 0.8, edition 2021,
+tracing JSON). Historical Illumination `ollama-capacity-agent` is behavior
+reference only — do not port it blindly.
 
 Deep design: `.opencode/wiki/concepts/` (this repo). Product and imported
 skills: `.cursor/skills/` and `.opencode/skills/` (canonical CLI store:
@@ -61,6 +64,8 @@ Axum 0.7 GraphQL/WS guides.
 | `crates/ollama-mock/` | Compose CPU/GPU Ollama mock (no inference) |
 | `crates/ollama-router-core/src/cloud/` | Idle reconcile (Verda-only manager) |
 | `crates/ollama-router-core/src/capacity/` | HTTP client to `:11436` |
+| `crates/ollama-capacity-types/` | Shared `CapacityReport` / pressure JSON |
+| `crates/ollama-node-agent/` | Node setup + `serve` on `:11436` |
 | `crates/ollama-router-core/src/jobs/` | SQLite durable pull/delete |
 | `crates/ollama-router/src/provision/` | russh + Tailscale handoff (no OpenSSH binary) |
 
@@ -84,9 +89,14 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
 task docker         # docker build -t ollama-router:local .
 task compose:up     # mock CPU+GPU fleet on host :11435
+task agent:doctor   # read-only node-agent report for this machine
 ```
 
 Before finishing a coding task, run `task check` and do not stop while it fails.
+
+SSH provision of fleet hosts should eventually upload `ollama-node-agent` and run
+`setup` rather than embedding Ubuntu Ollama logic in bash. The russh provisioner
+still uses `provision-ollama-gpu.sh` until that handoff lands.
 
 CI runs the same cargo commands directly (no `task` binary on GitHub):
 
@@ -103,14 +113,21 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 
 - Keep Context7 and docsrs-mcp as global Cursor/OpenCode MCP servers; leave project `.cursor/mcp.json` `mcpServers` empty and never commit API keys there.
 - Pin GitHub Actions to version tags (`actions/checkout@v7`, `Swatinem/rust-cache@v2`, `github/codeql-action@v4`), never commit SHAs.
+- Prefer Grafana Alloy over a pile of promtails for local compose log shipping; do not add Elasticsearch, Jaeger, or Zipkin unless OTLP/Tempo is explicitly required.
+- Treat `fleet.yaml` as GitOps source of truth for permanent hosts; admin `PUT /router/v1/nodes` is debug/adopt only and must not write `fleet.yaml`.
 
 ## Learned Workspace Facts
 
 - cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
 - russh must be **>=0.60.3** (we pin **0.62**): 0.54.5 fails deny on RUSTSEC-2026-0154/0153. `RUSTSEC-2023-0071` (rsa Marvin) has no patch — ignored in `deny.toml` because rsa is only pulled via russh.
-- GitHub artifact attestations fail on user-owned private repos; gate `actions/attest-build-provenance` with `if: ${{ !github.event.repository.private }}` until the repo is public.
-- Trust the capacity-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs (`ram_elevated_*`, `ram_swap_*`, `ram_load_*`). Keep VRAM/RAM headroom and the reservation ledger.
-- Capacity-agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml), not Verda or agent payloads.
+- On this private repo without GitHub code scanning enabled, gate artifact attestations with `if: ${{ !github.event.repository.private }}` and gate CodeQL SARIF/`upload-database` (e.g. `CODEQL_SHOULD_UPLOAD`) so analysis can still run as workflow artifacts.
+- Trust the node-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs into the router. Classification lives in `ollama-node-agent`. Keep VRAM/RAM headroom and the reservation ledger.
+- Agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml + agent config), not Verda or capacity payloads.
+- SSH private keys come from `ssh.key_file` / Compose secrets / Verda `ssh_private_key_file` only — never add an SSH key env var.
+- Verda `ensure` is adopt-first; demand scale coalesces `create_additional` only (never `ensure`). Tag instances `managed_by=ollama-router` and reject `illumination-*`; FleetState ownership is `managed_by=verda`.
+- Hot Prometheus metrics use the `prometheus` crate in the binary only and must not label by model name; `/metrics` and `/healthz` stay unauthenticated.
+- Model jobs: no `auto_pull_on_miss` and no `unsafe_single_node_mutate`; SQLite stores operation metadata only (no bodies or provider error text).
+- Local compose publishes the router on host `:11435`; document Grafana `:3000` and Prometheus `:9090`.
 
 <!-- BEGIN opencode-rag -->
 ## Code Navigation

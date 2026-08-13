@@ -13,6 +13,7 @@ workspace = true
 bytes.workspace = true
 fs4.workspace = true
 futures-util.workspace = true
+ollama-capacity-types = { path = "../ollama-capacity-types" }
 reqwest.workspace = true
 rusqlite.workspace = true
 serde.workspace = true

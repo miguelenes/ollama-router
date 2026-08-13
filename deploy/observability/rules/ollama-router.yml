@@ -1,0 +1,42 @@
+groups:
+  - name: ollama-router
+    rules:
+      - alert: NoHealthyNodes
+        expr: up{job="ollama-router"} == 1 and on() (sum(ollama_router_node_healthy) == 0)
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: Router is up but no fleet nodes are healthy
+
+      - alert: HighSaturation
+        expr: sum(rate(ollama_router_route_reason_total{reason="all_nodes_saturated"}[5m])) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: High rate of all_nodes_saturated routing rejections
+
+      - alert: ProbeStorm
+        expr: sum(rate(ollama_router_probe_duration_seconds_count[1m])) > 2
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Health probe rate exceeds two probes per second
+
+      - alert: JobFailures
+        expr: sum(rate(ollama_router_job_operations_total{status="failed"}[5m])) > 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: Model-operation jobs are failing
+
+      - alert: VerdaEnsureFailed
+        expr: increase(ollama_router_verda_events_total{event="ensure_failed"}[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: Verda ensure or create_additional failed

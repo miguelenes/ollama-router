@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
-use ollama_router::cli::{Cli, Commands};
+use ollama_router::cli::{inventory_lines, Cli, Commands};
 use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{build_upstream_client, make_app, AppState};
 use ollama_router::provision::{ProvisionOrchestrator, ProvisionWatcher};
@@ -17,11 +17,6 @@ use ollama_router_core::load_config;
 use ollama_router_core::provision::{NodeProvisioner, ProvisionOpts, ProvisionStatus};
 use ollama_router_core::routing::TargetSpec;
 use ollama_router_verda::{VerdaClient, VerdaManager};
-
-fn not_implemented(command: &str) -> ! {
-    eprintln!("error: {command} is not implemented yet");
-    std::process::exit(2);
-}
 
 fn init_tracing() {
     tracing_subscriber::fmt()
@@ -39,9 +34,6 @@ fn print_job(job: &Job) {
         "{}",
         serde_json::json!({"job_id": job.id, "status": job.status.as_str()})
     );
-    for (key, target) in &job.targets {
-        println!("  {key}: {}", target.status.as_str());
-    }
 }
 
 fn spec_from_flags(all_nodes: bool, nodes: Option<&str>) -> anyhow::Result<TargetSpec> {
@@ -216,6 +208,7 @@ fn wire_verda(state: &mut AppState) -> anyhow::Result<()> {
         state.fleet_state.clone(),
         provisioner,
     );
+    mgr.set_events(state.metrics.clone());
     state.demand = Arc::new(mgr.clone()) as Arc<dyn DemandScale>;
     state.verda = Some(mgr);
     Ok(())
@@ -295,6 +288,37 @@ async fn run_provision(
     Ok(())
 }
 
+fn run_nodes(config: Option<PathBuf>) -> anyhow::Result<()> {
+    let loaded = load_config(config.as_deref()).context("load config")?;
+    for line in inventory_lines(&loaded)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+async fn run_reload(config: Option<PathBuf>, host: String, port: u16) -> anyhow::Result<()> {
+    let _ = config;
+    let token = std::env::var("OLLAMA_ROUTER_ADMIN_TOKEN")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("set OLLAMA_ROUTER_ADMIN_TOKEN"))?;
+    let url = format!("http://{host}:{port}/router/v1/reload");
+    let client = reqwest::Client::builder().use_rustls_tls().build()?;
+    let resp = client
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .with_context(|| format!("POST {url}"))?;
+    let status = resp.status();
+    if !status.is_success() {
+        anyhow::bail!("reload failed: HTTP {status}");
+    }
+    println!("{}", serde_json::json!({"ok": true}));
+    Ok(())
+}
+
 fn spawn_sighup_reloader(state: AppState) {
     #[cfg(unix)]
     tokio::spawn(async move {
@@ -335,7 +359,8 @@ async fn main() -> anyhow::Result<()> {
             nodes,
             wait,
         } => run_delete(config, models, all_nodes, nodes, wait).await,
-        Commands::Nodes { .. } => not_implemented("nodes"),
+        Commands::Nodes { config } => run_nodes(config),
+        Commands::Reload { config, host, port } => run_reload(config, host, port).await,
         Commands::Provision {
             config,
             node,

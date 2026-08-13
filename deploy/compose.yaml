@@ -1,5 +1,6 @@
-# Mixed CPU + GPU Ollama mock fleet. Host port 11435 avoids colliding with
-# a local Ollama on :11434. The router process needs no GPU.
+# Mixed CPU + GPU Ollama mock fleet plus local observability.
+# Host ports bind loopback only. 11435 avoids colliding with a local Ollama on :11434.
+# The router process needs no GPU. Observability is on by default (no compose profile).
 services:
   mock-cpu:
     build:
@@ -22,12 +23,13 @@ services:
       CAPACITY_PORT: "11436"
 
   router:
+    image: ollama-router:local
     build:
       context: ..
       dockerfile: Dockerfile
       target: router
     ports:
-      - "11435:11434"
+      - "127.0.0.1:11435:11434"
     volumes:
       - ./fleet.yaml:/etc/ollama-router/fleet.yaml:ro
     environment:
@@ -38,3 +40,81 @@ services:
     depends_on:
       - mock-cpu
       - mock-gpu
+
+  prometheus:
+    image: prom/prometheus:v3.2.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=6h
+      - --web.enable-lifecycle
+    ports:
+      - "127.0.0.1:9090:9090"
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/rules:/etc/prometheus/rules:ro
+    tmpfs:
+      - /prometheus
+    user: "0"
+    depends_on:
+      - router
+      - alloy
+      - alertmanager
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./observability/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    tmpfs:
+      - /alertmanager
+    user: "0"
+
+  loki:
+    image: grafana/loki:3.4.2
+    command:
+      - -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./observability/loki.yml:/etc/loki/loki.yml:ro
+    tmpfs:
+      - /loki
+    user: "0"
+
+  alloy:
+    image: grafana/alloy:v1.9.2
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --stability.level=generally-available
+      - --storage.path=/tmp/alloy
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./observability/config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:11.6.3
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ollama-router.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  grafana-data:

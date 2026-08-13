@@ -1,0 +1,72 @@
+// Collect router container stdout (tracing JSON) and ship to Loki.
+// Keep only the compose `router` service. Drop lines that still carry
+// sensitive JSON keys (prompt, messages, body, embeddings, tokens).
+
+discovery.docker "containers" {
+  host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "router" {
+  targets = discovery.docker.containers.targets
+
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    regex         = "router"
+    action        = "keep"
+  }
+
+  rule {
+    target_label = "container"
+    replacement  = "router"
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "ollama-router"
+  }
+}
+
+loki.source.docker "router" {
+  host          = "unix:///var/run/docker.sock"
+  targets       = discovery.relabel.router.output
+  labels        = {
+    job       = "ollama-router",
+    container = "router",
+  }
+  relabel_rules = discovery.relabel.router.rules
+  forward_to    = [loki.process.router.receiver]
+}
+
+loki.process "router" {
+  stage.json {
+    expressions = {
+      timestamp     = "timestamp",
+      level         = "level",
+      node          = "node",
+      reason        = "reason",
+      request_id    = "request_id",
+      path          = "path",
+      request_class = "request_class",
+    }
+  }
+
+  // Drop the whole line if a sensitive *key* is present (not path substrings).
+  stage.drop {
+    expression          = "(?i)\"(prompt|messages|body|embedding|authorization|token|secret)\"\\s*:"
+    drop_counter_reason = "sensitive_keys"
+  }
+
+  stage.labels {
+    values = {
+      level = "",
+    }
+  }
+
+  forward_to = [loki.write.loki.receiver]
+}
+
+loki.write "loki" {
+  endpoint {
+    url = "http://loki:3100/loki/api/v1/push"
+  }
+}

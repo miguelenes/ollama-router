@@ -1,4 +1,4 @@
-//! Axum app: `/healthz`, `/readyz`, `/metrics` stub, aggregated tags, proxy fallback.
+//! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags, proxy fallback.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -18,11 +18,19 @@ use ollama_router_verda::VerdaManager;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
+use tower_http::request_id::{
+    MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
+};
+use tower_http::trace::{MakeSpan, TraceLayer};
+use tracing::Span;
 
 use crate::provision::ProvisionOrchestrator;
 use crate::proxy;
 
 mod admin;
+pub mod metrics;
+
+pub use metrics::Metrics;
 
 /// Shared proxy / admin state.
 #[derive(Clone)]
@@ -39,6 +47,7 @@ pub struct AppState {
     pub fleet_state: Arc<FleetState>,
     pub provisioner: Option<Arc<ProvisionOrchestrator>>,
     pub verda: Option<VerdaManager>,
+    pub metrics: Arc<Metrics>,
 }
 
 impl AppState {
@@ -48,11 +57,13 @@ impl AppState {
         let pool = Arc::new(Semaphore::new(config.upstream.max_connections as usize));
         let config = Arc::new(config);
         let registry = Arc::new(Registry::new(&config));
+        let metrics = Arc::new(Metrics::new()?);
         let orchestrator = Arc::new(PullOrchestrator::new(
             config.clone(),
             client.clone(),
             Some(registry.clone()),
         )?);
+        orchestrator.set_observer(metrics.clone());
         let admin_token = std::env::var("OLLAMA_ROUTER_ADMIN_TOKEN")
             .ok()
             .map(|s| s.trim().to_string())
@@ -76,6 +87,7 @@ impl AppState {
             fleet_state,
             provisioner,
             verda: None,
+            metrics,
         })
     }
 }
@@ -143,11 +155,21 @@ async fn readyz(State(state): State<AppState>) -> Response {
     )
 }
 
-async fn metrics() -> impl IntoResponse {
-    (
-        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-        "# ollama-router metrics (not yet implemented)\n",
-    )
+async fn metrics(State(state): State<AppState>) -> Response {
+    state
+        .metrics
+        .refresh_gauges(&state.registry, &state.fleet_state);
+    match state.metrics.encode_text() {
+        Ok(body) => (
+            [(header::CONTENT_TYPE, metrics::METRICS_CONTENT_TYPE)],
+            body,
+        )
+            .into_response(),
+        Err(error) => {
+            tracing::error!(%error, "metrics encode failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 async fn proxy_route(State(state): State<AppState>, req: Request<axum::body::Body>) -> Response {
@@ -160,7 +182,7 @@ pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Respon
     res
 }
 
-/// Build the router. `/healthz` is unauthenticated; proxy is the fallback.
+/// Build the router. `/healthz` and `/metrics` are unauthenticated; proxy is the fallback.
 pub fn make_app(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
@@ -169,13 +191,43 @@ pub fn make_app(state: AppState) -> Router {
         .route("/api/tags", get(proxy_route))
         .route("/api/pull", post(proxy_route))
         .route("/api/delete", delete(proxy_route))
+        .route(
+            "/router/v1/nodes",
+            get(admin::list_nodes).put(admin::put_node),
+        )
+        .route("/router/v1/models", get(admin::list_models))
         .route("/router/v1/models/ensure", post(admin::ensure_models))
         .route("/router/v1/models/delete", post(admin::delete_models))
+        .route("/router/v1/jobs", get(admin::list_jobs))
         .route("/router/v1/jobs/{id}", get(admin::get_job))
+        .route("/router/v1/stats", get(admin::stats))
+        .route("/router/v1/reload", post(admin::reload))
         .route("/router/v1/nodes/provision", post(admin::provision_nodes))
         .route("/router/v1/verda/status", get(admin::verda_status))
         .route("/router/v1/verda/ensure", post(admin::verda_ensure))
         .route("/router/v1/verda/destroy", post(admin::verda_destroy))
         .fallback(proxy_route)
         .with_state(state)
+        .layer(TraceLayer::new_for_http().make_span_with(RequestIdMakeSpan))
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+}
+
+#[derive(Clone, Copy, Debug)]
+struct RequestIdMakeSpan;
+
+impl<B> MakeSpan<B> for RequestIdMakeSpan {
+    fn make_span(&mut self, request: &Request<B>) -> Span {
+        let request_id = request
+            .extensions()
+            .get::<RequestId>()
+            .and_then(|id| id.header_value().to_str().ok())
+            .unwrap_or("-");
+        tracing::info_span!(
+            "http",
+            method = %request.method(),
+            uri = %request.uri(),
+            request_id = %request_id,
+        )
+    }
 }

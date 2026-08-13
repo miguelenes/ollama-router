@@ -40,14 +40,19 @@ tasks:
       - docker build -t ollama-router:local .
 
   compose:up:
-    desc: Build and start the mixed CPU/GPU mock fleet (host :11435)
+    desc: Build and start the mock fleet plus Grafana/Prometheus/Loki (loopback :11435 / :3000 / :9090)
     cmds:
       - docker compose -f deploy/compose.yaml up --build -d
 
   compose:down:
-    desc: Stop the compose mock fleet
+    desc: Stop compose (keeps grafana-data; no -v)
     cmds:
-      - docker compose -f deploy/compose.yaml down
+      - docker compose -f deploy/compose.yaml down --remove-orphans
+
+  compose:restart:
+    desc: Restart compose services
+    cmds:
+      - docker compose -f deploy/compose.yaml restart
 
   compose:ps:
     desc: Show compose mock fleet status
@@ -58,3 +63,8 @@ tasks:
     desc: Follow compose mock fleet logs
     cmds:
       - docker compose -f deploy/compose.yaml logs -f
+
+  obs:open:
+    desc: Print the local Grafana Ollama Router dashboard URL
+    cmds:
+      - echo http://127.0.0.1:3000/d/ollama-router/ollama-router

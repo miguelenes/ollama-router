@@ -1,0 +1,16 @@
+[package]
+name = "ollama-capacity-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Shared CapacityReport / pressure JSON types for ollama-node-agent and the router"
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

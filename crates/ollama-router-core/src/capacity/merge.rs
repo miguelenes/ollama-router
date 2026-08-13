@@ -2,14 +2,6 @@
 
 use crate::config::Capacity;
 
-/// Bytes in one gibibyte. sysinfo / Ollama `size` fields are bytes.
-pub const BYTES_PER_GIB: f64 = 1024.0 * 1024.0 * 1024.0;
-
-/// Convert a byte count to GiB (`bytes / 1024³`). Never divide by `1024²`.
-pub fn bytes_to_gib(bytes: u64) -> f64 {
-    bytes as f64 / BYTES_PER_GIB
-}
-
 /// Where effective inventory numbers came from.
 ///
 /// Not Python `"configured"` / `"merged"` / `"ps_lower_bound"`: a `/api/ps`

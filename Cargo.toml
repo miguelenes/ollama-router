@@ -5,6 +5,8 @@ members = [
     "crates/ollama-router-core",
     "crates/ollama-router-verda",
     "crates/ollama-mock",
+    "crates/ollama-capacity-types",
+    "crates/ollama-node-agent",
 ]
 
 [workspace.package]
@@ -27,6 +29,8 @@ tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "request-id"] }
+prometheus = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 url = "2"
@@ -41,6 +45,8 @@ russh = "0.62"
 md-5 = "0.10"
 base64 = "0.22"
 secrecy = "0.10"
+sysinfo = "0.35"
+time = { version = "0.3", default-features = false, features = ["formatting", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

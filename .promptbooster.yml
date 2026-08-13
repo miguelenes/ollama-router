@@ -1,0 +1,118 @@
+# PromptWizard — .promptbooster.yml
+#
+# Controls which files PromptWizard sends as context when refining prompts.
+# Paths are relative to this file (project root).
+#
+# Note: PromptWizard’s built-in scanner only finds JS/TS/Python. For this Rust
+# workspace, always_include + patterns are the main way .rs / wiki files enter
+# the top-10 context budget. Keep lists lean (max ~10 files total per refine).
+
+# Always sent — product invariants + workspace layout (not in PW’s JS defaults).
+always_include:
+  - "AGENTS.md"
+  - "Cargo.toml"
+
+# Keyword → files (case-insensitive regex on the draft prompt).
+patterns:
+  "fleet|registry|inventory|fleet\\.yaml|FleetState|nodes":
+    - "crates/ollama-router-core/src/fleet/registry.rs"
+    - "crates/ollama-router-core/src/fleet/state.rs"
+    - "crates/ollama-router-core/src/fleet/file.rs"
+    - ".opencode/wiki/concepts/ollama-router-product.md"
+
+  "verda|spot|cloud.?gpu|instance.?type|delete_permanently":
+    - "crates/ollama-router-verda/src/manager.rs"
+    - "crates/ollama-router-verda/src/client.rs"
+    - "crates/ollama-router-verda/src/selector.rs"
+    - "crates/ollama-router-core/src/cloud/mod.rs"
+
+  "idle|scale.?down|scale.?up|teardown|DemandScale|last_client_request":
+    - "crates/ollama-router-core/src/cloud/mod.rs"
+    - "crates/ollama-router-verda/src/manager.rs"
+    - ".opencode/wiki/concepts/ollama-router-idle-scale-down.md"
+
+  "capacity|pressure|vram|headroom|11436":
+    - "crates/ollama-router-core/src/capacity/client.rs"
+    - "crates/ollama-router-core/src/capacity/types.rs"
+    - "crates/ollama-router-core/src/capacity/merge.rs"
+    - ".opencode/wiki/concepts/ollama-capacity-discovery.md"
+
+  "rout(e|ing)|wlc|utilization|place|rank|class.?prefer":
+    - "crates/ollama-router-core/src/routing/rank.rs"
+    - "crates/ollama-router-core/src/routing/place.rs"
+    - "crates/ollama-router-core/src/routing/classify.rs"
+    - ".opencode/wiki/concepts/ollama-router-load-share.md"
+
+  "proxy|generate|chat|embed|ndjson|ollama.?compat":
+    - "crates/ollama-router/src/proxy/mod.rs"
+    - "crates/ollama-router/src/proxy/telemetry.rs"
+    - "crates/ollama-router/src/http/mod.rs"
+
+  "admin|bearer|/router/v1|OLLAMA_ROUTER_ADMIN":
+    - "crates/ollama-router/src/http/admin.rs"
+    - "crates/ollama-router/src/http/mod.rs"
+    - "crates/ollama-router/tests/admin.rs"
+
+  "healthz|readyz|health.?check|probe":
+    - "crates/ollama-router/src/health.rs"
+    - "crates/ollama-router/tests/healthz.rs"
+
+  "metrics|prometheus|/metrics":
+    - "crates/ollama-router/src/http/metrics.rs"
+    - "crates/ollama-router/src/proxy/telemetry.rs"
+
+  "job|pull|delete.?model|sqlite|orchestrat":
+    - "crates/ollama-router-core/src/jobs/orchestrator.rs"
+    - "crates/ollama-router-core/src/jobs/store.rs"
+    - "crates/ollama-router-core/src/jobs/mod.rs"
+    - ".opencode/wiki/concepts/ollama-router-durable-model-operations.md"
+
+  "provision|russh|ssh|tailscale|handoff":
+    - "crates/ollama-router/src/provision/orchestrator.rs"
+    - "crates/ollama-router/src/provision/ssh.rs"
+    - "crates/ollama-router/src/provision/watcher.rs"
+    - "crates/ollama-router-core/src/fleet/tailscale.rs"
+
+  "config|tunables|knobs|overlay|nodes:":
+    - "crates/ollama-router-core/src/config/load.rs"
+    - "crates/ollama-router-core/src/config/models.rs"
+    - "crates/ollama-router-core/src/config/knobs.rs"
+    - "config.overlay.example.yaml"
+
+  "cli|clap|subcommand":
+    - "crates/ollama-router/src/cli.rs"
+    - "crates/ollama-router/src/main.rs"
+
+  "docker|compose|deploy|taskfile|ci|github.?actions":
+    - "Dockerfile"
+    - "Taskfile.yml"
+    - "deploy/compose.yaml"
+    - ".github/workflows/ci.yml"
+
+  "mock|ollama-mock":
+    - "crates/ollama-mock/src/main.rs"
+    - "deploy/compose.yaml"
+
+  "warm.?keep|keepalive":
+    - "crates/ollama-router/src/warm.rs"
+
+  "vram.?guard|cloud.?vram":
+    - ".opencode/wiki/concepts/ollama-cloud-vram-guardrails.md"
+    - "crates/ollama-router-core/src/capacity/merge.rs"
+
+# Never send as context (suffix match after stripping **/\* from the glob).
+exclude:
+  - "**/*tests.rs"
+  - "**/tests.rs"
+  - "**/*.lock"
+  - "**/*.bin"
+  - "**/prompt_drafts.md"
+  - "**/.aicode/**"
+  - "**/target/**"
+  - "**/.task/**"
+  - "**/*.map"
+  - "**/.agents/skills/**"
+  - "**/.opencode/skills/**"
+  - "**/*.pem"
+  - "**/*.key"
+  - "**/*.sqlite3"

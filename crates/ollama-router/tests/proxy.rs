@@ -112,6 +112,47 @@ async fn generate_stream_matches_upstream_chunks() {
 }
 
 #[tokio::test]
+async fn metrics_after_generate_includes_requests_total() {
+    let server = MockServer::start();
+    let stream = b"{\"model\":\"x\",\"done\":true}\n";
+    server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/x-ndjson")
+            .body(stream);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "llama3.2:3b", "prompt": "hi"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (ms, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ms, StatusCode::OK);
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("ollama_router_requests_total"), "{text}");
+}
+
+#[tokio::test]
 async fn embeddings_rewrites_to_embed() {
     let server = MockServer::start();
     let mock = server.mock(|when, then| {

@@ -102,12 +102,24 @@ async fn probe_cycle(
     node: &NodeSnapshot,
     do_capacity: bool,
 ) {
+    let start = Instant::now();
+    probe_cycle_inner(state, health, node, do_capacity).await;
+    state.metrics.observe_probe(start.elapsed());
+}
+
+async fn probe_cycle_inner(
+    state: &AppState,
+    health: &HealthConfig,
+    node: &NodeSnapshot,
+    do_capacity: bool,
+) {
     match node.url.as_deref() {
         None => {
             state.registry.mark_unreachable(&node.id, "no_url");
             return;
         }
         Some(url) if url_host_is_public_ipv4(url) => {
+            state.metrics.route_reason("public_url_blocked");
             state
                 .registry
                 .mark_unreachable(&node.id, "public_url_blocked");

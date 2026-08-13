@@ -18,7 +18,7 @@ use crate::routing::{
 
 use super::store::{unix_now, JobStore};
 use super::types::{Job, JobId, JobKind, JobStatus, JobTarget, TargetStatus};
-use super::{JobFuture, JobOutcome, ModelOrchestrator, OrchestratorError};
+use super::{JobFuture, JobObserver, JobOutcome, ModelOrchestrator, OrchestratorError};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct DedupeKey {
@@ -42,6 +42,7 @@ struct Inner {
     registry: Option<Arc<Registry>>,
     store: Option<JobStore>,
     state: Mutex<State>,
+    observer: Mutex<Option<Arc<dyn JobObserver>>>,
 }
 
 impl Drop for Inner {
@@ -108,6 +109,7 @@ impl PullOrchestrator {
                     tasks: HashMap::new(),
                     node_slots: HashMap::new(),
                 }),
+                observer: Mutex::new(None),
             }),
         };
         orch.prune(0);
@@ -131,6 +133,27 @@ impl PullOrchestrator {
     /// Snapshot a job (admin GET).
     pub fn get_job(&self, id: &JobId) -> Option<Job> {
         self.lock().jobs.get(id).cloned()
+    }
+
+    /// In-memory jobs, newest first (admin GET /jobs).
+    pub fn list_jobs(&self) -> Vec<Job> {
+        let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
+        jobs.sort_by(|a, b| {
+            b.created_at
+                .partial_cmp(&a.created_at)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.id.as_uuid().cmp(&a.id.as_uuid()))
+        });
+        jobs
+    }
+
+    /// Attach a terminal-status observer (binary metrics). Replaces any previous hook.
+    pub fn set_observer(&self, observer: Arc<dyn JobObserver>) {
+        *self
+            .inner
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer);
     }
 
     /// Register + spawn a pull. Duplicate in-flight work coalesces.
@@ -530,6 +553,7 @@ impl PullOrchestrator {
                 drop(state);
                 self.persist(&snap);
                 self.notify(&snap);
+                self.observe_terminal(&snap);
             }
         }
 
@@ -908,6 +932,21 @@ impl PullOrchestrator {
         let state = self.lock();
         if let Some(tx) = state.waiters.get(&job.id) {
             let _ = tx.send(job.clone());
+        }
+    }
+
+    fn observe_terminal(&self, job: &Job) {
+        if job.status.is_incomplete() {
+            return;
+        }
+        let observer = self
+            .inner
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer.job_terminal(job.kind, job.status);
         }
     }
 

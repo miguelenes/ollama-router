@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ollama_router_core::cloud::{
-    idle_scale_down_candidates, DemandScale, IdleNodeView, IdlePolicy,
+    idle_scale_down_candidates, DemandScale, FleetEvents, IdleNodeView, IdlePolicy,
 };
 use ollama_router_core::config::{Capacity, NodeConfig, NodeSshConfig, OsEnv, RouterConfig};
 use ollama_router_core::fleet::{
@@ -42,6 +42,7 @@ struct Inner {
     provisioner: Arc<dyn NodeProvisioner>,
     ensure_lock: Mutex<()>,
     demand: std::sync::Mutex<Option<JoinHandle<()>>>,
+    events: std::sync::Mutex<Option<Arc<dyn FleetEvents>>>,
 }
 
 impl VerdaManager {
@@ -61,7 +62,29 @@ impl VerdaManager {
                 provisioner,
                 ensure_lock: Mutex::new(()),
                 demand: std::sync::Mutex::new(None),
+                events: std::sync::Mutex::new(None),
             }),
+        }
+    }
+
+    /// Attach fleet-event metrics (binary). Replaces any previous hook.
+    pub fn set_events(&self, events: Arc<dyn FleetEvents>) {
+        *self
+            .inner
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
+    }
+
+    fn emit(&self, event: &'static str) {
+        let events = self
+            .inner
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(events) = events {
+            events.verda_event(event);
         }
     }
 
@@ -116,6 +139,7 @@ impl VerdaManager {
             .find_map(|n| n.ssh.as_ref().and_then(|s| s.key_file.clone()))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn persist_verda(
         &self,
         node_id: &NodeId,
@@ -124,6 +148,7 @@ impl VerdaManager {
         location: &str,
         instance_type: &str,
         tailscale_ip: Option<&str>,
+        spot_price: Option<f64>,
     ) {
         let Some(iid) = instance.instance_id_value() else {
             return;
@@ -138,7 +163,7 @@ impl VerdaManager {
             instance_type,
             os_volume_id: instance.os_volume_id.as_deref(),
             tailscale_ip,
-            spot_price_per_hour: None,
+            spot_price_per_hour: spot_price,
         };
         if let Err(err) = self
             .inner
@@ -193,7 +218,9 @@ impl VerdaManager {
 
     pub async fn ensure(&self, create: bool) -> Result<Value, VerdaError> {
         let _lock = self.inner.ensure_lock.lock().await;
-        self.ensure_locked(create).await
+        self.ensure_locked(create)
+            .await
+            .inspect_err(|_| self.emit("ensure_failed"))
     }
 
     async fn ensure_locked(&self, create: bool) -> Result<Value, VerdaError> {
@@ -232,6 +259,12 @@ impl VerdaManager {
 
     pub async fn create_additional(&self) -> Result<Value, VerdaError> {
         let _lock = self.inner.ensure_lock.lock().await;
+        self.create_additional_locked()
+            .await
+            .inspect_err(|_| self.emit("ensure_failed"))
+    }
+
+    async fn create_additional_locked(&self) -> Result<Value, VerdaError> {
         let key = self.private_key_file();
         if key.is_none() && self.inner.config.verda.ssh_public_key_file.is_none() {
             return Err(VerdaError::Message(
@@ -276,7 +309,16 @@ impl VerdaManager {
             node.url = Some(url.clone());
             self.inner.registry.upsert_verda(node.clone());
             let _ = self.inner.registry.set_node_url(&node_id, &url);
-            self.persist_verda(&node_id, &url, instance, &location, &instance_type, None);
+            self.persist_verda(
+                &node_id,
+                &url,
+                instance,
+                &location,
+                &instance_type,
+                None,
+                None,
+            );
+            self.emit("adopt");
             return json!({
                 "status": "adopted",
                 "node_id": node_id.as_str(),
@@ -287,7 +329,15 @@ impl VerdaManager {
         }
         node.url = None;
         self.inner.registry.upsert_verda(node.clone());
-        self.persist_verda(&node_id, "", instance, &location, &instance_type, None);
+        self.persist_verda(
+            &node_id,
+            "",
+            instance,
+            &location,
+            &instance_type,
+            None,
+            None,
+        );
         let result = self
             .inner
             .provisioner
@@ -305,7 +355,9 @@ impl VerdaManager {
             &location,
             &instance_type,
             result.tailscale_ip.as_deref(),
+            None,
         );
+        self.emit("adopt");
         json!({
             "status": "adopted",
             "node_id": node_id.as_str(),
@@ -339,6 +391,7 @@ impl VerdaManager {
             &choice.location_code,
             &choice.instance_type,
             None,
+            Some(choice.spot_price),
         );
         let result = self
             .inner
@@ -364,6 +417,7 @@ impl VerdaManager {
                 &choice.location_code,
                 &choice.instance_type,
                 result.tailscale_ip.as_deref(),
+                Some(choice.spot_price),
             );
         }
         json!({
@@ -499,7 +553,10 @@ impl VerdaManager {
             "verda_created"
         );
         match self.wait_running(&instance_id).await {
-            Ok(inst) => Ok(inst),
+            Ok(inst) => {
+                self.emit("create");
+                Ok(inst)
+            }
             Err(err) => {
                 let _ = self.compensate(&created).await;
                 Err(err)
@@ -602,6 +659,7 @@ impl VerdaManager {
                     tracing::info!(instance_id = %instance_id, "verda_destroyed");
                     deleted.push(instance_id.clone());
                     self.forget_instance(&instance_id);
+                    self.emit("destroy");
                 }
                 Err(err) => {
                     tracing::error!(instance_id = %instance_id, error = %err, "verda_destroy_failed");
@@ -824,6 +882,7 @@ impl VerdaManager {
                         "verda_idle_scale_down"
                     );
                     self.forget_instance(cand.instance_id.as_str());
+                    self.emit("idle");
                 }
                 Err(err) => {
                     tracing::error!(
@@ -882,6 +941,7 @@ impl DemandScale for VerdaManager {
             return;
         }
         let inner = self.inner.clone();
+        self.emit("demand");
         *slot = Some(tokio::spawn(async move {
             let mgr = VerdaManager { inner };
             tracing::info!(reason = reason_code, "verda_demand_scale_up");

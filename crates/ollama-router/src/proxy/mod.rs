@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{
@@ -127,6 +127,7 @@ async fn proxy_ranked(
     model: Option<String>,
     request_class: RequestClass,
 ) -> Response {
+    let start = Instant::now();
     let policy = &state.config.policy;
     let mut excluded: HashSet<NodeId> = HashSet::new();
 
@@ -177,7 +178,15 @@ async fn proxy_ranked(
         if reason.requests_demand_scale_up() {
             DemandScale::request_scale_up(state.demand.as_ref(), reason);
         }
-        return no_candidate_response(reason, model.as_deref(), request_class, policy);
+        state.metrics.route_reason(reason.as_reason_code());
+        let response = no_candidate_response(reason, model.as_deref(), request_class, policy);
+        state.metrics.observe_request(
+            request_class.as_str(),
+            response.status().as_u16(),
+            "-",
+            start.elapsed(),
+        );
+        return response;
     }
 
     let mut ranked = outcome.ranked;
@@ -202,7 +211,15 @@ async fn proxy_ranked(
         )
         .await
         {
-            Ok(response) => return response,
+            Ok(response) => {
+                state.metrics.observe_request(
+                    request_class.as_str(),
+                    response.status().as_u16(),
+                    node.id.as_str(),
+                    start.elapsed(),
+                );
+                return response;
+            }
             Err(err) => {
                 match &err {
                     ForwardError::Overload { status } => {
@@ -232,7 +249,14 @@ async fn proxy_ranked(
                     }
                     ForwardError::Fatal { kind, message } => {
                         state.registry.mark_request_failure(&node.id);
-                        return upstream_unavailable(kind, message);
+                        let response = upstream_unavailable(kind, message);
+                        state.metrics.observe_request(
+                            request_class.as_str(),
+                            response.status().as_u16(),
+                            node.id.as_str(),
+                            start.elapsed(),
+                        );
+                        return response;
                     }
                 }
                 last_error = Some(err);
@@ -247,7 +271,11 @@ async fn proxy_ranked(
         }
     }
 
-    match last_error {
+    let node = ranked
+        .first()
+        .map(|n| n.id.as_str().to_string())
+        .unwrap_or_else(|| "-".to_string());
+    let response = match last_error {
         Some(ForwardError::Overload { status }) => {
             DemandScale::request_scale_up(state.demand.as_ref(), RoutingError::Saturated);
             json_error(
@@ -264,7 +292,14 @@ async fn proxy_ranked(
         Some(ForwardError::Retryable { reason, message }) => upstream_unavailable(reason, &message),
         Some(ForwardError::Fatal { kind, message }) => upstream_unavailable(&kind, &message),
         None => upstream_unavailable("unknown", "no node"),
-    }
+    };
+    state.metrics.observe_request(
+        request_class.as_str(),
+        response.status().as_u16(),
+        &node,
+        start.elapsed(),
+    );
+    response
 }
 
 fn rank(

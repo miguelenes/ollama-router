@@ -245,3 +245,165 @@ async fn verda_routes_forbidden_without_token() {
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+fn get_req(path: &str, token: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method(Method::GET).uri(path);
+    if let Some(token) = token {
+        builder = builder.header(header::AUTHORIZATION, format!("Bearer {token}"));
+    }
+    builder.body(Body::empty()).expect("request")
+}
+
+#[tokio::test]
+async fn new_admin_routes_forbidden_without_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    for path in [
+        "/router/v1/nodes",
+        "/router/v1/models",
+        "/router/v1/jobs",
+        "/router/v1/stats",
+    ] {
+        let (status, _) = send(state.clone(), get_req(path, Some("secret"))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+    let (status, _) = send(
+        state,
+        json_req(Method::POST, "/router/v1/reload", json!({}), Some("secret")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn new_admin_routes_ok_with_bearer() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    for path in [
+        "/router/v1/nodes",
+        "/router/v1/models",
+        "/router/v1/jobs",
+        "/router/v1/stats",
+    ] {
+        let (status, body) = send(state.clone(), get_req(path, Some("secret"))).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{path}: {}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+    let (status, body) = send(
+        state,
+        json_req(Method::POST, "/router/v1/reload", json!({}), Some("secret")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["ok"], true);
+}
+
+#[tokio::test]
+async fn put_nodes_rejects_public_ipv4_and_leaves_fleet_yaml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fleet = dir.path().join("fleet.yaml");
+    let yaml = "version: 1\nnodes:\n  - id: local\n    url: http://127.0.0.1:11434\n    static:\n      vram_gb: 8\n";
+    std::fs::write(&fleet, yaml).expect("write fleet");
+    let original = std::fs::read(&fleet).expect("read");
+    let config = RouterConfig {
+        nodes: vec![node("local", "http://127.0.0.1:11434", 8.0)],
+        fleet_path: fleet.clone(),
+        ..RouterConfig::default()
+    };
+    let state = state_with_token(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::PUT,
+            "/router/v1/nodes",
+            json!({"id": "local", "url": "http://8.8.8.8:11434"}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(
+        parsed["error"]
+            .as_str()
+            .unwrap_or("")
+            .contains("public IPv4"),
+        "{parsed}"
+    );
+    assert_eq!(std::fs::read(&fleet).expect("reread"), original);
+}
+
+#[tokio::test]
+async fn list_jobs_returns_ensure_job() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[{"name":"moondream"}]}"#);
+    });
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0)],
+        ..RouterConfig::default()
+    };
+    let state = state_with_token(config, Some("secret"));
+    state.registry.set_healthy(&nid("gpu"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/models/ensure",
+            json!({"models": ["moondream"]}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let job_id = parsed["job_id"].as_str().expect("job_id");
+    let (list_status, list_body) = send(state, get_req("/router/v1/jobs", Some("secret"))).await;
+    assert_eq!(list_status, StatusCode::OK);
+    let listed: Value = serde_json::from_slice(&list_body).unwrap();
+    let jobs = listed["jobs"].as_array().expect("jobs");
+    assert!(
+        jobs.iter().any(|j| j["id"].as_str() == Some(job_id)),
+        "{listed}"
+    );
+}
+
+#[tokio::test]
+async fn metrics_and_healthz_need_no_bearer() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    let (hz, _) = send(state.clone(), get_req("/healthz", None)).await;
+    assert_eq!(hz, StatusCode::OK);
+    let (ms, body) = send(state, get_req("/metrics", None)).await;
+    assert_eq!(ms, StatusCode::OK);
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("ollama_router_") || text.contains("# HELP"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn no_thunder_or_runpod_admin_paths() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    for path in [
+        "/router/v1/thunder/status",
+        "/router/v1/runpod/status",
+        "/thunder",
+        "/runpod",
+    ] {
+        let (status, body) = send(state.clone(), get_req(path, Some("secret"))).await;
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            !text.to_ascii_lowercase().contains("thundercompute")
+                && !text.to_ascii_lowercase().contains("runpod not enabled"),
+            "{path}: {text}"
+        );
+        assert_ne!(status, StatusCode::OK, "{path}");
+    }
+}

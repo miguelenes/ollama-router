@@ -5,7 +5,7 @@ use std::time::Duration;
 use thiserror::Error;
 use url::Url;
 
-use super::types::{CapacityReport, PressureEnvelope};
+use ollama_capacity_types::{CapacityReport, PressureEnvelope};
 
 /// Allowlisted probe failure. Never includes bodies, tokens, or URLs.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]

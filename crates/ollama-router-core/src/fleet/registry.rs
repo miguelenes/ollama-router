@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
-use crate::capacity::{merge_capacity, CapacityReport, CapacitySource};
+use crate::capacity::{merge_capacity, CapacityInventory, CapacityReport, CapacitySource};
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
 
@@ -13,6 +13,15 @@ use crate::fleet::ids::NodeId;
 pub enum NodeOrigin {
     Permanent,
     Verda,
+}
+
+impl NodeOrigin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Permanent => "permanent",
+            Self::Verda => "verda",
+        }
+    }
 }
 
 /// RAM pressure classification used by scoring and hard filters.
@@ -372,6 +381,13 @@ impl Registry {
         node.success_streak = 0;
         node.next_probe_at = Instant::now();
         Ok(())
+    }
+
+    /// Replace live labels (admin PUT). Does not write fleet.yaml.
+    pub fn set_node_labels(&self, id: &NodeId, labels: Vec<String>) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.config.labels = labels;
+        }
     }
 
     /// Point ordinary OpenSSH at a Tailscale IPv4 (same key/user).

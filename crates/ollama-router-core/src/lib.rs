@@ -9,13 +9,13 @@ pub mod provision;
 pub mod routing;
 
 pub use capacity::{
-    bytes_to_gib, capacity_target, merge_capacity, CapacityClient, CapacityError, CapacityProbe,
-    CapacityReport, CapacitySource, CapacityTarget, MergeOutcome, Pressure, PressureEnvelope,
-    BYTES_PER_GIB,
+    bytes_to_gib, capacity_target, merge_capacity, CapacityClient, CapacityError, CapacityInventory,
+    CapacityProbe, CapacityReport, CapacitySource, CapacityTarget, MergeOutcome, Pressure,
+    PressureEnvelope, BYTES_PER_GIB,
 };
 pub use cloud::{
-    idle_scale_down_candidates, should_destroy_on_shutdown, DemandScale, IdleCandidate,
-    IdleNodeView, IdlePolicy, NoopDemandScale,
+    idle_scale_down_candidates, should_destroy_on_shutdown, DemandScale, FleetEvents,
+    IdleCandidate, IdleNodeView, IdlePolicy, NoopDemandScale, NoopFleetEvents,
 };
 pub use config::{
     hydrate_node_urls, load_config, load_config_from, parse_yaml, ConfigError, EnvSource, OsEnv,
@@ -27,8 +27,8 @@ pub use fleet::{
     VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use jobs::{
-    Job, JobId, JobKind, JobOutcome, JobStatus, JobStore, JobTarget, ModelOrchestrator,
-    OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
+    Job, JobId, JobKind, JobObserver, JobOutcome, JobStatus, JobStore, JobTarget,
+    ModelOrchestrator, OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
 };
 pub use provision::{
     posix_quote, provision_config_from_defaults, read_provision_script, redact_authkey,

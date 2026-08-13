@@ -14,6 +14,20 @@ pub trait DemandScale: Send + Sync {
     fn request_scale_up(&self, reason: RoutingError);
 }
 
+/// Verda lifecycle counters. Implemented in the binary (`Metrics`); this crate
+/// stays free of prometheus.
+pub trait FleetEvents: Send + Sync {
+    fn verda_event(&self, event: &'static str);
+}
+
+/// No-op when the binary has not attached metrics.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoopFleetEvents;
+
+impl FleetEvents for NoopFleetEvents {
+    fn verda_event(&self, _event: &'static str) {}
+}
+
 /// No-op when Verda is disabled.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct NoopDemandScale;

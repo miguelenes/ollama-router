@@ -81,6 +81,27 @@ Point `OLLAMA_ROUTER_CONFIG` at a thin overlay such as [`config.overlay.example.
 
 Verda stays **off** until you enable it. Credentials belong in process env, never in YAML. Cloud instance tag `managed_by=ollama-router`.
 
+Permanent hosts stay GitOps: `PUT /router/v1/nodes` upserts a live Verda/adopt row (and may set a Tailscale URL in FleetState) but **never writes fleet.yaml**.
+
+## Operator API
+
+Unauthenticated: `GET /healthz`, `GET /readyz`, `GET /metrics` (Prometheus text 0.0.4). Admin `/router/v1/*` requires `Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN` (unset → 403).
+
+| Method | Path | Role |
+| --- | --- | --- |
+| GET | `/router/v1/nodes` | Live inventory (no secrets) |
+| PUT | `/router/v1/nodes` | Debug/adopt URL+labels into the live registry |
+| GET | `/router/v1/models` | Desired tiers, presence matrix, placement-eligible ids |
+| GET | `/router/v1/jobs` | In-memory model operations |
+| GET | `/router/v1/jobs/{id}` | One job |
+| GET | `/router/v1/stats` | Compact counters/gauges |
+| POST | `/router/v1/reload` | Same as SIGHUP: reload fleet.yaml |
+| POST | `/router/v1/models/ensure` / `delete` | Placement-aware pull/delete |
+| POST | `/router/v1/nodes/provision` | russh provision |
+| GET/POST | `/router/v1/verda/{status,ensure,destroy}` | Verda spots |
+
+JSON tracing records `x-request-id` (incoming or generated). Request bodies and prompts are never logged.
+
 ## Quick start
 
 Install [Task](https://taskfile.dev/), then:
@@ -93,8 +114,22 @@ curl -fsS http://127.0.0.1:11434/healthz
 
 task compose:up
 curl -fsS http://127.0.0.1:11435/healthz
-# mixed CPU+GPU mocks on the private compose network; host port is 11435
+curl -fsS http://127.0.0.1:11435/api/tags
+curl -fsS http://127.0.0.1:11435/metrics | grep ollama_router_inflight
+
+# generate → gpu mock, embed → cpu mock (both nodes show on Overview / Fleet)
+curl -fsS http://127.0.0.1:11435/api/generate \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"llama3.2:3b","prompt":"hi","stream":false}'
+curl -fsS http://127.0.0.1:11435/api/embed \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"qwen3-embedding:8b","input":"hi"}'
+
+task obs:open
+# http://127.0.0.1:3000/d/ollama-router/ollama-router
 ```
+
+Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403.
 
 ## Develop
 
@@ -110,7 +145,7 @@ cargo test --workspace --locked
 - rustls only (`deny.toml` bans `openssl` / `native-tls`)
 - tracing JSON — never request bodies, prompts, embeddings, or tokens
 
-CLI: `serve`, `ensure`, `delete`, `nodes`, `provision`. **`serve` is implemented** (proxy, health probes, SIGHUP fleet reload). The rest parse and exit 2 until those slices land.
+CLI: `serve`, `ensure`, `delete`, `nodes`, `reload`, `provision`. `ensure`/`delete` print one JSON object per job. `nodes` prints `origin`, id, and URL from fleet.yaml plus FleetState Verda rows. `reload` POSTs `/router/v1/reload` using `OLLAMA_ROUTER_ADMIN_TOKEN`.
 
 Workspace: `crates/ollama-router` (binary / HTTP), `crates/ollama-router-core` (config, fleet, routing, capacity, jobs), `crates/ollama-router-verda` (OAuth2 + spot manager), `crates/ollama-mock` (compose stand-in).
 

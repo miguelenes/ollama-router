@@ -17,6 +17,9 @@ id_rsa*
 
 .task/
 
+# AICode index transaction scratch (durable segments stay tracked)
+.aicode/index/tmp/
+
 .idea/
 .vscode/
 *.swp

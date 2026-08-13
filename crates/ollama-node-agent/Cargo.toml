@@ -1,0 +1,33 @@
+[package]
+name = "ollama-node-agent"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Node-local Ollama installer, supervisor, and capacity agent (:11436)"
+
+[lints.rust]
+unsafe_code = "deny"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+ollama-capacity-types = { path = "../ollama-capacity-types" }
+prometheus.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+sysinfo.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio = { workspace = true, features = ["process", "fs"] }
+tower-http.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+tempfile.workspace = true
+tower.workspace = true
