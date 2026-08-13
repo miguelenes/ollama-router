@@ -1,0 +1,5 @@
+# Default agent config (component pkg). This package does not install Ollama;
+# run `sudo ollama-node-agent setup` to brew-or-fail Ollama. pkg upgrades
+# replace this yaml (pkgbuild has no conffile/NeverOverwrite).
+listen: tailscale
+port: 11436

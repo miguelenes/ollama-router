@@ -41,11 +41,20 @@
         <Component Id="AgentDataDir" Guid="C3F5D2B9-8E6A-4B04-AF21-4D9C6E7A3B22">
           <CreateFolder />
         </Component>
+        <Component Id="AgentConfig" Guid="D4A6E3C0-9F7B-4C15-B032-5E0D7F8B4C33" NeverOverwrite="yes">
+          <File
+            Id="AgentConfigFile"
+            Source="$(var.ConfigPath)"
+            Name="config.yaml"
+            KeyPath="yes"
+            NeverOverwrite="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
     <ComponentGroup Id="ProductComponents">
       <ComponentRef Id="AgentExe" />
       <ComponentRef Id="AgentDataDir" />
+      <ComponentRef Id="AgentConfig" />
     </ComponentGroup>
   </Fragment>
 </Wix>

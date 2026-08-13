@@ -94,10 +94,10 @@ job uses a `rust:1.97-slim-bookworm` container. GHA never installs Task.
 | --- | --- |
 | `ollama-node-agent-linux-<arch>.tar.gz` | musl static-pie binary + unit + README + optional OpenRC contrib; installer is `sudo ./ollama-node-agent setup` |
 | `ollama-node-agent_<ver>_<arch>.deb` | gnu (glibc ≥ bookworm); unit in `/usr/lib/systemd/system`; postinst enables the service when `/run/systemd/system` exists |
-| `ollama-node-agent-<ver>-darwin-<arch>.pkg` | binary + LaunchDaemon `com.ollama.node-agent`; postinstall `launchctl bootstrap` |
+| `ollama-node-agent-<ver>-darwin-<arch>.pkg` | component pkg: binary + LaunchDaemon `com.ollama.node-agent` + default config; postinstall `bootout` then `bootstrap`; does **not** install Ollama.app |
 | `ollama-node-agent-darwin-<arch>.zip` | unsigned binary for source-style `setup` (not the install path) |
-| `ollama-node-agent-windows-amd64.exe` | portable; elevated `setup` registers a LocalSystem SCM service |
-| `ollama-node-agent-<ver>-windows-amd64.msi` | `ServiceInstall` LocalSystem; starts/stops the service |
+| `ollama-node-agent-windows-amd64.exe` | portable; elevated `setup` registers a LocalSystem SCM service (Ollama + netsh firewall) |
+| `ollama-node-agent-<ver>-windows-amd64.msi` | WiX `ServiceInstall` LocalSystem; starts on install / stops+deletes on uninstall; default `config.yaml` with `NeverOverwrite`; does **not** install Ollama or firewall |
 | `SHA256SUMS.txt` | checksums of the files above |
 
 Unit, plist, and Windows service name/args live under
@@ -107,7 +107,17 @@ Unit, plist, and Windows service name/args live under
 `setup` and `.deb` postinst do not bail: they install the binary and print a
 `serve` command. OpenRC is contrib-in-tarball only. `uninstall` ignores
 `systemctl`/`sc`/`launchctl` failures. The first SCM release deletes leftover
-scheduled task `ollama-node-agent`.
+scheduled task `ollama-node-agent`. After MSI, run elevated `setup` for Ollama
+and firewall; do not also run the Ollama tray on `:11434` (LocalSystem GPU vs
+user tray). Unsigned Windows artifacts may hit SmartScreen. Local
+`task agent:release:windows` is a no-op unless the rustc host is
+`x86_64-pc-windows-msvc` (do not ship mingw labeled as the GHA exe).
+macOS `.pkg` is agent+LaunchDaemon only (`setup` brew-or-fails Ollama). After
+`uninstall`, `sudo pkgutil --forget com.ollama.node-agent`. Unsigned pkgs are
+OK on a tailnet; Gatekeeper blocks Safari quarantine. Local
+`task agent:release:macos` skips unless Darwin (GHA `macos-14` builds both
+`aarch64-apple-darwin` and `x86_64-apple-darwin`). pkg upgrades replace the
+packaged `config.yaml`.
 
 ## Effective capacity
 

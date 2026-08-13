@@ -32,6 +32,13 @@ mod tests {
         assert!(wxs.contains(WINDOWS_CONFIG));
         assert!(wxs.contains(UPGRADE_CODE));
         assert!(wxs.contains(WINDOWS_BIN.rsplit('\\').next().unwrap_or("")));
+        assert!(wxs.contains("Start=\"install\""));
+        assert!(wxs.contains("Remove=\"uninstall\""));
+        assert!(wxs.contains("NeverOverwrite=\"yes\""));
+        assert!(wxs.contains("$(var.ConfigPath)"));
+        assert!(!wxs.contains("schtasks"));
+        assert!(!wxs.contains("FirewallException"));
+        assert!(!wxs.to_lowercase().contains("ollama.com"));
     }
 
     #[test]
@@ -77,6 +84,19 @@ mod tests {
         assert!(!on_disk.contains("OLLAMA_NODE_AGENT_HOST"));
         assert!(on_disk.contains("<key>KeepAlive</key>"));
         assert!(on_disk.contains("<key>RunAtLoad</key>"));
+        assert!(on_disk.contains("/usr/local/bin/ollama-node-agent"));
+    }
+
+    #[test]
+    fn macos_postinstall_bootstraps_launchd_and_skips_ollama() {
+        let path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/macos/scripts/postinstall");
+        let script = std::fs::read_to_string(path).expect("postinstall");
+        assert!(script.contains("launchctl bootout system/com.ollama.node-agent"));
+        assert!(script.contains("launchctl bootstrap system"));
+        assert!(!script.contains("brew"));
+        assert!(!script.contains("Ollama.app"));
+        assert!(!script.to_lowercase().contains("ollama.com"));
     }
 
     #[test]

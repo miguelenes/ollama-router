@@ -1,0 +1,6 @@
+# Default agent config (MSI; NeverOverwrite). This package does not install
+# Ollama; run elevated `ollama-node-agent setup` to converge Ollama and
+# firewall rules. Do not also run the Ollama tray app on :11434 — NVIDIA
+# under LocalSystem conflicts with a user-session tray.
+listen: tailscale
+port: 11436

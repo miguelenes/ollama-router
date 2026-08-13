@@ -184,9 +184,13 @@ tasks:
         sh: [bash, -euo, pipefail, -c]
 
   agent:release:macos:
-    desc: .pkg plus unsigned zip for this host (macOS)
+    desc: .pkg plus unsigned zip for this host (macOS; GHA macos-14 is canonical)
     cmds:
       - cmd: |
+          if [[ "$(uname -s)" != Darwin ]]; then
+            echo "skipping Darwin pkg: requires macos-14 host (GHA is canonical)" >&2
+            exit 0
+          fi
           case "$(uname -m)" in
             x86_64) ARCH=amd64; TARGET=x86_64-apple-darwin ;;
             arm64) ARCH=arm64; TARGET=aarch64-apple-darwin ;;
@@ -200,13 +204,22 @@ tasks:
         sh: [bash, -euo, pipefail, -c]
 
   agent:release:windows:
-    desc: portable exe plus MSI (needs WiX v5 on PATH)
+    desc: portable exe plus MSI (Windows MSVC host; WiX v5 for MSI)
     cmds:
       - cmd: |
+          HOST=$(rustc -vV | awk '/^host:/{print $2}')
+          if [[ "$HOST" != x86_64-pc-windows-msvc ]]; then
+            echo "skipping Windows MSI: requires windows-latest / MSVC host (GHA is canonical)" >&2
+            exit 0
+          fi
           VER=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
           cargo build --release --locked -p ollama-node-agent
           mkdir -p dist/agent
           cp target/release/ollama-node-agent.exe dist/agent/ollama-node-agent-windows-amd64.exe
+          if ! command -v wix >/dev/null 2>&1; then
+            echo "skipping Windows MSI: wix not on PATH (install WiX v5; GHA is canonical)" >&2
+            exit 0
+          fi
           bash crates/ollama-node-agent/packaging/windows/pack-msi.sh \
             target/release/ollama-node-agent.exe "$VER" dist/agent
         sh: [bash, -euo, pipefail, -c]

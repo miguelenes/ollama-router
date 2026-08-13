@@ -20,11 +20,18 @@ if ! command -v wix >/dev/null 2>&1; then
   exit 1
 fi
 
+CONFIG="$SCRIPT_DIR/config.yaml"
+if [[ ! -f "$CONFIG" ]]; then
+  echo "missing config: $CONFIG" >&2
+  exit 1
+fi
+
 mkdir -p "$OUTDIR"
 OUTDIR="$(cd "$OUTDIR" && pwd)"
 # WiX Version must be 1-4 numeric components (no leading v).
 wix build \
   -d "ExePath=$EXE" \
+  -d "ConfigPath=$CONFIG" \
   -d "ProductVersion=$VERSION" \
   "$SCRIPT_DIR/ollama-node-agent.wxs" \
   -o "$OUTDIR/ollama-node-agent-${VERSION}-windows-amd64.msi"

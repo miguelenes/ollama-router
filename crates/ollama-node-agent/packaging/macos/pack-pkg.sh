@@ -11,13 +11,19 @@ ARCH=$2
 VERSION=$3
 OUTDIR=$4
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CANONICAL_PLIST="$SCRIPT_DIR/com.ollama.node-agent.plist"
+CONFIG="$SCRIPT_DIR/config.yaml"
 
 if [[ ! -f "$BINARY" ]]; then
   echo "missing binary: $BINARY" >&2
   exit 1
 fi
-if ! command -v pkgbuild >/dev/null 2>&1; then
-  echo "pkgbuild not on PATH (macOS only)" >&2
+if [[ ! -f "$CANONICAL_PLIST" ]]; then
+  echo "missing plist: $CANONICAL_PLIST" >&2
+  exit 1
+fi
+if [[ ! -f "$CONFIG" ]]; then
+  echo "missing config: $CONFIG" >&2
   exit 1
 fi
 
@@ -31,7 +37,27 @@ mkdir -p "$root/Library/LaunchDaemons"
 mkdir -p "$root/Library/Application Support/ollama-node-agent"
 cp "$BINARY" "$root/usr/local/bin/ollama-node-agent"
 chmod 755 "$root/usr/local/bin/ollama-node-agent"
-cp "$SCRIPT_DIR/com.ollama.node-agent.plist" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"
+strip "$root/usr/local/bin/ollama-node-agent"
+chmod 755 "$root/usr/local/bin/ollama-node-agent"
+
+cp "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"
+if ! cmp -s "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"; then
+  echo "staged plist drifted from $CANONICAL_PLIST" >&2
+  exit 1
+fi
+cp "$CONFIG" "$root/Library/Application Support/ollama-node-agent/config.yaml"
+
+zipdir="$(mktemp -d)"
+cp "$root/usr/local/bin/ollama-node-agent" "$zipdir/ollama-node-agent"
+chmod 755 "$zipdir/ollama-node-agent"
+(cd "$zipdir" && zip -q "$OUTDIR/ollama-node-agent-darwin-${ARCH}.zip" ollama-node-agent)
+rm -rf "$zipdir"
+echo "wrote $OUTDIR/ollama-node-agent-darwin-${ARCH}.zip"
+
+if ! command -v pkgbuild >/dev/null 2>&1; then
+  echo "skipping Darwin pkg: pkgbuild not on PATH (GHA macos-14 is canonical)" >&2
+  exit 0
+fi
 
 pkgbuild \
   --root "$root" \
@@ -41,11 +67,4 @@ pkgbuild \
   --scripts "$SCRIPT_DIR/scripts" \
   "$OUTDIR/ollama-node-agent-${VERSION}-darwin-${ARCH}.pkg"
 
-zipdir="$(mktemp -d)"
-cp "$BINARY" "$zipdir/ollama-node-agent"
-chmod 755 "$zipdir/ollama-node-agent"
-(cd "$zipdir" && zip -q "$OUTDIR/ollama-node-agent-darwin-${ARCH}.zip" ollama-node-agent)
-rm -rf "$zipdir"
-
 echo "wrote $OUTDIR/ollama-node-agent-${VERSION}-darwin-${ARCH}.pkg"
-echo "wrote $OUTDIR/ollama-node-agent-darwin-${ARCH}.zip"
