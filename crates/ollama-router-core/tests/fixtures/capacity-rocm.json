@@ -1,0 +1,42 @@
+{
+  "vram_gb": 32.0,
+  "gpus": 1,
+  "ram_gb": 64.0,
+  "cpu_cores": 32,
+  "hostname": "rocm-host",
+  "collected_at": "2026-08-13T00:00:00Z",
+  "gpu_names": ["card0"],
+  "agent_version": "0.1.0",
+  "gpus_detail": [{
+    "index": 0,
+    "name": "card0",
+    "vram_total_gb": 32.0,
+    "vram_used_gb": 1.0,
+    "vram_free_gb": 31.0,
+    "vram_free_known": true,
+    "vram_used_known": true,
+    "util_known": false
+  }],
+  "vram_used_gb": 1.0,
+  "vram_free_gb": 31.0,
+  "cgroup_memory_limit_gb": null,
+  "gpu_backend": "rocm",
+  "vram_free_known": true,
+  "vram_used_known": true,
+  "pressure": {
+    "ram_total_gb": 64.0,
+    "ram_available_gb": 48.0,
+    "ram_available_ratio": 0.75,
+    "ram_used_ratio": 0.25,
+    "swap_used_gb": 0.0,
+    "swap_total_gb": 8.0,
+    "load1": 1.0,
+    "load5": 0.5,
+    "load15": 0.25,
+    "cpu_cores": 32,
+    "collected_at": 1750000000.0,
+    "load_1m": 1.0,
+    "load_per_cpu": 0.03125,
+    "ram_available_source": "MemAvailable"
+  }
+}

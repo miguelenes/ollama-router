@@ -514,7 +514,7 @@
       ],
       "title": "USD/h",
       "type": "stat",
-      "description": "Sum of known FleetState Verda spot prices \u2014 not per node."
+      "description": "Sum of known FleetState Verda spot prices — not per node."
     },
     {
       "datasource": {
@@ -1259,7 +1259,6 @@
               "Value #K": 12,
               "Value #L": 13,
               "Value #M": 14,
-              "backend": 15,
               "Value #O": 16,
               "Value #P": 17,
               "Value #Q": 18
@@ -1536,7 +1535,7 @@
       ],
       "title": "Probe latency p50 / p99 (global)",
       "type": "timeseries",
-      "description": "Health-probe wall time across all nodes combined \u2014 not per-node."
+      "description": "Health-probe wall time across all nodes combined — not per-node."
     },
     {
       "datasource": {
@@ -2265,7 +2264,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_node_vram_free_gb and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+          "expr": "(ollama_router_node_vram_free_gb * on(node) (ollama_router_node_vram_free_known == 1)) and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
           "legendFormat": "{{node}} free",
           "refId": "B",
           "range": true
@@ -2273,7 +2272,7 @@
       ],
       "title": "VRAM GiB (total and free)",
       "type": "timeseries",
-      "description": "GiB = bytes/1024\u00b3. Unit is none (not SI GB). CPU nodes often have vram_gb=0. Free 0.0 means unknown, not an empty GPU."
+      "description": "GiB = bytes/1024³. Unit is none (not SI GB). CPU nodes often have vram_gb=0. Free is plotted only when vram_free_known=1: 0 then means an empty GPU. When known=0, free is omitted (unknown, not empty)."
     },
     {
       "datasource": {
@@ -2387,7 +2386,7 @@
       ],
       "title": "Pressure (0 unknown / 1 ok / 2 elevated / 3 critical)",
       "type": "timeseries",
-      "description": "PressureLevel from the node agent; router does not reclassify. Elevated: score +2, inflight cap \u22121 (floor 1) unless explicit max. Critical: score +8, inflight cap 1; hard-reject when reject_on_ram_critical. Meaningful on CPU nodes even when VRAM is 0."
+      "description": "PressureLevel from the node agent; router does not reclassify. Elevated: score +2, inflight cap −1 (floor 1) unless explicit max. Critical: score +8, inflight cap 1; hard-reject when reject_on_ram_critical. Meaningful on CPU nodes even when VRAM is 0."
     },
     {
       "datasource": {
@@ -2513,7 +2512,7 @@
       ],
       "title": "Estimated VRAM used GiB (when free is known)",
       "type": "timeseries",
-      "description": "total \u2212 free, gated on vram_free_known=1 (full GPU shows used=total). Also see loaded_vram_gb and reserved_vram_gb."
+      "description": "total − free, gated on vram_free_known=1 (full GPU shows used=total). Also see loaded_vram_gb and reserved_vram_gb."
     },
     {
       "collapsed": false,
@@ -3133,7 +3132,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 111
+        "y": 117
       },
       "id": 32,
       "title": "Routing pressure",
@@ -3171,7 +3170,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 112
+        "y": 118
       },
       "id": 33,
       "options": {
@@ -3208,7 +3207,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 120
+        "y": 126
       },
       "id": 34,
       "title": "Verda",
@@ -3246,7 +3245,7 @@
             "h": 8,
             "w": 8,
             "x": 0,
-            "y": 93
+            "y": 127
           },
           "id": 35,
           "options": {
@@ -3309,7 +3308,7 @@
             "h": 8,
             "w": 8,
             "x": 8,
-            "y": 93
+            "y": 127
           },
           "id": 36,
           "options": {
@@ -3338,7 +3337,7 @@
           ],
           "title": "Spot price / hour (fleet sum)",
           "type": "timeseries",
-          "description": "Sum of known FleetState Verda spot prices \u2014 not per node."
+          "description": "Sum of known FleetState Verda spot prices — not per node."
         },
         {
           "datasource": {
@@ -3372,7 +3371,7 @@
             "h": 8,
             "w": 8,
             "x": 16,
-            "y": 93
+            "y": 127
           },
           "id": 37,
           "options": {
@@ -3411,7 +3410,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 121
+        "y": 135
       },
       "id": 40,
       "title": "Models",
@@ -3450,7 +3449,7 @@
         "h": 8,
         "w": 6,
         "x": 0,
-        "y": 122
+        "y": 136
       },
       "id": 41,
       "options": {
@@ -3515,7 +3514,7 @@
         "h": 8,
         "w": 9,
         "x": 6,
-        "y": 122
+        "y": 136
       },
       "id": 42,
       "options": {
@@ -3577,7 +3576,7 @@
         "h": 8,
         "w": 9,
         "x": 15,
-        "y": 122
+        "y": 136
       },
       "id": 43,
       "options": {
@@ -3624,7 +3623,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 130
+        "y": 144
       },
       "id": 38,
       "title": "Logs",
@@ -3635,12 +3634,12 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines \u2014 they are not Prometheus labels.",
+      "description": "Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines — they are not Prometheus labels.",
       "gridPos": {
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 131
+        "y": 145
       },
       "id": 39,
       "options": {
@@ -3784,7 +3783,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Ollama Router - Nodes",
+  "title": "Ollama Router — Nodes",
   "uid": "ollama-router-nodes",
   "version": 1,
   "weekStart": ""

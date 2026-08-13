@@ -1343,4 +1343,25 @@ mod tests {
         assert!(!snap.gpu_util_known);
         assert_eq!(snap.gpu_backend, GpuBackend::Cpu);
     }
+
+    #[test]
+    fn apply_capacity_report_persists_rocm_fixture() {
+        let config = RouterConfig {
+            nodes: vec![node("rocm", 32.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("rocm");
+        let report: CapacityReport =
+            serde_json::from_str(include_str!("../../tests/fixtures/capacity-rocm.json"))
+                .expect("rocm fixture");
+        registry.apply_capacity_report(&id, &report, Some(PressureLevel::Ok));
+        let snap = registry.get(&id).unwrap();
+        assert_eq!(snap.gpu_backend, GpuBackend::Rocm);
+        assert!(snap.vram_free_known);
+        assert!(snap.vram_used_known);
+        assert!((snap.vram_free_gb.unwrap() - 31.0).abs() < 1e-9);
+        assert_eq!(snap.gpus_detail.len(), 1);
+        assert!(!snap.gpu_util_known);
+    }
 }

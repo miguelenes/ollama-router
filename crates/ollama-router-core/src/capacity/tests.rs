@@ -4,6 +4,7 @@ use httpmock::prelude::*;
 use std::time::Duration;
 
 const LINUX_FIXTURE: &str = include_str!("../../tests/fixtures/capacity-linux.json");
+const ROCM_FIXTURE: &str = include_str!("../../tests/fixtures/capacity-rocm.json");
 
 #[test]
 fn bytes_to_gib_uses_1024_cubed() {
@@ -195,4 +196,48 @@ async fn pressure_miss_still_returns_capacity() {
         .expect("capacity ok");
     assert!(probe.pressure_level.is_none());
     assert!((probe.report.vram_gb - 8.0).abs() < 1e-9);
+}
+
+#[test]
+fn rocm_fixture_deserializes_backend_and_known_flags() {
+    let report: CapacityReport = serde_json::from_str(ROCM_FIXTURE).expect("rocm fixture");
+    assert_eq!(report.gpu_backend, Some(GpuBackend::Rocm));
+    assert_eq!(report.gpus, 1);
+    assert!((report.vram_gb - 32.0).abs() < 1e-9);
+    assert!((bytes_to_gib(32 * 1024 * 1024 * 1024) - 32.0).abs() < 1e-9);
+    assert_eq!(report.vram_free_known, Some(true));
+    assert_eq!(report.vram_used_known, Some(true));
+    assert!(report.vram_free_is_known());
+    assert!((report.vram_used_gb - 1.0).abs() < 1e-9);
+    assert!((report.vram_free_gb - 31.0).abs() < 1e-9);
+}
+
+#[tokio::test]
+async fn client_reads_rocm_fixture() {
+    let server = MockServer::start();
+    let _cap = server.mock(|when, then| {
+        when.method(GET).path("/v1/capacity");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(ROCM_FIXTURE);
+    });
+    let _pressure = server.mock(|when, then| {
+        when.method(GET).path("/v1/pressure");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"collected_at":"t","pressure_level":"ok","pressure":{"ram_available_gb":48.0}}"#);
+    });
+    let client = CapacityClient::new(reqwest::Client::builder().use_rustls_tls().build().unwrap());
+    let target = CapacityTarget {
+        capacity_url: format!("{}/v1/capacity", server.base_url()),
+        pressure_url: format!("{}/v1/pressure", server.base_url()),
+    };
+    let probe = client
+        .probe(&target, None, Duration::from_secs(2))
+        .await
+        .expect("probe");
+    assert_eq!(probe.report.gpu_backend, Some(GpuBackend::Rocm));
+    assert!(probe.report.vram_free_is_known());
+    assert!((probe.report.vram_gb - 32.0).abs() < 1e-9);
+    assert_eq!(probe.pressure_level.as_deref(), Some("ok"));
 }

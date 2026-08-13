@@ -58,8 +58,10 @@ not stack `nvidia-smi`. GPU subprocesses stay at 2s timeout; sysinfo runs in
 exists. Windows does not use load average (sysinfo reports 0). `ram_available_source`
 is `MemAvailable` on Linux and `sysinfo` elsewhere. Linux PSI `some avg10`
 amplifies elevated/critical. Auto GPU policy: NVIDIA inventory → CUDA (including
-macOS eGPU); else macOS Metal; else ROCm; else CPU. Metal never copies unified
-RAM into `vram_gb`.
+macOS eGPU); else macOS Metal; else ROCm inventory (`gpus > 0`); else CPU.
+Probe `rocm-smi --showmeminfo vram --csv` (PATH, `/opt/rocm/bin/rocm-smi`,
+`/usr/bin/rocm-smi`) then `amd-smi metric --mem-usage --csv|--json` (PATH,
+`/opt/rocm/bin/amd-smi`). Metal never copies unified RAM into `vram_gb`.
 
 Agent-down is **soft-fail**: node health still follows Ollama `/api/tags`, the
 last discovered capacity is retained, `capacity_error` is populated, and routing

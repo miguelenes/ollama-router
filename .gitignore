@@ -26,3 +26,6 @@ id_rsa*
 .DS_Store
 .cursor/hooks/state/continual-learning-index.json
 .cursor/hooks/state/continual-learning.json
+
+# AI Code Review temporary files
+.ai-code-review/

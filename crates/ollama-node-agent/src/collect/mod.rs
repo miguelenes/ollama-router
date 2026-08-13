@@ -27,7 +27,7 @@ pub use nvidia::{parse_nvidia_csv, parse_nvidia_fallback_csv, GpuInventory};
 pub use pressure::classify_pressure;
 pub use psi::parse_psi_some_avg10;
 pub use ram::ram_available_source;
-pub use rocm::parse_rocm_csv;
+pub use rocm::{amd_smi_candidates, parse_rocm_csv, rocm_smi_candidates};
 
 const COLLECT_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -70,12 +70,48 @@ pub async fn probe_nvidia_basic() -> Option<String> {
 }
 
 pub async fn probe_rocm() -> Option<String> {
-    run_program("rocm-smi", &["--showmeminfo", "vram", "--csv"]).await
+    if let Some(out) = run_candidates(
+        rocm::rocm_smi_candidates(),
+        &["--showmeminfo", "vram", "--csv"],
+    )
+    .await
+    {
+        return Some(out);
+    }
+    // `amd-smi metric --mem-usage` (`-m`): documented VRAM block totals in MB.
+    for program in rocm::amd_smi_candidates() {
+        if skip_missing_non_path(&program) {
+            continue;
+        }
+        if let Some(out) = run_program(&program, &["metric", "--mem-usage", "--csv"]).await {
+            return Some(out);
+        }
+        if let Some(out) = run_program(&program, &["metric", "--mem-usage", "--json"]).await {
+            return Some(out);
+        }
+    }
+    None
+}
+
+async fn probe_rocm_names() -> Option<String> {
+    if let Some(out) =
+        run_candidates(rocm::rocm_smi_candidates(), &["--showproductname", "--csv"]).await
+    {
+        return Some(out);
+    }
+    run_candidates(rocm::amd_smi_candidates(), &["static", "--asic", "--csv"]).await
 }
 
 async fn run_nvidia(args: &[&str]) -> Option<String> {
-    for program in nvidia::nvidia_smi_candidates() {
-        if program != Path::new("nvidia-smi") && !program.is_file() {
+    run_candidates(nvidia::nvidia_smi_candidates(), args).await
+}
+
+async fn run_candidates(
+    candidates: impl IntoIterator<Item = std::path::PathBuf>,
+    args: &[&str],
+) -> Option<String> {
+    for program in candidates {
+        if skip_missing_non_path(&program) {
             continue;
         }
         if let Some(out) = run_program(&program, args).await {
@@ -83,6 +119,11 @@ async fn run_nvidia(args: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+/// Bare PATH names always run; absolute/well-known paths must exist as files.
+fn skip_missing_non_path(program: &Path) -> bool {
+    program.components().nth(1).is_some() && !program.is_file()
 }
 
 async fn run_program(program: impl AsRef<std::ffi::OsStr>, args: &[&str]) -> Option<String> {
@@ -482,16 +523,15 @@ pub fn gpu_from_probes(
                 .or_else(|| nvidia_basic.and_then(parse_nvidia_fallback_csv))
                 .unwrap_or_default();
             let has_nvidia = nvidia_inv.gpus > 0;
-            let has_rocm = rocm.is_some();
+            let rocm_inv = rocm.and_then(parse_rocm_csv);
+            let has_rocm = rocm_inv.as_ref().is_some_and(|inv| inv.gpus > 0);
             let backend = select_backend(policy, has_nvidia, has_rocm);
             if backend == GpuBackend::Cuda {
                 (nvidia_inv, backend)
             } else if backend == GpuBackend::Rocm {
-                (rocm.and_then(parse_rocm_csv).unwrap_or_default(), backend)
-            } else if backend == GpuBackend::Metal {
-                (GpuInventory::default(), backend)
+                (rocm_inv.unwrap_or_default(), backend)
             } else {
-                (GpuInventory::default(), GpuBackend::Cpu)
+                (GpuInventory::default(), backend)
             }
         }
     }
@@ -554,6 +594,11 @@ pub async fn collect_live(
             if !names.is_empty() {
                 inv.gpu_names = names;
             }
+        }
+    }
+    if backend == GpuBackend::Rocm && inv.gpus > 0 {
+        if let Some(raw) = probe_rocm_names().await {
+            rocm::apply_product_names(&mut inv, &raw);
         }
     }
     if backend == GpuBackend::Rocm && inv.gpus == 0 && rocm_smi_ok {
@@ -666,6 +711,71 @@ mod tests {
         assert_eq!(inv.gpus, 1);
         assert!((inv.vram_gb - 8.0).abs() < 1e-9);
         assert!(inv.vram_free_known);
+    }
+
+    const ROCM_32_GIB_CSV: &str =
+        "device,VRAM Total Memory (B),VRAM Total Used Memory (B)\ncard0,34359738368,1073741824\n";
+    const NVIDIA_8_GIB_CSV: &str = "NVIDIA GeForce RTX 3070, 8192, 2304, 5888, 14, 28\n";
+
+    #[test]
+    fn auto_rocm_inventory_selects_rocm() {
+        let (inv, backend) = gpu_from_probes(GpuPolicy::Auto, None, None, Some(ROCM_32_GIB_CSV));
+        if cfg!(target_os = "macos") {
+            assert_eq!(backend, GpuBackend::Metal);
+            return;
+        }
+        assert_eq!(backend, GpuBackend::Rocm);
+        assert!(inv.gpus >= 1);
+        assert!((inv.vram_gb - 32.0).abs() < 1e-6);
+        assert!(inv.vram_free_known);
+        assert!((bytes_to_gib(32 * 1024 * 1024 * 1024) - 32.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn auto_nvidia_wins_over_rocm() {
+        let (inv, backend) = gpu_from_probes(
+            GpuPolicy::Auto,
+            Some(NVIDIA_8_GIB_CSV),
+            None,
+            Some(ROCM_32_GIB_CSV),
+        );
+        assert_eq!(backend, GpuBackend::Cuda);
+        assert_eq!(inv.gpus, 1);
+        assert!((inv.vram_gb - 8.0).abs() < 1e-9);
+        assert!(inv.gpu_names.iter().any(|n| n.contains("NVIDIA")));
+    }
+
+    #[test]
+    fn forced_rocm_ignores_nvidia_rows() {
+        let (inv, backend) = gpu_from_probes(
+            GpuPolicy::Rocm,
+            Some(NVIDIA_8_GIB_CSV),
+            None,
+            Some(ROCM_32_GIB_CSV),
+        );
+        assert_eq!(backend, GpuBackend::Rocm);
+        assert!(inv.gpus >= 1);
+        assert!((inv.vram_gb - 32.0).abs() < 1e-6);
+        assert!(inv.vram_free_known);
+        assert!(!inv.gpu_names.iter().any(|n| n.contains("NVIDIA")));
+    }
+
+    #[test]
+    fn forced_cuda_without_nvidia_stays_empty() {
+        let (inv, backend) = gpu_from_probes(GpuPolicy::Cuda, None, None, Some(ROCM_32_GIB_CSV));
+        assert_eq!(backend, GpuBackend::Cuda);
+        assert_eq!(inv.gpus, 0);
+        assert!((inv.vram_gb - 0.0).abs() < 1e-12);
+        assert!(!inv.vram_free_known);
+    }
+
+    #[test]
+    fn auto_unparseable_rocm_is_not_rocm() {
+        let (inv, backend) = gpu_from_probes(GpuPolicy::Auto, None, None, Some("not-a-csv"));
+        assert_ne!(backend, GpuBackend::Rocm);
+        assert!(backend == GpuBackend::Cpu || backend == GpuBackend::Metal);
+        assert_eq!(inv.gpus, 0);
+        assert!(!inv.vram_free_known);
     }
 
     #[test]

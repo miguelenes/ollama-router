@@ -40,7 +40,7 @@
 {"path":"ollama-router/.github/workflows/codeql.yml","sizeBytes":2339,"mtimeMs":1786627273927.2957,"sha256":"f9378b75b918828b59dd8f43211eb756a837253377b683bb919a7ee51e174838"}
 {"path":"ollama-router/.github/workflows/dependency-review.yml","sizeBytes":525,"mtimeMs":1786620064511.529,"sha256":"2cf8b9811cca5254a0618829b565151056b79885ff4d663532fe1fc111b3fe43"}
 {"path":"ollama-router/.github/workflows/docker.yml","sizeBytes":2541,"mtimeMs":1786625587482.3547,"sha256":"341ee5631de37c53b88dc54b68f503dec4eb13b256b01d602bb55ca1fc7a86b0"}
-{"path":"ollama-router/.gitignore","sizeBytes":347,"mtimeMs":1786638239526.0474,"sha256":"d8ff838bc95ab409c39ea2a5503df0ecd1ecf4e8b27f1af15cc79422b1ddf398"}
+{"path":"ollama-router/.gitignore","sizeBytes":398,"mtimeMs":1786644398531.9133,"sha256":"27becf2eb16c1821566365da2c0af3da11bf6ee0e450b432637a7a3ea6e45290"}
 {"path":"ollama-router/.opencode/.gitignore","sizeBytes":166,"mtimeMs":1786618427388.178,"sha256":"8434a2b47131f43aedf64cf7ab01c5c7b415f5899028b58f91929c8760594852"}
 {"path":"ollama-router/.opencode/AGENTS.md","sizeBytes":2025,"mtimeMs":1786643707337.5007,"sha256":"c8342011a47049653d46ce09508e2d8ec547d034caf130267ddd4c7025b68e99"}
 {"path":"ollama-router/.opencode/opencode.json","sizeBytes":120,"mtimeMs":1786623513954.2095,"sha256":"e820ad06c7032860ef808b8693cdf776a5f5706ea1ee3b423f613b290035990e"}
@@ -48,7 +48,7 @@
 {"path":"ollama-router/.opencode/plugins/rag-plugin.js","sizeBytes":168,"mtimeMs":1786618427388.178,"sha256":"21a215b493293cbb4a04f97904436f6f67462340940a111c1979c2cd68922e24"}
 {"path":"ollama-router/.opencode/plugins/rag-tui.js","sizeBytes":93,"mtimeMs":1786618427388.178,"sha256":"9ecc005ffd73db8b58d57bccb1e3749ccdef071ed4a0496e7f3cd84dd93a4bbf"}
 {"path":"ollama-router/.opencode/tui.json","sizeBytes":49,"mtimeMs":1786618427388.178,"sha256":"206fec1dd5800f7d25496d7ecbd7ea7cda13ae00825207db7f76eeed88921278"}
-{"path":"ollama-router/.opencode/wiki/concepts/ollama-capacity-discovery.md","sizeBytes":5327,"mtimeMs":1786643248438.2566,"sha256":"1df657a7451591a7ebae1853803a11abf412cb278b58621bb456475bec4b1219"}
+{"path":"ollama-router/.opencode/wiki/concepts/ollama-capacity-discovery.md","sizeBytes":5526,"mtimeMs":1786644547136.112,"sha256":"0975645af80daecc72fb60fa842dbc6fdec7b6460f2eec606b5715254dea8b64"}
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-cloud-vram-guardrails.md","sizeBytes":870,"mtimeMs":1786617787017.933,"sha256":"284ec166b093a1853d8282301ebd61ba5d6fde4c3df5713019b9df25d33901c8"}
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-audit-remediation.md","sizeBytes":1812,"mtimeMs":1786617772002.2324,"sha256":"84884076f5f70891089f57134e27b9826d182197cd75c877c6ec2f4282777a0e"}
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-durable-model-operations.md","sizeBytes":1659,"mtimeMs":1786639302386.537,"sha256":"e7413c223fb5ec4917ebf19974cbd26a67bf278880982ed56208d948e935d095"}
@@ -57,7 +57,7 @@
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-phase-3-retry-and-memory-safety.md","sizeBytes":1357,"mtimeMs":1786617777039.1812,"sha256":"dd78dda249dee8275ab952e985587d92e8a2314e44ba5b9b763a368da2af3804"}
 {"path":"ollama-router/.opencode/wiki/concepts/ollama-router-product.md","sizeBytes":2985,"mtimeMs":1786639007716.4036,"sha256":"321d4f47977c9a38e186355b6dce5ba331917f69e6c722e8eb2cb71f2f52423d"}
 {"path":"ollama-router/.opencode/wiki/index.md","sizeBytes":1044,"mtimeMs":1786617739520.2847,"sha256":"659ac0d2297b43a7df907d805f37c3a018e977ef6adc522bac2516ea6f067e42"}
-{"path":"ollama-router/AGENTS.md","sizeBytes":8876,"mtimeMs":1786643707337.8027,"sha256":"e8e5f2da9d888048aa12e2e455fab50e54c8b4feb58f5723a136b2c8fd3e3903"}
+{"path":"ollama-router/AGENTS.md","sizeBytes":9322,"mtimeMs":1786644074764.0347,"sha256":"6e00850af209d49999dd03bd3ca3a976b477df96807b4f7351f124e76c6f55d0"}
 {"path":"ollama-router/Cargo.lock","sizeBytes":100460,"mtimeMs":1786638568599.1428,"sha256":"edf5af8444042e627ae6b0c159d767b1fc2acefe4c5179782c796da1dfc89e9a"}
 {"path":"ollama-router/Cargo.toml","sizeBytes":1597,"mtimeMs":1786638160652.7385,"sha256":"90722b42d5bcfb510f890b2f582f92b86326ba6818e5bdaf1ba8cbef864fbcb7"}
 {"path":"ollama-router/config.overlay.example.yaml","sizeBytes":1286,"mtimeMs":1786639072824.5952,"sha256":"c428dafca742c4058fe1a57c91f1e9829c7269e183c321cbd93250d6066d8889"}
@@ -67,7 +67,7 @@
 {"path":"ollama-router/crates/ollama-router-core/src/capacity/client.rs","sizeBytes":4802,"mtimeMs":1786638172515.6523,"sha256":"95ed1bb5357840f0edd8b36ea472d6c421b2c5b7cccdd549d8d1b2a9180fb978"}
 {"path":"ollama-router/crates/ollama-router-core/src/capacity/merge.rs","sizeBytes":3041,"mtimeMs":1786638182263.334,"sha256":"bd2c8891b334868389da8b9f34fd47036c1ccbad0e6ee8915891989e9837c86c"}
 {"path":"ollama-router/crates/ollama-router-core/src/capacity/mod.rs","sizeBytes":585,"mtimeMs":1786638170646.0989,"sha256":"2b51f8077f40cb32e3870a900651cef0205bdf333953edf287b0b5e93c500a18"}
-{"path":"ollama-router/crates/ollama-router-core/src/capacity/tests.rs","sizeBytes":6869,"mtimeMs":1786626700504.4148,"sha256":"253e7604c0bc7cd3eecbb4bf4997cfdb9719b24b0c82ab6c530861130da3f53d"}
+{"path":"ollama-router/crates/ollama-router-core/src/capacity/tests.rs","sizeBytes":8808,"mtimeMs":1786644531697.693,"sha256":"dade2941e677ee09e346773ab1f6381eee31f1464482936931c7a90c4e4de2e4"}
 {"path":"ollama-router/crates/ollama-router-core/src/capacity/types.rs","sizeBytes":693,"mtimeMs":1786638642596.6543,"sha256":"d0d0cf6c2f56000395b120ad0b95c72733e94739dd8cfefda3b04c8d5c1510c7"}
 {"path":"ollama-router/crates/ollama-router-core/src/cloud/mod.rs","sizeBytes":7673,"mtimeMs":1786635828773.9688,"sha256":"05ed92592343292a34841cbecccce0d1a8006604318bc534c2ddf12d6ac23136"}
 {"path":"ollama-router/crates/ollama-router-core/src/config/env_source.rs","sizeBytes":875,"mtimeMs":1786624357216.7637,"sha256":"f7908a6e5e30ccc9e1a6fbd5d2724206b64563f9da27b027be3a8a3c529bc0e5"}
@@ -81,7 +81,7 @@
 {"path":"ollama-router/crates/ollama-router-core/src/fleet/file.rs","sizeBytes":7706,"mtimeMs":1786625270541.0513,"sha256":"b7d2c288320c11c2dcfee62b1166a68babfcc2678adcdc311bb9dd80afce24ba"}
 {"path":"ollama-router/crates/ollama-router-core/src/fleet/ids.rs","sizeBytes":2012,"mtimeMs":1786620468417.966,"sha256":"355e177b9cb09fea1093890487ea45ac61d4f11a0d63a4db18257f71f147eebe"}
 {"path":"ollama-router/crates/ollama-router-core/src/fleet/mod.rs","sizeBytes":742,"mtimeMs":1786642515280.2676,"sha256":"6304af6a610fae3e7166e461c9f79c3c9de9ec9624db39f80f8052647993428c"}
-{"path":"ollama-router/crates/ollama-router-core/src/fleet/registry.rs","sizeBytes":45980,"mtimeMs":1786642556977.3691,"sha256":"88537b60f27aefc7a205ddfdd1d77c0fc78ac0296a62d25c20dc3f6bde4912d5"}
+{"path":"ollama-router/crates/ollama-router-core/src/fleet/registry.rs","sizeBytes":46840,"mtimeMs":1786644546851.726,"sha256":"3e284bf43c69e87d4f4e20a1311ce322ee13f0628207ea95e5623d5930b74916"}
 {"path":"ollama-router/crates/ollama-router-core/src/fleet/state.rs","sizeBytes":18512,"mtimeMs":1786622954457.2446,"sha256":"a829a9f0317f78c53593ed7e06b52ca2fd63746da342061f2bf9fbf72b1435a7"}
 {"path":"ollama-router/crates/ollama-router-core/src/fleet/tailscale.rs","sizeBytes":4919,"mtimeMs":1786626700514.415,"sha256":"259ad197cdaa6eb2cc368ea5020c4c8ee46d09bb1dae670551c087b8776143b1"}
 {"path":"ollama-router/crates/ollama-router-core/src/jobs/migrations/001_model_operations.sql","sizeBytes":268,"mtimeMs":1786629015593.0803,"sha256":"eecdaa6d6bf41bb6f4ecad5826838f635d96d23dbc5af92ad50c795bd528e9f9"}
@@ -163,7 +163,7 @@
 {"path":"ollama-router/crates/ollama-node-agent/src/config.rs","sizeBytes":6699,"mtimeMs":1786638939665.1455,"sha256":"5a5c6881346604e26062b672a4f79e7bffbb0d7c88b280f464fd3621550b1ac4"}
 {"path":"ollama-router/crates/ollama-node-agent/src/listen.rs","sizeBytes":5082,"mtimeMs":1786639052708.3452,"sha256":"6fb4b50372ada81dc4b2584c0fc2c39494ad5270328d01dde6e69758d85f2709"}
 {"path":"ollama-router/crates/ollama-node-agent/src/redact.rs","sizeBytes":712,"mtimeMs":1786638286464.8008,"sha256":"0f7acfb57c4efa7337615bd89c0f9f622c53781ad972faf2f09b422936118b6c"}
-{"path":"ollama-router/crates/ollama-node-agent/src/collect/mod.rs","sizeBytes":22263,"mtimeMs":1786643248438.0603,"sha256":"281fa89a27d56deb6f1d603b19c48c659e2cb027155c3b47adec75666cf07540"}
+{"path":"ollama-router/crates/ollama-node-agent/src/collect/mod.rs","sizeBytes":26025,"mtimeMs":1786644668794.8616,"sha256":"1c0738b10264bb199b326a0826129eab8698d91bef995472a98b7d9ec8b5ba40"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/nvidia.rs","sizeBytes":7063,"mtimeMs":1786643248436.6152,"sha256":"8b271ddde052f3785c11ba30ac4192c1d2b74973f90365d391b13da893cc1632"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/pressure.rs","sizeBytes":7152,"mtimeMs":1786642794012.0183,"sha256":"eafb2f11489be78582a9c86b42f9e04d2d7e6a8ba9c404b82ffb3c225463cdb1"}
 {"path":"ollama-router/crates/ollama-node-agent/src/http.rs","sizeBytes":5587,"mtimeMs":1786643248437.3015,"sha256":"95765aa7072d66624e27347f38e6f3c88537f5f67e0f70d4fe854319ad4de65a"}
@@ -182,13 +182,14 @@
 {"path":"ollama-router/crates/ollama-node-agent/config.docker.yaml","sizeBytes":239,"mtimeMs":1786639042609.134,"sha256":"b40160f1317363fb08ed2f7f32587dedf5a86b56b0caba929ac4722b7e2540c8"}
 {"path":"ollama-router/Dockerfile.agent","sizeBytes":1429,"mtimeMs":1786638952126.0095,"sha256":"9e0555bdefca815ce59afe98dc3f20ed2957b5ee5f9263cf7aac45c7d577e33b"}
 {"path":"ollama-router/.cursor/settings.json","sizeBytes":78,"mtimeMs":1786639773081.226,"sha256":"7830ccce27688a00ec3571aecd626c74be4df9bc55947679e0b945dd655eb415"}
-{"path":"ollama-router/deploy/observability/grafana/dashboards/ollama-router-nodes.json","sizeBytes":99043,"mtimeMs":1786643248436.6152,"sha256":"f5c3814bce91ce5e9f245d1e1dd52d1d4cf07ff1c7f5e1bd478271dba86161bc"}
+{"path":"ollama-router/deploy/observability/grafana/dashboards/ollama-router-nodes.json","sizeBytes":99134,"mtimeMs":1786644585202.5535,"sha256":"05c4e8a7949e5cd368efce3c5dc869e40c5f3a8c27dd8988fb6324c4ee111b70"}
 {"path":"ollama-router/.cursor/rules/opencode-rag.mdc","sizeBytes":1296,"mtimeMs":1786643707337.5889,"sha256":"6c7f50bccd2aaa2a0a9eb176dce6d7ae53404f24f4c2c358ff4ed3dcbf3d7e71"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/cpu.rs","sizeBytes":441,"mtimeMs":1786642735871.2607,"sha256":"d52cc14ff38c9db64542a0f7bff275dd68fe894fe485ce467aeb998ff257bea6"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/disk.rs","sizeBytes":2289,"mtimeMs":1786642742093.2844,"sha256":"d92ab8464e650cd899761885ea1ba5009cde395a2992d3af059ae5839028507a"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/metal.rs","sizeBytes":1727,"mtimeMs":1786642762967.2654,"sha256":"8986493505f3bb4b32258d8c41aa6e82f7a0485fb374bc46366b9b3759a23969"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/psi.rs","sizeBytes":1641,"mtimeMs":1786643182326.9636,"sha256":"9629ddd66b608abb289ea62661d893ec8c843036dcd10794ac363ea578ac7ad3"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/ram.rs","sizeBytes":224,"mtimeMs":1786642727436.3936,"sha256":"c60148c14458496c5ef8788cd95a5de0b58a8db787c9514e19551ac1b97c8a61"}
-{"path":"ollama-router/crates/ollama-node-agent/src/collect/rocm.rs","sizeBytes":3203,"mtimeMs":1786643182327.9636,"sha256":"8b1edee9d208cb8931b6911277674335d7fd04bdaa00c3120793b59f90dbdba0"}
+{"path":"ollama-router/crates/ollama-node-agent/src/collect/rocm.rs","sizeBytes":27283,"mtimeMs":1786644672923.1243,"sha256":"42041b85596109ef49b64fda1f2f794fe19f5170f39a12461b848689bbb7ab08"}
 {"path":"ollama-router/crates/ollama-node-agent/src/collect/windows_gpu.rs","sizeBytes":668,"mtimeMs":1786642763326.6963,"sha256":"3553115c4a707dfe154d26cc0d4ac6ebd02d5b9fae5e8cc8226e2ffa754c9bb9"}
 {"path":"ollama-router/crates/ollama-router/tests/metrics_node.rs","sizeBytes":3825,"mtimeMs":1786643248436.7126,"sha256":"26204a5e3f65dcc24eb6612606b6e4c8edb34c722456d7f44da82c29fb527dba"}
+{"path":"ollama-router/crates/ollama-router-core/tests/fixtures/capacity-rocm.json","sizeBytes":970,"mtimeMs":1786644523135.7966,"sha256":"5ed4880ac3927dacdfbb6950600e4c409ea1095a3d350d9709af5099fa5ec176"}
