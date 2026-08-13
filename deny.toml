@@ -1,5 +1,6 @@
 # cargo-deny: advisories + bans. Licenses stay light until the workspace exists.
 # See AGENTS.md — rustls only; openssl / native-tls are forbidden.
+# Do not set [bans].allow — that becomes an exclusive allowlist and fails CI.
 
 [graph]
 all-features = true
@@ -15,7 +16,4 @@ deny = [
     { name = "openssl" },
     { name = "openssl-sys" },
     { name = "native-tls" },
-]
-allow = [
-    { name = "rustls" },
 ]

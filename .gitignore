@@ -13,6 +13,9 @@ node_modules/
 id_ed25519*
 id_rsa*
 *.p12
+*.sqlite3
+
+.task/
 
 .idea/
 .vscode/

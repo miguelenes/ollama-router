@@ -6,7 +6,7 @@ alwaysApply: true
 # Rust
 
 - Edition **2021**. rustc pin **1.97**. Committed `Cargo.lock`.
-- `cargo fmt --all`. CI: `cargo clippy --workspace --all-targets -- -D warnings`.
+- `cargo fmt --all`. Local gate: `task check`. CI: `cargo clippy --workspace --all-targets -- -D warnings`.
 - Libraries: `thiserror`. Binary only: `anyhow`. No `unwrap`/`expect` in non-test lib code.
 - TLS: reqwest `rustls-tls`. Never `native-tls` or `openssl` / `openssl-sys` (`deny.toml` bans them).
 - Logs: `tracing` JSON. Never `println!` in services.
@@ -16,7 +16,8 @@ alwaysApply: true
   - Tokio: `/tokio-rs/tokio` or `/websites/rs_tokio`
   - reqwest: `/seanmonstar/reqwest` or `/websites/rs_reqwest`
   - tower-http: `/websites/rs_tower-http`
-- Later Dockerfile: multi-stage `rust:1.97-slim` → debian-slim, non-root. **HEALTHCHECK must not use Python.**
+- **docsrs MCP** for rustdoc JSON (signatures, fields, trait impls). Follow skill `docsrs-mcp`. Fallback when Context7 is quota-limited.
+- Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root. **HEALTHCHECK** `curl` to `/healthz` (never Python).
 
 ```rust
 // BAD — panic in a library path

@@ -1,0 +1,40 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Local gate (fmt, clippy, test, deny)
+    cmds:
+      - task: check
+
+  fmt:
+    desc: cargo fmt --check
+    cmds:
+      - cargo fmt --all -- --check
+
+  clippy:
+    desc: cargo clippy -D warnings
+    cmds:
+      - cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    desc: cargo test --locked
+    cmds:
+      - cargo test --workspace --locked
+
+  deny:
+    desc: cargo deny advisories + bans
+    cmds:
+      - cargo deny check advisories bans
+
+  check:
+    desc: Sequential fmt, clippy, test, deny (do not parallelize — cargo target lock)
+    cmds:
+      - task: fmt
+      - task: clippy
+      - task: test
+      - task: deny
+
+  docker:
+    desc: Build ollama-router:local
+    cmds:
+      - docker build -t ollama-router:local .

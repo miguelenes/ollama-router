@@ -1,0 +1,13 @@
+[package]
+name = "ollama-router-verda"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Verda Cloud NVIDIA spot client, selector, and fleet manager"
+
+[lints]
+workspace = true
+
+[dependencies]
+ollama-router-core = { path = "../ollama-router-core" }

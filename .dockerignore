@@ -1,0 +1,8 @@
+/target
+.git
+.github
+.cursor
+.opencode
+.agents
+*.md
+!README.md

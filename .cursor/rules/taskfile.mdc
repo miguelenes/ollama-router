@@ -1,0 +1,21 @@
+---
+description: Local recipes use Task (Taskfile.yml), never Make or just
+alwaysApply: true
+---
+
+# Taskfile
+
+Local commands live in root `Taskfile.yml` ([Task](https://taskfile.dev/)). Do **not** add a Makefile, justfile, or npm scripts for cargo/docker.
+
+```bash
+task              # same as task check
+task check        # sequential fmt, clippy, test, deny
+task docker       # docker build -t ollama-router:local .
+task --list
+```
+
+`check` must stay sequential (`cmds` + `task:`). Do not use Task `deps:` for cargo steps — they run in parallel and contend on `target/`.
+
+CI in `.github/workflows/ci.yml` runs `cargo` / `docker` directly. Do not install `task` in GitHub Actions.
+
+Ignore `.task/` (checksum cache).

@@ -1,0 +1,10 @@
+[package]
+name = "ollama-router-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Routing, fleet, config, capacity, cloud, and job types for ollama-router"
+
+[lints]
+workspace = true

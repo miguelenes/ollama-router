@@ -1,0 +1,26 @@
+[package]
+name = "ollama-router"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Ollama-compatible fleet proxy (Axum / Tokio)"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+clap.workspace = true
+ollama-router-core = { path = "../ollama-router-core" }
+ollama-router-verda = { path = "../ollama-router-verda" }
+serde.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+http-body-util.workspace = true
+serde_json.workspace = true
+tower.workspace = true

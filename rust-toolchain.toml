@@ -1,0 +1,6 @@
+# Keep in sync with Dockerfile builder (rust:1.97-slim-bookworm).
+# MSRV is this pin — bump when a new stable Docker tag ships.
+[toolchain]
+channel = "1.97"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
