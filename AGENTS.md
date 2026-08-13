@@ -100,10 +100,14 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 ## Learned User Preferences
 
 - Keep Context7 and docsrs-mcp as global Cursor/OpenCode MCP servers; leave project `.cursor/mcp.json` `mcpServers` empty and never commit API keys there.
+- Pin GitHub Actions to version tags (`actions/checkout@v7`, `Swatinem/rust-cache@v2`, `github/codeql-action@v4`), never commit SHAs.
 
 ## Learned Workspace Facts
 
 - cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
+- GitHub artifact attestations fail on user-owned private repos; gate `actions/attest-build-provenance` with `if: ${{ !github.event.repository.private }}` until the repo is public.
+- Trust the capacity-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs (`ram_elevated_*`, `ram_swap_*`, `ram_load_*`). Keep VRAM/RAM headroom and the reservation ledger.
+- Capacity-agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml), not Verda or agent payloads.
 
 <!-- BEGIN opencode-rag -->
 ## Code Navigation
