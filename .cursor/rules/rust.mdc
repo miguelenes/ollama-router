@@ -1,0 +1,27 @@
+---
+description: Rust edition, clippy, rustfmt, errors, TLS, and Context7 for this workspace
+alwaysApply: true
+---
+
+# Rust
+
+- Edition **2021**. rustc pin **1.97**. Committed `Cargo.lock`.
+- `cargo fmt --all`. CI: `cargo clippy --workspace --all-targets -- -D warnings`.
+- Libraries: `thiserror`. Binary only: `anyhow`. No `unwrap`/`expect` in non-test lib code.
+- TLS: reqwest `rustls-tls`. Never `native-tls` or `openssl` / `openssl-sys` (`deny.toml` bans them).
+- Logs: `tracing` JSON. Never `println!` in services.
+- Verda DTOs: serde **ignore extras**. Do not use `deny_unknown_fields`.
+- **Context7** before Axum / Tokio / reqwest / tower-http API work. Prefer docs.rs IDs for coverage, GitHub IDs when pinning a version. No Axum 0.8 skill exists — do not follow Axum 0.7 GraphQL/WS guides.
+  - Axum 0.8: `/tokio-rs/axum` (version `axum_v0_8_4`) or `/websites/rs_axum`
+  - Tokio: `/tokio-rs/tokio` or `/websites/rs_tokio`
+  - reqwest: `/seanmonstar/reqwest` or `/websites/rs_reqwest`
+  - tower-http: `/websites/rs_tower-http`
+- Later Dockerfile: multi-stage `rust:1.97-slim` → debian-slim, non-root. **HEALTHCHECK must not use Python.**
+
+```rust
+// BAD — panic in a library path
+let url = node.url.as_ref().unwrap();
+
+// GOOD
+let url = node.url.as_ref().ok_or(FleetError::PublicUrlBlocked)?;
+```

@@ -1,0 +1,33 @@
+---
+description: Verda OAuth2, cheapest NVIDIA spot in 8–80 GiB, Tailscale SSH handoff
+globs: "**/verda/**"
+alwaysApply: false
+---
+
+# Verda
+
+- OAuth2 **client-credentials**. Pre-refresh with leeway; one 401 retry; honor 429 `Retry-After`.
+- DTOs: serde **ignore unknown fields**. Never log tokens or secrets.
+- Selector is a **pure function**: join `GET /v1/instance-availability` × `GET /v1/instance-types`.
+- Filters: NVIDIA GPU only, spot price present, inclusive **8–80 GiB** VRAM
+  (`VERDA_MIN_VRAM_GB` / `VERDA_MAX_VRAM_GB`), type allow/deny, location allowlist,
+  optional `max_spot_price_per_hour`.
+- Rank: cheapest spot, then smallest VRAM, then fewest GPUs, then location preference.
+  Never default to huge SKUs.
+- Provision: public SSH bootstrap → ordinary **OpenSSH over Tailscale** (not Tailscale SSH).
+  Register an Ollama URL only after OpenSSH + `/api/tags` succeed on the tailnet.
+  Public `:11434` is never a routing URL.
+- Destroy with `delete_permanently` (spot billing stops only on delete).
+- httpmock in tests. **No live Verda.**
+
+```rust
+// BAD
+#[serde(deny_unknown_fields)]
+struct InstanceType { /* … */ }
+
+// GOOD
+#[serde(default)] // unknown API fields ignored
+struct InstanceType { /* needed fields only */ }
+```
+
+See `.opencode/wiki/concepts/ollama-cloud-vram-guardrails.md`. Skill: `verda-spot-fleet`.

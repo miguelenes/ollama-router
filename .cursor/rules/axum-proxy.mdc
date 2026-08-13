@@ -1,0 +1,32 @@
+---
+description: Stream NDJSON; retry only before the first upstream byte
+globs: "**/{proxy,http}/**"
+alwaysApply: false
+---
+
+# Axum proxy
+
+- Stream upstream NDJSON. Do not buffer the full response.
+- Cap request bodies **before** buffering.
+- Retry another node **only pre-first-byte** (connect/timeout/overload statuses).
+  Once a stream has begun, never retry.
+- Rewrite `/api/embeddings` → `/api/embed` (Ollama ≤0.32 compat, not debt).
+- `GET /api/tags` is the **aggregated union** across healthy nodes.
+- Capacity / saturation / no-healthy → Ollama-shaped **503** + `Retry-After`.
+- Nonretryable pre-response upstream failures → Ollama-shaped **502**, not raw framework errors.
+- `IncrementalCollector`: cap an unterminated NDJSON frame at **1 MiB**; never alter forwarded chunks.
+- Never log bodies. `inflight_inc` only on generate/chat/embed client forwards.
+
+```rust
+// BAD — retry after streaming started
+while let Some(chunk) = stream.next().await {
+    if chunk.is_err() { return retry_other_node().await; }
+}
+
+// GOOD — retry only before first byte; then pipe
+let resp = client.send().await?; // retryable here
+let mut stream = resp.bytes_stream(); // not retryable after this
+```
+
+See `.opencode/wiki/concepts/ollama-router-phase-3-retry-and-memory-safety.md`.
+Skill: `ollama-compat-proxy`.

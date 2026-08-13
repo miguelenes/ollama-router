@@ -1,0 +1,28 @@
+---
+description: Never log bodies, prompts, tokens, Tailscale keys, or SSH keys
+alwaysApply: true
+---
+
+# Sensitivity
+
+Treat proxied Ollama traffic and cloud credentials as secrets.
+
+**Never log or persist:** request/response bodies, prompts, embeddings, `/api/chat`
+messages, Verda access/refresh tokens or client secrets, Tailscale auth keys,
+SSH private keys, `OLLAMA_ROUTER_ADMIN_TOKEN`, capacity bearer tokens.
+
+**Allowlist:** node id, model name, request class, status code, latency, reason
+codes (`no_healthy`, `saturated`, `public_url_blocked`), instance type, location,
+spot price, VRAM GiB.
+
+SQLite job store (`/var/lib/ollama-router/model-operations.sqlite3`) keeps
+operation id, kind, status, timestamps, normalized models/nodes, per-target
+status. Upstream bodies and per-target `detail` strings stay memory-only.
+
+```rust
+// BAD
+tracing::info!(body = %payload, token = %access_token, "verda create");
+
+// GOOD
+tracing::info!(instance_type, location_code, spot_price, vram_gb, "verda create");
+```

@@ -1,0 +1,30 @@
+---
+description: Unit tests for pure fns, httpmock for HTTP, no live Verda
+globs: "**/*.rs"
+alwaysApply: false
+---
+
+# Testing
+
+- Pure fns (selector, `rank_nodes`, `classify`, load key): unit tests **next to the module**.
+- HTTP (Verda API, Ollama upstream, capacity agent): **httpmock**. Never hit live Verda.
+- Integration under workspace `tests/`.
+- **proptest** for Verda selector ranking and WLC sort (utilization dominates preference).
+- No Thunder/RunPod fixtures, types, env knobs, or route tests.
+- Do not log bodies/tokens in test output. Capacity fixtures must use GiB = `1024³`.
+
+```rust
+// BAD
+#[tokio::test]
+async fn picks_a_gpu() {
+    let client = VerdaClient::from_env(); // live cloud
+    let _ = client.create().await.unwrap();
+}
+
+// GOOD
+#[test]
+fn cheapest_nvidia_spot_wins() {
+    let ranked = rank_candidates(availability, types, &config);
+    assert_eq!(ranked[0].instance_type, "gpu-8gb-spot");
+}
+```

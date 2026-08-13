@@ -1,0 +1,31 @@
+---
+description: Env-first fleet, Tailscale-only cloud URLs, Verda spots, idle from client forwards
+alwaysApply: true
+---
+
+# Fleet invariants
+
+- Inventory: `OLLAMA_HOST_NN_*` + FleetState + Verda. YAML tunables only.
+  Top-level YAML `nodes:` → hard config error. Tests may use `OLLAMA_ROUTER_NODES`.
+- **Verda spots only.** No Thunder, no RunPod, no `THUNDER_*`/`RUNPOD_*`, no
+  `**/thunder/**` or `**/runpod/**`, no admin routes or tests for them.
+- Cloud Ollama URLs are **Tailscale-only**. Public `:11434` → `public_url_blocked`,
+  never healthy. No public-proxy fallback.
+- Idle: `last_client_request_at` only from `inflight_inc` on generate/chat/embed.
+  Health, `/api/ps`, capacity, admin, warm-keeper do not count. Env `OLLAMA_HOST_NN_*`
+  hosts are never destroyed. Verda teardown uses `delete_permanently`. Failed
+  destroy retains FleetState ownership. Capacity miss → async `ensure` + **503 + Retry-After**.
+- Admin `/router/v1/*`: bearer `OLLAMA_ROUTER_ADMIN_TOKEN`. Unset → 403, no default.
+
+```yaml
+# BAD — YAML inventory
+nodes:
+  - id: local
+    url: http://127.0.0.1:11434
+
+# GOOD — tunables only; membership is env + FleetState + Verda
+policy:
+  default_max_inflight: 2
+```
+
+See `.opencode/wiki/concepts/ollama-router-product.md` and `ollama-router-idle-scale-down.md`.

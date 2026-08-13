@@ -1,0 +1,48 @@
+---
+description: MemoryAI shared memory + 15-turn work-snapshot guard
+alwaysApply: true
+---
+
+# MemoryAI — shared memory + 15-turn work-snapshot guard
+
+Calls the MCP server "memoryai". Window hint for this host: 1000000 tokens.
+
+## Resume first (start of every session)
+1. On the FIRST turn, call memory_bootstrap once.
+2. Then call memory_recall SPECIFICALLY for the latest work snapshot:
+     query: "current work snapshot — what was I doing",
+     tags: ["work-snapshot"], since: "24h", limit: 3.
+   This narrows the pool to recent snapshots so the NEWEST one ranks first
+   (recall is time-weighted within a filtered set). CONTINUE that most-recent
+   snapshot — this is how a chat opened after a /compact or a fresh window
+   resumes the in-progress job seamlessly. If nothing returns, widen: drop the
+   since filter and recall again.
+3. If the user references past work/decisions, recall (without the snapshot
+   tag) before answering.
+4. Skip recall on trivial small-talk.
+
+## Capture as you go (silent)
+- When a turn produces a decision, preference, important fact, lesson from a
+  mistake (pitfall), or reusable procedure, call memory_store with the right
+  memory_type. Never store secrets. This runs silently.
+
+## Every 15 assistant turns — work snapshot + handoff
+Count your assistant turns. Each time the count reaches a multiple of 15
+(15, 30, 45 ...):
+1. Call memory_store with ONE consolidated work-snapshot chunk:
+     content_type: "todo", memory_type: "goal", importance: 0.9,
+     tags: ["work-snapshot", "resume"],
+     content: a compact summary of — the GOAL, key DECISIONS so far, the
+     CURRENT step, and the NEXT step. Write it so a fresh session could pick up
+     with zero extra context.
+2. Also call ide_turn_check (turn_count, max_tokens=1000000, model if
+   known) and follow its action_prompt verbatim.
+3. Then surface ONE short line to the user (this is the only allowed notice):
+     "Saved a work snapshot to MemoryAI (turn N). You can /compact or open a
+      new chat — I'll recall it and continue exactly where we left off."
+
+## Rules
+- All saving is silent except the single handoff line above.
+- The work snapshot is a fresh chunk each 15-turn mark; recall always prefers
+  the newest, so resume reflects the latest state.
+- Never mention the memory system otherwise.
