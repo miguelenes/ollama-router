@@ -128,9 +128,10 @@ curl -fsS http://127.0.0.1:11435/api/embed \
 task obs:open
 # http://127.0.0.1:3000/d/ollama-router/ollama-router
 # http://127.0.0.1:3000/d/ollama-router-nodes/ollama-router-nodes
+# http://127.0.0.1:3000/d/ollama-router-jobs/ollama-router-jobs
 ```
 
-Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Prometheus scrapes the router and mock `:11436` (`ollama_up`, `ollama_models`; counts only, no model names). Grafana is anonymous Admin on loopback (no login form). Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
+Local compose binds loopback only: router **11435**, Grafana **3000**, Prometheus **9090**. Loki, Alloy, and Alertmanager stay on the compose network. Prometheus scrapes the router and mock `:11436` (`ollama_up`, `ollama_models`; counts only, no model names). Grafana is anonymous Admin on loopback (no login form). The Model operations dashboard (`/d/ollama-router-jobs`) shows terminal pull/delete counters, auto-pull wait, and placement/disk — it does not replace the fleet overview home dashboard. Alloy mounts the Docker socket **read-only** so it can tail the `router` container — local-dev only. `task compose:down` keeps the `grafana-data` volume (no `-v`). `OLLAMA_ROUTER_ADMIN_TOKEN` is unset; `/router/v1/*` returns 403. Compose sets `OLLAMA_ROUTER_AUTO_PULL_ON_MISS=true` so a generate/chat/embed miss enqueues a placement-aware fleet pull (503 `pull_enqueued` + Retry-After). The committed default in `router.defaults.yaml` stays **false**.
 
 ## Develop
 

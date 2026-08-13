@@ -65,10 +65,11 @@ tasks:
       - docker compose -f deploy/compose.yaml logs -f
 
   obs:open:
-    desc: Print local Grafana dashboard URLs (fleet overview + nodes)
+    desc: Print local Grafana dashboard URLs (fleet overview, nodes, model operations)
     cmds:
       - echo http://127.0.0.1:3000/d/ollama-router/ollama-router
       - echo http://127.0.0.1:3000/d/ollama-router-nodes/ollama-router-nodes
+      - echo http://127.0.0.1:3000/d/ollama-router-jobs/ollama-router-jobs
 
   agent:build:
     desc: Build ollama-node-agent

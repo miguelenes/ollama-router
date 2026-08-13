@@ -18,6 +18,18 @@
       "tooltip": "Per-node health, load, and capacity",
       "type": "link",
       "url": "/d/ollama-router-nodes/ollama-router-nodes"
+    },
+    {
+      "asDropdown": false,
+      "icon": "dashboard",
+      "includeVars": false,
+      "keepTime": true,
+      "tags": [],
+      "targetBlank": false,
+      "title": "Model operations",
+      "tooltip": "Pull/delete jobs and auto_pull_on_miss",
+      "type": "link",
+      "url": "/d/ollama-router-jobs/ollama-router-jobs"
     }
   ],
   "liveNow": false,
