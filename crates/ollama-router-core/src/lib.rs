@@ -7,15 +7,20 @@ pub mod fleet;
 pub mod jobs;
 pub mod routing;
 
+pub use capacity::{
+    bytes_to_gib, capacity_target, merge_capacity, CapacityClient, CapacityError, CapacityProbe,
+    CapacityReport, CapacitySource, CapacityTarget, MergeOutcome, Pressure, PressureEnvelope,
+    BYTES_PER_GIB,
+};
 pub use cloud::{DemandScale, NoopDemandScale};
 pub use config::{
     hydrate_node_urls, load_config, load_config_from, parse_yaml, ConfigError, EnvSource, OsEnv,
     RouterConfig,
 };
 pub use fleet::{
-    load_fleet_nodes, parse_fleet_yaml, FleetState, FleetStateError, NodeId, NodeOrigin,
-    NodeSnapshot, PressureLevel, Registry, RouterId, VerdaInstanceId, VerdaNodePersist,
-    DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    load_fleet_nodes, parse_fleet_yaml, url_host_is_public_ipv4, FleetState, FleetStateError,
+    NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId, VerdaInstanceId,
+    VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use jobs::{JobOutcome, JobStatus, ModelOrchestrator, OrchestratorError, StubOrchestrator};
 pub use routing::{

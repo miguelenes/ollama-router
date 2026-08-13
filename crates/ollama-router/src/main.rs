@@ -5,6 +5,7 @@ use clap::Parser;
 use ollama_router::cli::{Cli, Commands};
 use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{make_app, AppState};
+use ollama_router::warm::run as run_warm;
 use ollama_router_core::load_config;
 
 fn not_implemented(command: &str) -> ! {
@@ -29,6 +30,9 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     let state = AppState::from_config(loaded).context("build app state")?;
     let app = make_app(state.clone());
     tokio::spawn(run_health(state.clone()));
+    if state.config.policy.model_warm_enabled {
+        tokio::spawn(run_warm(state.clone()));
+    }
     spawn_sighup_reloader(state.clone());
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)

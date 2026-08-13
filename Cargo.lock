@@ -1010,12 +1010,15 @@ name = "ollama-router-core"
 version = "0.1.0"
 dependencies = [
  "fs4",
+ "httpmock",
  "proptest",
+ "reqwest",
  "serde",
  "serde_json",
  "serde_yaml",
  "tempfile",
  "thiserror",
+ "tokio",
  "tracing",
  "url",
 ]

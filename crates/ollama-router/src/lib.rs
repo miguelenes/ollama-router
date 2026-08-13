@@ -5,6 +5,7 @@ pub mod health;
 pub mod http;
 pub mod provision;
 pub mod proxy;
+pub mod warm;
 
 pub use ollama_router_core as core;
 pub use ollama_router_verda as verda;

@@ -56,7 +56,10 @@ impl RoutingError {
 
     /// Whether this miss should kick async demand scale-up.
     pub fn requests_demand_scale_up(self) -> bool {
-        !matches!(self, Self::ModelMissing)
+        matches!(
+            self,
+            Self::NoNodes | Self::NoHealthy | Self::Saturated | Self::Capacity
+        )
     }
 }
 

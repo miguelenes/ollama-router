@@ -2,8 +2,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::SystemTime;
+use std::time::Instant;
 
+use crate::capacity::{merge_capacity, CapacityReport, CapacitySource};
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
 
@@ -101,11 +102,15 @@ pub struct NodeSnapshot {
     pub loaded_vram_gb: Option<f64>,
     pub ram_available_gb: Option<f64>,
     pub ram_available_ratio: Option<f64>,
+    pub vram_free_gb: Option<f64>,
     pub pressure_level: PressureLevel,
     pub fail_streak: u32,
     pub draining: bool,
     pub origin: NodeOrigin,
     pub capacity_url: Option<String>,
+    pub capacity_source: CapacitySource,
+    pub capacity_error: Option<String>,
+    pub unhealthy_reason: Option<String>,
 }
 
 impl NodeSnapshot {
@@ -176,7 +181,7 @@ struct NodeState {
     models: HashSet<String>,
     loaded_models: HashSet<String>,
     inflight: u32,
-    last_client_request_at: Option<SystemTime>,
+    last_client_request_at: Option<Instant>,
     loaded_vram_gb: Option<f64>,
     reserved_vram_gb: f64,
     reserved_ram_gb: f64,
@@ -185,15 +190,22 @@ struct NodeState {
     next_reservation_id: u64,
     ram_available_gb: Option<f64>,
     ram_available_ratio: Option<f64>,
+    vram_free_gb: Option<f64>,
     pressure_level: PressureLevel,
     capacity_effective: Capacity,
+    capacity_discovered: Option<Capacity>,
+    capacity_source: CapacitySource,
+    capacity_error: Option<String>,
+    unhealthy_reason: Option<String>,
+    next_probe_at: Instant,
+    probe_backoff: f64,
     origin: NodeOrigin,
     draining: bool,
 }
 
 impl NodeState {
     fn from_config(config: NodeConfig, origin: NodeOrigin) -> Self {
-        let capacity_effective = config.static_capacity.clone();
+        let merged = merge_capacity(&config.static_capacity, None, None);
         Self {
             config,
             healthy: false,
@@ -211,8 +223,15 @@ impl NodeState {
             next_reservation_id: 0,
             ram_available_gb: None,
             ram_available_ratio: None,
+            vram_free_gb: None,
             pressure_level: PressureLevel::Unknown,
-            capacity_effective,
+            capacity_effective: merged.capacity,
+            capacity_discovered: None,
+            capacity_source: merged.source,
+            capacity_error: None,
+            unhealthy_reason: None,
+            next_probe_at: Instant::now(),
+            probe_backoff: 0.0,
             origin,
             draining: false,
         }
@@ -225,8 +244,8 @@ impl NodeState {
         self.config.max_inflight = config.max_inflight;
         self.config.ssh = config.ssh;
         self.config.provision = config.provision;
-        self.config.static_capacity = config.static_capacity.clone();
-        merge_static_into_effective(&mut self.capacity_effective, &config.static_capacity);
+        self.config.static_capacity = config.static_capacity;
+        remarge(self);
         self.draining = false;
     }
 
@@ -246,11 +265,15 @@ impl NodeState {
             loaded_vram_gb: self.loaded_vram_gb,
             ram_available_gb: self.ram_available_gb,
             ram_available_ratio: self.ram_available_ratio,
+            vram_free_gb: self.vram_free_gb,
             pressure_level: self.pressure_level,
             fail_streak: self.fail_streak,
             draining: self.draining,
             origin: self.origin,
             capacity_url: self.config.capacity_url.clone(),
+            capacity_source: self.capacity_source,
+            capacity_error: self.capacity_error.clone(),
+            unhealthy_reason: self.unhealthy_reason.clone(),
         }
     }
 }
@@ -322,21 +345,104 @@ impl Registry {
         self.read().nodes.get(id).map(NodeState::snapshot)
     }
 
-    /// Mark a node healthy (tests and the future health checker).
+    /// Mark a node healthy (tests). Bypasses `success_threshold`.
     pub fn set_healthy(&self, id: &NodeId) {
         if let Some(node) = self.write().nodes.get_mut(id) {
             node.healthy = true;
             node.fail_streak = 0;
-            node.success_streak = 0;
+            node.success_streak = self.health.success_threshold;
+            node.unhealthy_reason = None;
+            node.probe_backoff = 0.0;
         }
     }
 
-    /// Mark a node unhealthy.
+    /// Mark a node unhealthy (tests).
     pub fn set_unhealthy(&self, id: &NodeId) {
+        self.mark_unhealthy(id, None);
+    }
+
+    /// Mark unhealthy with an allowlisted reason (`no_url`, `public_url_blocked`, …).
+    pub fn mark_unhealthy(&self, id: &NodeId, reason: Option<&str>) {
         if let Some(node) = self.write().nodes.get_mut(id) {
             node.healthy = false;
             node.success_streak = 0;
+            node.unhealthy_reason = reason.map(str::to_string);
         }
+    }
+
+    /// Immediate bench for missing / public URLs (fail streak at threshold).
+    pub fn mark_unreachable(&self, id: &NodeId, reason: &str) {
+        let mut inner = self.write();
+        let Some(node) = inner.nodes.get_mut(id) else {
+            return;
+        };
+        node.healthy = false;
+        node.success_streak = 0;
+        node.fail_streak = node.fail_streak.max(self.health.fail_streak_threshold);
+        node.unhealthy_reason = Some(reason.to_string());
+        node.probe_backoff = self.health.interval_seconds;
+        node.next_probe_at = Instant::now()
+            + std::time::Duration::from_secs_f64(self.health.interval_seconds.max(0.05));
+    }
+
+    /// Record a successful `/api/tags` probe. `success_threshold` gates recovery.
+    pub fn note_probe_success(&self, id: &NodeId) {
+        let threshold = self.health.success_threshold;
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.success_streak = node.success_streak.saturating_add(1);
+            node.fail_streak = 0;
+            if !node.healthy && node.success_streak >= threshold {
+                node.healthy = true;
+                node.unhealthy_reason = None;
+                node.probe_backoff = 0.0;
+            }
+        }
+    }
+
+    /// Record a failed `/api/tags` probe. Unhealthy once fail streak hits threshold.
+    pub fn note_probe_failure(&self, id: &NodeId, reason: &str) {
+        let threshold = self.health.fail_streak_threshold;
+        let interval = self.health.interval_seconds;
+        let backoff_max = self.health.backoff_max_seconds;
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.fail_streak = node.fail_streak.saturating_add(1);
+            node.success_streak = 0;
+            if node.healthy && node.fail_streak >= threshold {
+                node.healthy = false;
+                node.unhealthy_reason = Some(reason.to_string());
+            }
+            if !node.healthy {
+                let doubled = if node.probe_backoff > 0.0 {
+                    node.probe_backoff * 2.0
+                } else {
+                    interval
+                };
+                node.probe_backoff = doubled.max(interval).min(backoff_max);
+            } else {
+                node.probe_backoff = 0.0;
+            }
+        }
+    }
+
+    /// Schedule the next probe instant (health loop + tests).
+    pub fn set_next_probe_at(&self, id: &NodeId, at: Instant) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.next_probe_at = at;
+        }
+    }
+
+    /// When the next probe is due.
+    pub fn next_probe_at(&self, id: &NodeId) -> Option<Instant> {
+        self.read().nodes.get(id).map(|n| n.next_probe_at)
+    }
+
+    /// Current backoff delay in seconds (0 while healthy).
+    pub fn probe_backoff(&self, id: &NodeId) -> f64 {
+        self.read()
+            .nodes
+            .get(id)
+            .map(|n| n.probe_backoff)
+            .unwrap_or(0.0)
     }
 
     /// Replace the on-disk model set reported by `/api/tags`.
@@ -366,13 +472,14 @@ impl Registry {
             .collect();
         node.loaded_vram_gb = loaded_vram_gb;
         reconcile_ps_reservations(node);
+        remarge(node);
     }
 
     /// Admit a client generate/chat/embed forward. Writes `last_client_request_at`.
     pub fn inflight_inc(&self, id: &NodeId) {
         if let Some(node) = self.write().nodes.get_mut(id) {
             node.inflight = node.inflight.saturating_add(1);
-            node.last_client_request_at = Some(SystemTime::now());
+            node.last_client_request_at = Some(Instant::now());
         }
     }
 
@@ -385,8 +492,24 @@ impl Registry {
         sweep_drained(&mut inner);
     }
 
-    /// Wall-clock of last client generate/chat/embed (idle scale-down).
-    pub fn last_client_request_at(&self, id: &NodeId) -> Option<SystemTime> {
+    /// Occupy an inflight slot without touching idle (warm-keeper only).
+    pub fn occupancy_inc(&self, id: &NodeId) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.inflight = node.inflight.saturating_add(1);
+        }
+    }
+
+    /// Release a warm-keeper occupancy slot. Sweeps drained nodes.
+    pub fn occupancy_dec(&self, id: &NodeId) {
+        let mut inner = self.write();
+        if let Some(node) = inner.nodes.get_mut(id) {
+            node.inflight = node.inflight.saturating_sub(1);
+        }
+        sweep_drained(&mut inner);
+    }
+
+    /// In-process idle timestamp of last client generate/chat/embed.
+    pub fn last_client_request_at(&self, id: &NodeId) -> Option<Instant> {
         self.read()
             .nodes
             .get(id)
@@ -445,6 +568,7 @@ impl Registry {
         if node.healthy && node.fail_streak >= self.health.fail_streak_threshold {
             node.healthy = false;
             node.success_streak = 0;
+            node.unhealthy_reason = Some("probe_failures".into());
         }
     }
 
@@ -510,6 +634,37 @@ impl Registry {
     pub fn set_pressure_level(&self, id: &NodeId, level: PressureLevel) {
         if let Some(node) = self.write().nodes.get_mut(id) {
             node.pressure_level = level;
+        }
+    }
+
+    /// Merge a successful capacity-agent report. Never flips health.
+    pub fn apply_capacity_report(
+        &self,
+        id: &NodeId,
+        report: &CapacityReport,
+        pressure_level: Option<PressureLevel>,
+    ) {
+        let mut inner = self.write();
+        let Some(node) = inner.nodes.get_mut(id) else {
+            return;
+        };
+        node.capacity_discovered = Some(report.as_capacity());
+        node.vram_free_gb = Some(report.vram_free_gb);
+        if let Some(pressure) = report.pressure.as_ref() {
+            node.ram_available_gb = pressure.ram_available_gb;
+            node.ram_available_ratio = pressure.ram_available_ratio;
+        }
+        if let Some(level) = pressure_level {
+            node.pressure_level = level;
+        }
+        node.capacity_error = None;
+        remarge(node);
+    }
+
+    /// Allowlisted capacity miss (`http_status` / `timeout` / `unreachable` / `parse`).
+    pub fn set_capacity_error(&self, id: &NodeId, reason: &str) {
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.capacity_error = Some(reason.to_string());
         }
     }
 
@@ -607,19 +762,14 @@ impl Registry {
     }
 }
 
-fn merge_static_into_effective(effective: &mut Capacity, static_capacity: &Capacity) {
-    if static_capacity.vram_gb.is_some() {
-        effective.vram_gb = static_capacity.vram_gb;
-    }
-    if static_capacity.ram_gb.is_some() {
-        effective.ram_gb = static_capacity.ram_gb;
-    }
-    if static_capacity.gpus.is_some() {
-        effective.gpus = static_capacity.gpus;
-    }
-    if static_capacity.cpu_cores.is_some() {
-        effective.cpu_cores = static_capacity.cpu_cores;
-    }
+fn remarge(node: &mut NodeState) {
+    let merged = merge_capacity(
+        &node.config.static_capacity,
+        node.capacity_discovered.as_ref(),
+        node.loaded_vram_gb,
+    );
+    node.capacity_effective = merged.capacity;
+    node.capacity_source = merged.source;
 }
 
 fn upsert_permanent_locked(inner: &mut Inner, config: NodeConfig) {
@@ -827,7 +977,37 @@ mod tests {
     }
 
     #[test]
-    fn set_healthy_does_not_touch_last_client_request_at() {
+    fn occupancy_does_not_set_last_client_request_at() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        registry.occupancy_inc(&id);
+        assert_eq!(registry.inflight(&id), 1);
+        assert!(registry.last_client_request_at(&id).is_none());
+        registry.occupancy_dec(&id);
+        assert_eq!(registry.inflight(&id), 0);
+    }
+
+    #[test]
+    fn note_probe_success_respects_success_threshold() {
+        let mut config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        config.health.success_threshold = 2;
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        registry.note_probe_success(&id);
+        assert!(!registry.get(&id).unwrap().healthy);
+        registry.note_probe_success(&id);
+        assert!(registry.get(&id).unwrap().healthy);
+    }
+
+    #[test]
+    fn mark_unreachable_sets_reason() {
         let config = RouterConfig {
             nodes: vec![node("a", 8.0, 1)],
             ..Default::default()
@@ -835,6 +1015,10 @@ mod tests {
         let registry = Registry::new(&config);
         let id = nid("a");
         registry.set_healthy(&id);
-        assert!(registry.last_client_request_at(&id).is_none());
+        registry.mark_unreachable(&id, "public_url_blocked");
+        let snap = registry.get(&id).unwrap();
+        assert!(!snap.healthy);
+        assert_eq!(snap.unhealthy_reason.as_deref(), Some("public_url_blocked"));
+        assert!(snap.fail_streak >= 3);
     }
 }

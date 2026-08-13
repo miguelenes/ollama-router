@@ -11,5 +11,6 @@ pub use classify::{
 pub use error::RoutingError;
 pub use rank::{
     blocked_only_by_reservations, capacity_fits, estimate_large_vram_gb, estimate_request_ram_gb,
-    estimate_request_vram_gb, load_key, ram_fits, rank_nodes, static_capacity_fits, RankOutcome,
+    estimate_request_vram_gb, load_key, ram_fits, rank_nodes, static_capacity_fits, vram_fits,
+    RankOutcome,
 };

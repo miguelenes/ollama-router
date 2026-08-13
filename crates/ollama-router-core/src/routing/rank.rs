@@ -153,8 +153,8 @@ pub fn static_capacity_fits(
     }
 }
 
-/// Capacity gate using effective inventory plus live VRAM pressure.
-pub fn capacity_fits(
+/// Static + live VRAM gate (no RAM). Used to distinguish Capacity vs Ram misses.
+pub fn vram_fits(
     node: &NodeSnapshot,
     request_class: RequestClass,
     model: Option<&str>,
@@ -164,10 +164,10 @@ pub fn capacity_fits(
         return true;
     }
     if request_class == RequestClass::Embed && policy.embed_reserve_vram_gb <= 0.0 {
-        return ram_fits(node, request_class, model, policy).is_ok();
+        return true;
     }
     if request_class == RequestClass::Small && policy.small_reserve_vram_gb <= 0.0 {
-        return ram_fits(node, request_class, model, policy).is_ok();
+        return true;
     }
     if request_class == RequestClass::Medium && node.vram_gb() < policy.medium_min_vram_gb {
         return false;
@@ -178,7 +178,7 @@ pub fn capacity_fits(
 
     let request_estimate = estimate_request_vram_gb(request_class, model, policy);
     if request_estimate <= 0.0 && node.reserved_vram_gb <= 0.0 {
-        return ram_fits(node, request_class, model, policy).is_ok();
+        return true;
     }
 
     if node.vram_gb() > 0.0 {
@@ -197,7 +197,18 @@ pub fn capacity_fits(
         }
     }
 
-    ram_fits(node, request_class, model, policy).is_ok()
+    true
+}
+
+/// Capacity gate using effective inventory plus live VRAM pressure and RAM.
+pub fn capacity_fits(
+    node: &NodeSnapshot,
+    request_class: RequestClass,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+) -> bool {
+    vram_fits(node, request_class, model, policy)
+        && ram_fits(node, request_class, model, policy).is_ok()
 }
 
 fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
@@ -346,16 +357,27 @@ pub fn rank_nodes(
         .filter(|n| capacity_fits(n, request_class, model, policy))
         .collect();
     if fitting.is_empty() {
-        let mut reason = RoutingError::Capacity;
+        let any_vram = labeled
+            .iter()
+            .any(|n| vram_fits(n, request_class, model, policy));
+        if !any_vram {
+            return RankOutcome {
+                ranked: Vec::new(),
+                reason: Some(RoutingError::Capacity),
+                evaluated: labeled.iter().map(|n| n.id.clone()).collect(),
+            };
+        }
+        let mut reason = RoutingError::Ram;
         for node in &labeled {
+            if !vram_fits(node, request_class, model, policy) {
+                continue;
+            }
             if let Err(r) = ram_fits(node, request_class, model, policy) {
                 if r == RoutingError::RamPressure {
                     reason = RoutingError::RamPressure;
                     break;
                 }
-                if r == RoutingError::Ram {
-                    reason = RoutingError::Ram;
-                }
+                reason = RoutingError::Ram;
             }
         }
         return RankOutcome {
@@ -449,6 +471,7 @@ mod tests {
     use super::*;
     use crate::config::{Capacity, NodeConfig, RouterConfig};
     use crate::fleet::registry::{suggested_max_inflight, Registry};
+    use proptest::prelude::*;
 
     fn nid(id: &str) -> NodeId {
         NodeId::parse(id).expect("id")
@@ -622,5 +645,238 @@ mod tests {
     #[test]
     fn suggested_max_inflight_reexport() {
         assert_eq!(suggested_max_inflight(8.0), 2);
+    }
+
+    #[test]
+    fn demand_scale_allowlist() {
+        assert!(RoutingError::NoNodes.requests_demand_scale_up());
+        assert!(RoutingError::NoHealthy.requests_demand_scale_up());
+        assert!(RoutingError::Saturated.requests_demand_scale_up());
+        assert!(RoutingError::Capacity.requests_demand_scale_up());
+        assert!(!RoutingError::ModelMissing.requests_demand_scale_up());
+        assert!(!RoutingError::Ram.requests_demand_scale_up());
+        assert!(!RoutingError::RamPressure.requests_demand_scale_up());
+    }
+
+    #[test]
+    fn ram_pressure_on_fitting_vram_does_not_demand_scale() {
+        let config = RouterConfig {
+            nodes: vec![node("gpu", 48.0, 1, None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("gpu");
+        registry.set_healthy(&id);
+        registry.update_models(&id, ["llama3.1:8b"]);
+        registry.set_pressure_level(&id, crate::fleet::registry::PressureLevel::Critical);
+        let mut snap = registry.snapshot();
+        snap[0].ram_available_gb = Some(0.5);
+        snap[0].ram_available_ratio = Some(0.01);
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Large,
+            Some("llama3.1:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::RamPressure));
+        assert!(!outcome.reason.unwrap().requests_demand_scale_up());
+    }
+
+    fn fleet_from_yaml(yaml: &str) -> (Registry, PolicyConfig) {
+        let nodes = crate::fleet::parse_fleet_yaml(yaml, "test-fleet.yaml").expect("fleet yaml");
+        let config = RouterConfig {
+            nodes,
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for node in registry.snapshot() {
+            registry.set_healthy(&node.id);
+        }
+        (registry, config.policy)
+    }
+
+    const MIXED_FLEET: &str = r#"
+version: 1
+nodes:
+  - id: cpu
+    url: http://127.0.0.1:11434
+    capacity:
+      vram_gb: 0
+      ram_gb: 32
+      gpus: 0
+      cpu_cores: 8
+  - id: gpu8
+    url: http://127.0.0.1:11435
+    capacity:
+      vram_gb: 8
+      ram_gb: 32
+      gpus: 1
+      cpu_cores: 8
+  - id: gpu24
+    url: http://127.0.0.1:11436
+    capacity:
+      vram_gb: 24
+      ram_gb: 64
+      gpus: 1
+      cpu_cores: 16
+"#;
+
+    #[test]
+    fn cpu_only_selected_for_embed() {
+        let yaml = r#"
+version: 1
+nodes:
+  - id: cpu
+    url: http://127.0.0.1:11434
+    capacity:
+      vram_gb: 0
+      ram_gb: 32
+      gpus: 0
+      cpu_cores: 8
+"#;
+        let (registry, policy) = fleet_from_yaml(yaml);
+        registry.update_models(&nid("cpu"), ["qwen3-embedding:0.6b"]);
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:0.6b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "cpu");
+        assert_eq!(outcome.ranked[0].vram_gb(), 0.0);
+    }
+
+    #[test]
+    fn small_prefers_8gib_gpu_over_cpu() {
+        let (registry, policy) = fleet_from_yaml(MIXED_FLEET);
+        for id in ["cpu", "gpu8", "gpu24"] {
+            registry.update_models(&nid(id), ["llama3.2:3b"]);
+        }
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Small,
+            Some("llama3.2:3b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "gpu8");
+    }
+
+    #[test]
+    fn large_prefers_bigger_vram_and_skips_undersized() {
+        let (registry, policy) = fleet_from_yaml(MIXED_FLEET);
+        for id in ["cpu", "gpu8", "gpu24"] {
+            registry.update_models(&nid(id), ["llama3.1:70b"]);
+        }
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Large,
+            Some("llama3.1:70b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::Capacity));
+
+        registry.update_models(&nid("gpu24"), ["llama3.1:8b"]);
+        let mid = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Large,
+            Some("llama3.1:8b"),
+            &policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(mid.ok());
+        assert_eq!(mid.ranked[0].id.as_str(), "gpu24");
+        assert!(mid.ranked.iter().all(|n| n.id.as_str() != "cpu"));
+    }
+
+    #[test]
+    fn embed_utilization_gap_beats_class_preference() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("gpu48", 48.0, 1, Some(8)),
+                node("cpu", 0.0, 0, Some(2)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&nid("gpu48"));
+        registry.set_healthy(&nid("cpu"));
+        registry.update_models(&nid("gpu48"), ["qwen3-embedding:8b"]);
+        registry.update_models(&nid("cpu"), ["qwen3-embedding:8b"]);
+        for _ in 0..2 {
+            registry.inflight_inc(&nid("gpu48"));
+        }
+        registry.inflight_inc(&nid("cpu"));
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "gpu48");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        #[test]
+        fn utilization_gap_beats_embed_preference(
+            gpu_inflight in 0u32..=2,
+            cpu_inflight in 1u32..=2,
+        ) {
+            let gpu_util = f64::from(gpu_inflight) / 8.0;
+            let cpu_util = f64::from(cpu_inflight) / 2.0;
+            prop_assume!(gpu_util + 1e-9 < cpu_util);
+
+            let config = RouterConfig {
+                nodes: vec![
+                    node("gpu48", 48.0, 1, Some(8)),
+                    node("cpu", 0.0, 0, Some(2)),
+                ],
+                ..Default::default()
+            };
+            let registry = Registry::new(&config);
+            registry.set_healthy(&nid("gpu48"));
+            registry.set_healthy(&nid("cpu"));
+            registry.update_models(&nid("gpu48"), ["qwen3-embedding:8b"]);
+            registry.update_models(&nid("cpu"), ["qwen3-embedding:8b"]);
+            for _ in 0..gpu_inflight {
+                registry.inflight_inc(&nid("gpu48"));
+            }
+            for _ in 0..cpu_inflight {
+                registry.inflight_inc(&nid("cpu"));
+            }
+            let outcome = rank_nodes(
+                &registry.snapshot(),
+                RequestClass::Embed,
+                Some("qwen3-embedding:8b"),
+                &config.policy,
+                None,
+                &HashSet::new(),
+                0,
+            );
+            prop_assert!(outcome.ok());
+            prop_assert_eq!(outcome.ranked[0].id.as_str(), "gpu48");
+        }
     }
 }

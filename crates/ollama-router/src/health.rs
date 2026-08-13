@@ -1,61 +1,121 @@
-//! Concurrent `/api/tags` health probes with jitter. Capacity is soft-fail.
+//! Per-node health probes: tags, soft `/api/ps`, soft capacity. Never idle.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use ollama_router_core::capacity::{bytes_to_gib, capacity_target, CapacityClient};
 use ollama_router_core::config::HealthConfig;
-use ollama_router_core::fleet::{NodeSnapshot, PressureLevel};
+use ollama_router_core::fleet::{url_host_is_public_ipv4, NodeId, NodeSnapshot, PressureLevel};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 
 use crate::http::AppState;
 
+const SUPERVISOR_TICK: Duration = Duration::from_millis(200);
+
 /// Loop until the process exits. Does not count as client inflight / idle.
 pub async fn run(state: AppState) {
-    let mut rng = seed();
-    let mut tick: u64 = 0;
-    loop {
-        let health = state.registry.health().clone();
-        let wait = jittered_interval(health.interval_seconds, health.probe_jitter_ratio, &mut rng);
-        tokio::time::sleep(Duration::from_secs_f64(wait)).await;
-        tick = tick.saturating_add(1);
-        probe_round(&state, &health, tick, &mut rng).await;
-    }
-}
-
-async fn probe_round(state: &AppState, health: &HealthConfig, tick: u64, rng: &mut u64) {
-    let mut nodes: Vec<NodeSnapshot> = state
-        .registry
-        .snapshot()
-        .into_iter()
-        .filter(|n| !n.draining && n.url.is_some())
-        .collect();
-    shuffle(&mut nodes, rng);
-    let n = health.max_concurrent_probes.max(1) as usize;
+    let n = state.registry.health().max_concurrent_probes.max(1) as usize;
     let sem = Arc::new(Semaphore::new(n));
-    let every = u64::from(health.capacity_probe_every_n_probes.max(1));
-    let do_capacity = health.capacity_probe_enabled && tick.is_multiple_of(every);
-    let mut set = tokio::task::JoinSet::new();
-    for node in nodes {
-        let permit = sem.clone();
-        let state = state.clone();
-        let health = health.clone();
-        set.spawn(async move {
-            let Ok(_permit) = permit.acquire_owned().await else {
-                return;
-            };
-            probe_node(&state, &health, node, do_capacity).await;
-        });
+    let mut tasks: HashMap<NodeId, JoinHandle<()>> = HashMap::new();
+    let mut rng = seed();
+    loop {
+        reconcile_tasks(&state, &sem, &mut tasks, &mut rng);
+        tokio::time::sleep(SUPERVISOR_TICK).await;
     }
-    while set.join_next().await.is_some() {}
 }
 
-async fn probe_node(
+fn reconcile_tasks(
+    state: &AppState,
+    sem: &Arc<Semaphore>,
+    tasks: &mut HashMap<NodeId, JoinHandle<()>>,
+    rng: &mut u64,
+) {
+    let snap = state.registry.snapshot();
+    let live: HashSet<NodeId> = snap
+        .iter()
+        .filter(|n| !n.draining)
+        .map(|n| n.id.clone())
+        .collect();
+
+    let stale: Vec<NodeId> = tasks
+        .keys()
+        .filter(|id| !live.contains(id))
+        .cloned()
+        .collect();
+    for id in stale {
+        if let Some(handle) = tasks.remove(&id) {
+            handle.abort();
+        }
+    }
+
+    for node in snap.into_iter().filter(|n| !n.draining) {
+        if tasks.contains_key(&node.id) {
+            continue;
+        }
+        let state = state.clone();
+        let sem = sem.clone();
+        let id = node.id.clone();
+        let jitter_seed = next_u64(rng);
+        let handle = tokio::spawn(async move {
+            probe_loop(state, sem, id, jitter_seed).await;
+        });
+        tasks.insert(node.id, handle);
+    }
+}
+
+async fn probe_loop(state: AppState, sem: Arc<Semaphore>, id: NodeId, mut rng: u64) {
+    let mut capacity_tick: u32 = 0;
+    loop {
+        if state.registry.get(&id).is_none_or(|n| n.draining) {
+            return;
+        }
+        if let Some(at) = state.registry.next_probe_at(&id) {
+            let wait = at.saturating_duration_since(Instant::now());
+            if !wait.is_zero() {
+                tokio::time::sleep(wait).await;
+            }
+        }
+        if state.registry.get(&id).is_none_or(|n| n.draining) {
+            return;
+        }
+        let Ok(_permit) = sem.acquire().await else {
+            return;
+        };
+        let health = state.registry.health().clone();
+        capacity_tick = capacity_tick.saturating_add(1);
+        let every = health.capacity_probe_every_n_probes.max(1);
+        let do_capacity = health.capacity_probe_enabled && capacity_tick.is_multiple_of(every);
+        let Some(node) = state.registry.get(&id) else {
+            return;
+        };
+        probe_cycle(&state, &health, &node, do_capacity).await;
+        schedule_next(&state, &health, &id, &mut rng);
+    }
+}
+
+async fn probe_cycle(
     state: &AppState,
     health: &HealthConfig,
-    node: NodeSnapshot,
+    node: &NodeSnapshot,
     do_capacity: bool,
 ) {
+    match node.url.as_deref() {
+        None => {
+            state.registry.mark_unreachable(&node.id, "no_url");
+            return;
+        }
+        Some(url) if url_host_is_public_ipv4(url) => {
+            state
+                .registry
+                .mark_unreachable(&node.id, "public_url_blocked");
+            return;
+        }
+        Some(_) => {}
+    }
+
     let Some(base) = node.url.as_deref() else {
         return;
     };
@@ -65,10 +125,13 @@ async fn probe_node(
     match request.await {
         Ok(resp) if resp.status().is_success() => {
             let names = parse_tag_names(resp).await;
-            state.registry.set_healthy(&node.id);
             state.registry.update_models(&node.id, names);
+            state.registry.note_probe_success(&node.id);
+            if health.ps_probe_enabled {
+                probe_ps(state, health, node).await;
+            }
             if do_capacity {
-                probe_capacity(state, health, &node).await;
+                probe_capacity(state, health, node).await;
             }
         }
         Ok(resp) => {
@@ -77,13 +140,110 @@ async fn probe_node(
                 status = resp.status().as_u16(),
                 "health probe failed"
             );
-            state.registry.mark_request_failure(&node.id);
+            state
+                .registry
+                .note_probe_failure(&node.id, "probe_failures");
         }
         Err(err) => {
             tracing::debug!(node = %node.id, error = %err, "health probe error");
-            state.registry.mark_request_failure(&node.id);
+            state
+                .registry
+                .note_probe_failure(&node.id, "probe_failures");
         }
     }
+}
+
+async fn probe_ps(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) {
+    let Some(base) = node.url.as_deref() else {
+        return;
+    };
+    let url = format!("{}/api/ps", base.trim_end_matches('/'));
+    let timeout = Duration::from_secs_f64(health.probe_timeout_seconds);
+    let resp = match state.client.get(&url).timeout(timeout).send().await {
+        Ok(resp) if resp.status().is_success() => resp,
+        Ok(_) | Err(_) => return,
+    };
+    let Ok(bytes) = resp.bytes().await else {
+        return;
+    };
+    let Ok(body) = serde_json::from_slice::<PsResponse>(&bytes) else {
+        return;
+    };
+    let models = body.models.unwrap_or_default();
+    let names: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.name.as_deref())
+        .filter(|n| !n.trim().is_empty())
+        .map(str::to_string)
+        .collect();
+    let mut vram_bytes: u64 = 0;
+    let mut any_vram = false;
+    for entry in &models {
+        if let Some(size) = entry.size_vram {
+            vram_bytes = vram_bytes.saturating_add(size);
+            any_vram = true;
+        } else if let Some(size) = entry.size {
+            vram_bytes = vram_bytes.saturating_add(size);
+            any_vram = true;
+        }
+    }
+    let loaded_vram = any_vram.then_some(bytes_to_gib(vram_bytes));
+    state.registry.update_ps_state(&node.id, names, loaded_vram);
+}
+
+async fn probe_capacity(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) {
+    let pressure_path = health
+        .pressure_probe_path
+        .as_deref()
+        .unwrap_or("/v1/pressure");
+    let Some(target) = capacity_target(
+        node.url.as_deref(),
+        node.capacity_url.as_deref(),
+        health.capacity_probe_port,
+        &health.capacity_probe_path,
+        pressure_path,
+    ) else {
+        return;
+    };
+    let client = CapacityClient::new(state.client.clone());
+    let timeout = Duration::from_secs_f64(health.capacity_probe_timeout_seconds);
+    match client
+        .probe(&target, health.capacity_probe_token.as_deref(), timeout)
+        .await
+    {
+        Ok(probe) => {
+            let level = probe
+                .pressure_level
+                .as_deref()
+                .and_then(PressureLevel::from_wire);
+            state
+                .registry
+                .apply_capacity_report(&node.id, &probe.report, level);
+        }
+        Err(err) => {
+            state.registry.set_capacity_error(&node.id, err.as_reason());
+        }
+    }
+}
+
+fn schedule_next(state: &AppState, health: &HealthConfig, id: &NodeId, rng: &mut u64) {
+    let Some(node) = state.registry.get(id) else {
+        return;
+    };
+    let base = if node.healthy {
+        health.interval_seconds
+    } else {
+        let backoff = state.registry.probe_backoff(id);
+        if backoff > 0.0 {
+            backoff
+        } else {
+            health.interval_seconds
+        }
+    };
+    let delay = jittered_interval(base, health.probe_jitter_ratio, rng);
+    state
+        .registry
+        .set_next_probe_at(id, Instant::now() + Duration::from_secs_f64(delay));
 }
 
 async fn parse_tag_names(resp: reqwest::Response) -> Vec<String> {
@@ -101,44 +261,6 @@ async fn parse_tag_names(resp: reqwest::Response) -> Vec<String> {
         .collect()
 }
 
-async fn probe_capacity(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) {
-    let Some(url) = capacity_url(node, health) else {
-        return;
-    };
-    let timeout = Duration::from_secs_f64(health.capacity_probe_timeout_seconds);
-    let mut req = state.client.get(&url).timeout(timeout);
-    if let Some(token) = &health.capacity_probe_token {
-        req = req.bearer_auth(token);
-    }
-    let resp = match req.send().await {
-        Ok(resp) if resp.status().is_success() => resp,
-        Ok(_) | Err(_) => return,
-    };
-    let Ok(bytes) = resp.bytes().await else {
-        return;
-    };
-    let Ok(body) = serde_json::from_slice::<CapacityHint>(&bytes) else {
-        return;
-    };
-    if let Some(raw) = body.pressure_level.as_deref() {
-        if let Some(level) = PressureLevel::from_wire(raw) {
-            state.registry.set_pressure_level(&node.id, level);
-        }
-    }
-}
-
-fn capacity_url(node: &NodeSnapshot, health: &HealthConfig) -> Option<String> {
-    if let Some(url) = node.capacity_url.as_deref() {
-        return Some(url.to_string());
-    }
-    let ollama = node.url.as_deref()?;
-    let mut parsed = url::Url::parse(ollama).ok()?;
-    let _ = parsed.set_port(Some(health.capacity_probe_port));
-    parsed.set_path(&health.capacity_probe_path);
-    parsed.set_query(None);
-    Some(parsed.to_string())
-}
-
 #[derive(Deserialize)]
 struct TagsResponse {
     #[serde(default)]
@@ -151,8 +273,18 @@ struct TagModel {
 }
 
 #[derive(Deserialize)]
-struct CapacityHint {
-    pressure_level: Option<String>,
+struct PsResponse {
+    #[serde(default)]
+    models: Option<Vec<PsModel>>,
+}
+
+#[derive(Deserialize)]
+struct PsModel {
+    name: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    size_vram: Option<u64>,
 }
 
 fn seed() -> u64 {
@@ -181,13 +313,6 @@ fn jittered_interval(interval: f64, jitter_ratio: f64, rng: &mut u64) -> f64 {
     let span = interval * ratio;
     let unit = (next_u64(rng) >> 11) as f64 / ((1u64 << 53) as f64);
     (interval - span + 2.0 * span * unit).max(0.05)
-}
-
-fn shuffle<T>(items: &mut [T], rng: &mut u64) {
-    for i in (1..items.len()).rev() {
-        let j = (next_u64(rng) as usize) % (i + 1);
-        items.swap(i, j);
-    }
 }
 
 /// Reload fleet.yaml into the live registry (SIGHUP). Keeps inflight streams.

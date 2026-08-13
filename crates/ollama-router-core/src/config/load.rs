@@ -307,6 +307,11 @@ ready_requires_embedding_model: true
         assert_eq!(tiers.len(), 2);
         assert_eq!(tiers[0].models, ["embed:8b", "tiny:1b"]);
         assert_eq!(tiers[1].min_vram_gb, 24.0);
+        assert_eq!(
+            config.tier_models_for_vram(0.0),
+            vec!["embed:8b".to_string(), "tiny:1b".to_string()]
+        );
+        assert_eq!(config.tier_models_for_vram(24.0).len(), 3);
     }
 
     #[test]

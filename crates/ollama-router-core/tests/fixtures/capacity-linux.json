@@ -1,0 +1,38 @@
+{
+  "vram_gb": 8.0,
+  "gpus": 1,
+  "ram_gb": 32.0,
+  "cpu_cores": 12,
+  "hostname": "test-host",
+  "collected_at": "2026-08-12T00:00:00Z",
+  "gpu_names": ["NVIDIA GeForce RTX 3070"],
+  "agent_version": "0.1.0",
+  "gpus_detail": [{
+    "index": 0,
+    "name": "NVIDIA GeForce RTX 3070",
+    "vram_total_gb": 8.0,
+    "vram_used_gb": 2.25,
+    "vram_free_gb": 5.75,
+    "utilization_gpu_pct": 14.0,
+    "utilization_memory_pct": 28.0
+  }],
+  "vram_used_gb": 2.25,
+  "vram_free_gb": 5.75,
+  "cgroup_memory_limit_gb": null,
+  "pressure": {
+    "ram_total_gb": 32.0,
+    "ram_available_gb": 26.5,
+    "ram_available_ratio": 0.828,
+    "ram_used_ratio": 0.172,
+    "swap_used_gb": 0.0,
+    "swap_total_gb": 8.0,
+    "load1": 0.85,
+    "load5": 0.45,
+    "load15": 0.25,
+    "cpu_cores": 12,
+    "collected_at": 1750000000.0,
+    "load_1m": 0.85,
+    "load_per_cpu": 0.071,
+    "ram_available_source": "MemAvailable"
+  }
+}

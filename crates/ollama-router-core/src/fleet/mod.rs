@@ -17,5 +17,5 @@ pub use state::{
 };
 pub use tailscale::{
     is_tailscale_ipv4, ollama_url_for_tailscale_ip, routing_url_from_fields, url_host_is_ip,
-    url_host_is_tailscale,
+    url_host_is_public_ipv4, url_host_is_tailscale,
 };

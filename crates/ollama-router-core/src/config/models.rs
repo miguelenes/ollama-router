@@ -1066,6 +1066,25 @@ impl RouterConfig {
     pub fn effective_model_tiers(&self) -> Vec<ModelTier> {
         self.desired_model_tiers.clone()
     }
+
+    /// Union of tier models whose `min_vram_gb` the node meets.
+    ///
+    /// CPU (`vram_gb = 0`) only sees tiers with `min_vram_gb <= 0`.
+    pub fn tier_models_for_vram(&self, vram_gb: f64) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for tier in self.effective_model_tiers() {
+            if vram_gb < tier.min_vram_gb {
+                continue;
+            }
+            for model in tier.models {
+                if seen.insert(model.clone()) {
+                    out.push(model);
+                }
+            }
+        }
+        out
+    }
 }
 
 pub(crate) fn reject_duplicate_node_ids(nodes: &[NodeConfig]) -> Result<(), ConfigError> {
