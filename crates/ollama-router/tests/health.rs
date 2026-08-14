@@ -108,6 +108,28 @@ async fn public_url_blocked_without_http() {
 }
 
 #[tokio::test]
+async fn public_ipv6_blocked_without_http() {
+    let state = state_from(RouterConfig {
+        nodes: vec![node(
+            "public",
+            Some("http://[2606:4700:4700::1111]:11434"),
+            8.0,
+            1,
+        )],
+        ..RouterConfig::default()
+    });
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(2), || {
+        state
+            .registry
+            .get(&nid("public"))
+            .is_some_and(|n| n.unhealthy_reason.as_deref() == Some("public_url_blocked"))
+    })
+    .await;
+    handle.abort();
+}
+
+#[tokio::test]
 async fn public_share_hostname_blocked_without_http() {
     let state = state_from(RouterConfig {
         nodes: vec![node("public", Some("https://abc.share.zrok.io"), 8.0, 1)],

@@ -344,10 +344,7 @@ async fn put_nodes_rejects_public_ipv4_and_leaves_fleet_yaml() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let parsed: Value = serde_json::from_slice(&body).unwrap();
     assert!(
-        parsed["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("public IPv4"),
+        parsed["error"].as_str().unwrap_or("").contains("public IP"),
         "{parsed}"
     );
     assert_eq!(std::fs::read(&fleet).expect("reread"), original);

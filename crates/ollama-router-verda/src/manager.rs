@@ -1,12 +1,13 @@
 //! Verda spot fleet manager: create, adopt, destroy, reconcile, idle scale-down.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::cloud::{
-    idle_scale_down_candidates, DemandScale, FleetEvents, IdleNodeView, IdlePolicy,
+    excess_scale_down_order, idle_scale_down_candidates, orphan_reclaim_candidates, DemandScale,
+    FleetEvents, IdleNodeView, IdlePolicy,
 };
 use ollama_router_core::config::{Capacity, EnvSource, NodeConfig, OsEnv, RouterConfig};
 use ollama_router_core::fleet::{
@@ -68,6 +69,7 @@ struct Inner {
     events: std::sync::Mutex<Option<Arc<dyn FleetEvents>>>,
     shutdown: CancellationToken,
     recovery: std::sync::Mutex<Option<Recovery>>,
+    orphan_first_seen: std::sync::Mutex<HashMap<String, Instant>>,
 }
 
 impl VerdaManager {
@@ -113,6 +115,7 @@ impl VerdaManager {
                 events: std::sync::Mutex::new(None),
                 shutdown,
                 recovery: std::sync::Mutex::new(None),
+                orphan_first_seen: std::sync::Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -215,6 +218,11 @@ impl VerdaManager {
         }
     }
 
+    fn status_is_active(status: Option<&str>) -> bool {
+        let status = status.unwrap_or("").to_ascii_lowercase();
+        !TERMINAL.contains(&status.as_str()) && !EVICTED.contains(&status.as_str())
+    }
+
     fn private_key_file(&self) -> Option<String> {
         if let Some(p) = self.inner.config.verda.ssh_private_key_file.as_deref() {
             return Some(p.to_string());
@@ -239,13 +247,12 @@ impl VerdaManager {
         location: &str,
         instance_type: &str,
         spot_price: Option<f64>,
-    ) {
-        let Some(iid) = instance.instance_id_value() else {
-            return;
-        };
-        let Ok(instance_id) = VerdaInstanceId::parse(iid) else {
-            return;
-        };
+    ) -> Result<(), VerdaError> {
+        let iid = instance
+            .instance_id_value()
+            .ok_or_else(|| VerdaError::Message("Verda persist missing instance id".into()))?;
+        let instance_id = VerdaInstanceId::parse(iid)
+            .map_err(|err| VerdaError::Message(format!("verda persist instance id: {err}")))?;
         let persist = VerdaNodePersist {
             url,
             instance_id: &instance_id,
@@ -255,10 +262,24 @@ impl VerdaManager {
             spot_price_per_hour: spot_price,
             hostname: instance.hostname.as_deref(),
         };
-        if let Err(err) = self
-            .inner
+        self.inner
             .fleet_state
             .persist_verda_node_async(node_id.as_str(), persist)
+            .await
+            .map_err(|err| VerdaError::Message(format!("verda persist failed: {err}")))
+    }
+
+    async fn persist_verda_log(
+        &self,
+        node_id: &NodeId,
+        url: &str,
+        instance: &Instance,
+        location: &str,
+        instance_type: &str,
+        spot_price: Option<f64>,
+    ) {
+        if let Err(err) = self
+            .persist_verda(node_id, url, instance, location, instance_type, spot_price)
             .await
         {
             tracing::error!(node_id = %node_id, error = %err, "verda persist failed");
@@ -355,6 +376,26 @@ impl VerdaManager {
     }
 
     async fn create_additional_locked(&self) -> Result<Value, VerdaError> {
+        let max_n = self.inner.config.verda.auto_scale_max_instances;
+        if max_n > 0 {
+            let instances = self.inner.client.list_instances().await?;
+            let live = instances
+                .iter()
+                .filter(|i| self.is_owned(i) && Self::status_is_active(i.status.as_deref()))
+                .count() as u32;
+            let registered = self
+                .inner
+                .registry
+                .snapshot()
+                .iter()
+                .filter(|n| n.origin == NodeOrigin::Verda)
+                .count() as u32;
+            let count = live.max(registered);
+            if count >= max_n {
+                tracing::info!(owned_count = count, max_n, "verda_create_additional_capped");
+                return Ok(json!({"status": "none"}));
+            }
+        }
         let key = self.private_key_file();
         let Some((created, choice)) = self.create_instance(key.as_deref()).await? else {
             return Ok(json!({"status": "none"}));
@@ -385,10 +426,10 @@ impl VerdaManager {
             return json!({"status": "none"});
         };
         self.inner.registry.upsert_verda(node);
-        self.persist_verda(&node_id, "", instance, &location, &instance_type, None)
+        self.persist_verda_log(&node_id, "", instance, &location, &instance_type, None)
             .await;
         let ready = self.wait_enrolled_and_healthy(&node_id).await;
-        self.persist_verda(
+        self.persist_verda_log(
             &node_id,
             ready.url.as_deref().unwrap_or(""),
             instance,
@@ -417,7 +458,7 @@ impl VerdaManager {
             return json!({"status": "none"});
         };
         self.inner.registry.upsert_verda(node);
-        self.persist_verda(
+        self.persist_verda_log(
             &node_id,
             "",
             instance,
@@ -428,7 +469,7 @@ impl VerdaManager {
         .await;
         let ready = self.wait_enrolled_and_healthy(&node_id).await;
         if ready.ok {
-            self.persist_verda(
+            self.persist_verda_log(
                 &node_id,
                 ready.url.as_deref().unwrap_or(""),
                 instance,
@@ -664,6 +705,32 @@ impl VerdaManager {
             vram_gb = choice.gpu_memory_gb,
             "verda_created"
         );
+        let mut created = created;
+        if created
+            .hostname
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .is_none()
+        {
+            created.hostname = Some(hostname.clone());
+        }
+        let node_id = Self::node_id_for(&instance_id);
+        if let Err(err) = self
+            .persist_verda(
+                &node_id,
+                "",
+                &created,
+                &choice.location_code,
+                &choice.instance_type,
+                Some(choice.spot_price),
+            )
+            .await
+        {
+            tracing::error!(node_id = %node_id, error = %err, "verda persist failed");
+            let _ = self.compensate(&created).await;
+            return Err(err);
+        }
         match self.wait_running(&instance_id).await {
             Ok(mut inst) => {
                 if inst
@@ -679,7 +746,9 @@ impl VerdaManager {
                 Ok(inst)
             }
             Err(err) => {
-                let _ = self.compensate(&created).await;
+                if self.compensate(&created).await.is_ok() {
+                    self.forget_instance(&instance_id).await;
+                }
                 Err(err)
             }
         }
@@ -940,6 +1009,205 @@ impl VerdaManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(recovery);
     }
 
+    fn lock_orphan_first_seen(&self) -> std::sync::MutexGuard<'_, HashMap<String, Instant>> {
+        self.inner
+            .orphan_first_seen
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn registry_verda_instance_ids(&self) -> HashSet<String> {
+        self.inner
+            .registry
+            .snapshot()
+            .into_iter()
+            .filter(|node| node.origin == NodeOrigin::Verda)
+            .filter_map(|node| node.id.as_str().strip_prefix("verda-").map(str::to_string))
+            .collect()
+    }
+
+    fn idle_views(&self, instances: &[Instance], now: Instant) -> Vec<IdleNodeView> {
+        instances
+            .iter()
+            .filter_map(|inst| {
+                let iid = inst.instance_id_value()?;
+                let node_id = Self::node_id_for(iid);
+                let snap = self.inner.registry.get(&node_id)?;
+                let instance_id = VerdaInstanceId::parse(iid).ok()?;
+                let registered_at = self.inner.registry.registered_at(&node_id).unwrap_or(now);
+                let last_client_request_at = self.inner.registry.last_client_request_at(&node_id);
+                Some(IdleNodeView {
+                    node_id,
+                    instance_id,
+                    origin: snap.origin,
+                    inflight: snap.inflight,
+                    registered_at,
+                    last_client_request_at,
+                })
+            })
+            .collect()
+    }
+
+    fn idle_policy(&self, min_n: u32) -> IdlePolicy {
+        IdlePolicy {
+            idle_timeout: Duration::from_secs_f64(
+                self.inner.config.verda.idle_timeout_seconds.max(0.0),
+            ),
+            grace_after_create: Duration::from_secs_f64(
+                self.inner
+                    .config
+                    .verda
+                    .idle_grace_after_create_seconds
+                    .max(0.0),
+            ),
+            min_instances: min_n,
+        }
+    }
+
+    /// Mark Verda draining, re-check inflight (and idle when asked), then
+    /// `delete_permanently`. Destroy failure keeps draining and FleetState.
+    async fn drain_and_destroy_verda(
+        &self,
+        inst: &Instance,
+        node_id: &NodeId,
+        instance_id: &str,
+        require_idle: Option<(Instant, IdlePolicy)>,
+    ) -> bool {
+        if !self.inner.registry.set_draining(node_id, true) {
+            return false;
+        }
+        if self.inner.registry.inflight(node_id) > 0 {
+            self.inner.registry.set_draining(node_id, false);
+            return false;
+        }
+        if let Some((now, policy)) = require_idle {
+            let still_idle = self
+                .idle_views(std::slice::from_ref(inst), now)
+                .first()
+                .is_some_and(|view| {
+                    !idle_scale_down_candidates(
+                        std::slice::from_ref(view),
+                        now,
+                        IdlePolicy {
+                            min_instances: 0,
+                            ..policy
+                        },
+                    )
+                    .is_empty()
+                });
+            if !still_idle {
+                self.inner.registry.set_draining(node_id, false);
+                return false;
+            }
+        }
+        match self
+            .inner
+            .client
+            .delete_instance(
+                instance_id,
+                inst.os_volume_id.clone().map(|v| vec![v]),
+                true,
+            )
+            .await
+        {
+            Ok(_) => {
+                self.forget_instance(instance_id).await;
+                true
+            }
+            Err(err) => {
+                tracing::error!(
+                    node_id = %node_id,
+                    instance_id,
+                    error = %err,
+                    "verda_scale_down_destroy_failed"
+                );
+                false
+            }
+        }
+    }
+
+    async fn reclaim_orphans(&self, owned: &[Instance]) {
+        if !self.inner.config.verda.orphan_reclaim_enabled {
+            return;
+        }
+        let fleet_ids: HashSet<String> = self
+            .inner
+            .fleet_state
+            .snapshot_verda_nodes()
+            .values()
+            .filter_map(|entry| entry.verda_instance_id.clone())
+            .collect();
+        let registry_ids = self.registry_verda_instance_ids();
+        let owned_ids: Vec<VerdaInstanceId> = owned
+            .iter()
+            .filter_map(|inst| VerdaInstanceId::parse(inst.instance_id_value()?).ok())
+            .collect();
+        let owned_keys: HashSet<String> =
+            owned_ids.iter().map(|id| id.as_str().to_string()).collect();
+        let now = Instant::now();
+        let first_seen = {
+            let mut map = self.lock_orphan_first_seen();
+            for id in &owned_ids {
+                let key = id.as_str();
+                if !fleet_ids.contains(key) && !registry_ids.contains(key) {
+                    map.entry(key.to_string()).or_insert(now);
+                }
+            }
+            map.retain(|key, _| {
+                owned_keys.contains(key) && !fleet_ids.contains(key) && !registry_ids.contains(key)
+            });
+            map.clone()
+        };
+        let grace = Duration::from_secs_f64(
+            self.inner
+                .config
+                .verda
+                .orphan_reclaim_grace_seconds
+                .max(0.0),
+        );
+        let candidates = orphan_reclaim_candidates(
+            &owned_ids,
+            &fleet_ids,
+            &registry_ids,
+            &first_seen,
+            now,
+            grace,
+        );
+        let Some(victim) = candidates.first() else {
+            return;
+        };
+        let Some(inst) = owned
+            .iter()
+            .find(|i| i.instance_id_value() == Some(victim.as_str()))
+        else {
+            return;
+        };
+        match self
+            .inner
+            .client
+            .delete_instance(
+                victim.as_str(),
+                inst.os_volume_id.clone().map(|v| vec![v]),
+                true,
+            )
+            .await
+        {
+            Ok(_) => {
+                tracing::info!(instance_id = %victim, "verda_orphan_reclaimed");
+                self.forget_instance(victim.as_str()).await;
+                self.lock_orphan_first_seen().remove(victim.as_str());
+                self.emit("destroy");
+            }
+            Err(err) => {
+                tracing::error!(
+                    instance_id = %victim,
+                    error = %err,
+                    "verda_orphan_reclaim_failed"
+                );
+            }
+        }
+    }
+
     pub async fn reconcile(&self) {
         if self.shutdown_cancelled() {
             return;
@@ -997,6 +1265,10 @@ impl VerdaManager {
                 let _ = self.adopt(inst).await;
             }
         }
+        if self.shutdown_cancelled() {
+            return;
+        }
+        self.reclaim_orphans(&owned).await;
         if self.shutdown_cancelled() || !self.inner.config.verda.auto_scale {
             return;
         }
@@ -1004,10 +1276,7 @@ impl VerdaManager {
         let max_n = self.inner.config.verda.auto_scale_max_instances;
         let in_flight: Vec<_> = owned
             .iter()
-            .filter(|i| {
-                let s = i.status.as_deref().unwrap_or("").to_ascii_lowercase();
-                !TERMINAL.contains(&s.as_str()) && !EVICTED.contains(&s.as_str())
-            })
+            .filter(|i| Self::status_is_active(i.status.as_deref()))
             .cloned()
             .collect();
         let mut count = in_flight.len() as u32;
@@ -1032,6 +1301,43 @@ impl VerdaManager {
         if self.shutdown_cancelled() {
             return;
         }
+        self.trim_excess(&in_flight, min_n, max_n).await;
+    }
+
+    async fn idle_scale_down(&self, in_flight: &[Instance], min_n: u32) {
+        let now = Instant::now();
+        let views = self.idle_views(in_flight, now);
+        let policy = self.idle_policy(min_n);
+        for cand in idle_scale_down_candidates(&views, now, policy) {
+            let Some(inst) = in_flight
+                .iter()
+                .find(|i| i.instance_id_value() == Some(cand.instance_id.as_str()))
+            else {
+                continue;
+            };
+            if self
+                .drain_and_destroy_verda(
+                    inst,
+                    &cand.node_id,
+                    cand.instance_id.as_str(),
+                    Some((now, policy)),
+                )
+                .await
+            {
+                tracing::info!(
+                    node_id = %cand.node_id,
+                    instance_id = %cand.instance_id,
+                    "verda_idle_scale_down"
+                );
+                self.emit("idle");
+            }
+        }
+    }
+
+    async fn trim_excess(&self, in_flight: &[Instance], min_n: u32, max_n: u32) {
+        if max_n == 0 {
+            return;
+        }
         let remaining: Vec<_> = in_flight
             .iter()
             .filter(|i| {
@@ -1040,92 +1346,33 @@ impl VerdaManager {
             })
             .cloned()
             .collect();
-        if max_n > 0 && remaining.len() as u32 > max_n {
-            let excess = remaining.len() as u32 - max_n;
-            for inst in remaining.iter().take(excess as usize) {
-                if let Some(id) = inst.instance_id_value() {
-                    if self
-                        .inner
-                        .client
-                        .delete_instance(id, inst.os_volume_id.clone().map(|v| vec![v]), true)
-                        .await
-                        .is_ok()
-                    {
-                        self.forget_instance(id).await;
-                    }
-                }
-            }
+        let mut count = remaining.len() as u32;
+        if count <= max_n {
+            return;
         }
-    }
-
-    async fn idle_scale_down(&self, in_flight: &[Instance], min_n: u32) {
-        let now = std::time::Instant::now();
-        let views: Vec<IdleNodeView> = in_flight
-            .iter()
-            .filter_map(|inst| {
-                let iid = inst.instance_id_value()?;
-                let node_id = Self::node_id_for(iid);
-                let snap = self.inner.registry.get(&node_id)?;
-                let instance_id = VerdaInstanceId::parse(iid).ok()?;
-                let registered = self.inner.registry.registered_at(&node_id).unwrap_or(now);
-                let last = self.inner.registry.last_client_request_at(&node_id);
-                Some(IdleNodeView {
-                    node_id,
-                    instance_id,
-                    origin: snap.origin,
-                    inflight: snap.inflight,
-                    registered_at: registered,
-                    last_client_request_at: last,
-                })
-            })
-            .collect();
-        let policy = IdlePolicy {
-            idle_timeout: Duration::from_secs_f64(
-                self.inner.config.verda.idle_timeout_seconds.max(0.0),
-            ),
-            grace_after_create: Duration::from_secs_f64(
-                self.inner
-                    .config
-                    .verda
-                    .idle_grace_after_create_seconds
-                    .max(0.0),
-            ),
-            min_instances: min_n,
-        };
-        for cand in idle_scale_down_candidates(&views, now, policy) {
-            let inst = in_flight
+        let now = Instant::now();
+        let views = self.idle_views(&remaining, now);
+        for cand in excess_scale_down_order(&views) {
+            if count <= max_n || count <= min_n {
+                break;
+            }
+            let Some(inst) = remaining
                 .iter()
-                .find(|i| i.instance_id_value() == Some(cand.instance_id.as_str()));
-            let Some(inst) = inst else {
+                .find(|i| i.instance_id_value() == Some(cand.instance_id.as_str()))
+            else {
                 continue;
             };
-            match self
-                .inner
-                .client
-                .delete_instance(
-                    cand.instance_id.as_str(),
-                    inst.os_volume_id.clone().map(|v| vec![v]),
-                    true,
-                )
+            if self
+                .drain_and_destroy_verda(inst, &cand.node_id, cand.instance_id.as_str(), None)
                 .await
             {
-                Ok(_) => {
-                    tracing::info!(
-                        node_id = %cand.node_id,
-                        instance_id = %cand.instance_id,
-                        "verda_idle_scale_down"
-                    );
-                    self.forget_instance(cand.instance_id.as_str()).await;
-                    self.emit("idle");
-                }
-                Err(err) => {
-                    tracing::error!(
-                        node_id = %cand.node_id,
-                        instance_id = %cand.instance_id,
-                        error = %err,
-                        "verda_scale_down_destroy_failed"
-                    );
-                }
+                tracing::info!(
+                    node_id = %cand.node_id,
+                    instance_id = %cand.instance_id,
+                    "verda_excess_scale_down"
+                );
+                self.emit("destroy");
+                count = count.saturating_sub(1);
             }
         }
     }

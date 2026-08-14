@@ -6,7 +6,7 @@ use serde_yaml::Value;
 
 use crate::fleet::file::{fleet_path_from_env, load_fleet_nodes};
 use crate::fleet::state::{FleetState, DEFAULT_STATE_PATH};
-use crate::fleet::url_policy::url_host_is_public_ipv4;
+use crate::fleet::url_policy::url_host_is_public_ip;
 
 use super::env_source::{EnvSource, OsEnv};
 use super::error::ConfigError;
@@ -81,17 +81,17 @@ pub fn load_config_from(
     Ok(config)
 }
 
-/// Apply FleetState routing URLs onto permanent nodes (public IPv4 replaced).
+/// Apply FleetState routing URLs onto permanent nodes (public IPs replaced).
 ///
-/// zrok enroll loopback URLs hydrate when fleet.yaml has a public IPv4 (including
-/// CGNAT). Loopback, RFC1918, and LAN hostnames stay as written.
+/// zrok enroll loopback URLs hydrate when fleet.yaml has a public IP (including
+/// CGNAT and public IPv6). Loopback, RFC1918, and LAN hostnames stay as written.
 pub fn hydrate_node_urls(nodes: &mut [NodeConfig], state: &FleetState) -> Result<(), ConfigError> {
     for node in nodes {
         let persisted = state.hydrate_url(&node.id)?;
         if let Some(persisted) = persisted {
             match node.url.as_deref() {
                 None => node.url = Some(persisted),
-                Some(existing) if url_host_is_public_ipv4(existing) => {
+                Some(existing) if url_host_is_public_ip(existing) => {
                     node.url = Some(persisted);
                 }
                 Some(_) => {}
@@ -100,7 +100,7 @@ pub fn hydrate_node_urls(nodes: &mut [NodeConfig], state: &FleetState) -> Result
         if let Some(cap) = state.hydrate_capacity_url(&node.id)? {
             match node.capacity_url.as_deref() {
                 None => node.capacity_url = Some(cap),
-                Some(existing) if url_host_is_public_ipv4(existing) => {
+                Some(existing) if url_host_is_public_ip(existing) => {
                     node.capacity_url = Some(cap);
                 }
                 Some(_) => {}

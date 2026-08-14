@@ -903,6 +903,692 @@ async fn request_scale_up_after_cancel_does_not_spawn() {
     assert_eq!(post.calls(), 0);
 }
 
+fn persist_owned(fs: &FleetState, id: &str) {
+    let iid = VerdaInstanceId::parse(id).unwrap();
+    fs.persist_verda_node(
+        format!("verda-{id}"),
+        VerdaNodePersist {
+            url: "http://127.0.0.1:41990",
+            instance_id: &iid,
+            location: "HEL",
+            instance_type: "gpu-l4",
+            os_volume_id: Some("vol-1"),
+            spot_price_per_hour: None,
+            hostname: None,
+        },
+    )
+    .unwrap();
+}
+
+fn verda_node(id: &str) -> NodeConfig {
+    NodeConfig {
+        id: NodeId::parse(format!("verda-{id}")).unwrap(),
+        url: Some("http://127.0.0.1:41990".into()),
+        capacity_url: None,
+        labels: vec!["gpu".into(), "verda".into(), "spot".into()],
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    }
+}
+
+fn instance_status(id: &str, status: &str) -> Value {
+    json!({
+        "id": id,
+        "status": status,
+        "ip_address": "203.0.113.10",
+        "location_code": "HEL",
+        "instance_type": "gpu-l4",
+        "os_volume_id": "vol-1",
+        "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+    })
+}
+
+#[tokio::test]
+async fn list_instances_concatenates_pages() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "1");
+        then.status(200)
+            .header("X-Total-Count", "3")
+            .json_body(json!([owned_instance("page-a"), owned_instance("page-b")]));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "2");
+        then.status(200)
+            .header("X-Total-Count", "3")
+            .json_body(json!([owned_instance("page-c")]));
+    });
+    let list = client(&server).list_instances().await.expect("pages");
+    let ids: Vec<_> = list.iter().filter_map(|i| i.instance_id_value()).collect();
+    assert_eq!(ids, ["page-a", "page-b", "page-c"]);
+}
+
+#[tokio::test]
+async fn list_instances_incomplete_total_is_error() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "1");
+        then.status(200)
+            .header("X-Total-Count", "11")
+            .json_body(json!((0..10)
+                .map(|i| owned_instance(&format!("p{i}")))
+                .collect::<Vec<_>>()));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "2");
+        then.status(200)
+            .header("X-Total-Count", "11")
+            .json_body(json!([]));
+    });
+    let err = client(&server)
+        .list_instances()
+        .await
+        .expect_err("incomplete");
+    assert!(err.to_string().contains("incomplete"), "{err}");
+}
+
+#[tokio::test]
+async fn incomplete_instance_list_skips_gone_forget_and_reclaim() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "1");
+        then.status(200)
+            .header("X-Total-Count", "11")
+            .json_body(json!((0..10)
+                .map(|i| owned_instance(&format!("p{i}")))
+                .collect::<Vec<_>>()));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .query_param("page", "2");
+        then.status(200)
+            .header("X-Total-Count", "11")
+            .json_body(json!([]));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT).path("/v1/instances");
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, _, fs) = manager(&server, false);
+    persist_owned(&fs, "inst-keep");
+    mgr.reconcile().await;
+    assert_eq!(delete.calls(), 0);
+    assert!(fs
+        .list_verda_nodes()
+        .unwrap()
+        .contains_key("verda-inst-keep"));
+}
+
+#[tokio::test]
+async fn startup_script_list_finds_name_on_page_two() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog_core(&server);
+    stub_tags(&server);
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/scripts")
+            .query_param("page", "1");
+        then.status(200)
+            .header("X-Total-Count", "2")
+            .json_body(json!([{"id": "script-other", "name": "other"}]));
+    });
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/scripts")
+            .query_param("page", "2");
+        then.status(200)
+            .header("X-Total-Count", "2")
+            .json_body(json!([{
+                "id": "script-1",
+                "name": "ollama-router-agent-init",
+            }]));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    let created_script = server.mock(|when, then| {
+        when.method(POST).path("/v1/scripts");
+        then.status(200).body("should-not");
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"startup_script_id":"script-1"}"#);
+        then.status(200).json_body(json!({
+            "id": "inst-paged",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances/inst-paged");
+        then.status(200).json_body(json!({
+            "id": "inst-paged",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let (mgr, _, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-paged", &server.base_url());
+    let out = mgr.create_additional().await.expect("create");
+    assert_eq!(out["status"], "created");
+    assert_eq!(created_script.calls(), 0);
+    assert!(post.calls() >= 1);
+}
+
+#[tokio::test]
+async fn create_persists_fleet_state_before_running() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({
+            "id": "inst-slow",
+            "status": "provisioning",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances/inst-slow");
+        then.status(200).json_body(json!({
+            "id": "inst-slow",
+            "status": "provisioning",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-slow","delete_permanently":true}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, _, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.create_timeout_seconds = 1.5;
+        c.verda.poll_interval_seconds = 0.2;
+    });
+    let watcher = fs.clone();
+    let saw = tokio::spawn(async move {
+        let deadline = Instant::now() + Duration::from_secs(4);
+        loop {
+            if watcher
+                .list_verda_nodes()
+                .ok()
+                .is_some_and(|m| m.contains_key("verda-inst-slow"))
+            {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    let result = mgr.create_additional().await;
+    assert!(result.is_err(), "provisioning must time out: {result:?}");
+    assert!(
+        saw.await.expect("join"),
+        "FleetState row must exist before running"
+    );
+    assert!(delete.calls() >= 1);
+}
+
+#[tokio::test]
+async fn wait_running_timeout_retains_fleet_state_when_delete_fails() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({
+            "id": "inst-keep",
+            "status": "provisioning",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances/inst-keep");
+        then.status(200).json_body(json!({
+            "id": "inst-keep",
+            "status": "provisioning",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(PUT).path("/v1/instances");
+        then.status(500).json_body(json!({"error": "busy"}));
+    });
+    let (mgr, _, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.create_timeout_seconds = 1.0;
+        c.verda.poll_interval_seconds = 0.2;
+    });
+    let result = mgr.create_additional().await;
+    assert!(result.is_err());
+    assert!(
+        fs.list_verda_nodes()
+            .unwrap()
+            .contains_key("verda-inst-keep"),
+        "failed compensate must not forget"
+    );
+}
+
+#[tokio::test]
+async fn persist_fail_compensates_with_delete() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({
+            "id": "inst-persist-fail",
+            "status": "provisioning",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-persist-fail"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("state.json");
+    std::fs::create_dir(&path).expect("state path is a directory");
+    std::mem::forget(dir);
+    let fs = Arc::new(FleetState::new(path));
+    let mut config = RouterConfig::default();
+    config.verda.enabled = true;
+    config.verda.base_url = server.base_url();
+    config.verda.ssh_key_id = Some("key-1".into());
+    config.verda.poll_interval_seconds = 0.5;
+    config.verda.create_timeout_seconds = 5.0;
+    config.verda.auto_scale = false;
+    let config = Arc::new(config);
+    let registry = Arc::new(Registry::new(&config));
+    let mgr = VerdaManager::new(config, client(&server), registry, fs.clone());
+    let result = mgr.create_additional().await;
+    assert!(result.is_err());
+    assert!(delete.calls() >= 1);
+    assert!(fs.list_verda_nodes().ok().unwrap_or_default().is_empty());
+}
+
+#[tokio::test]
+async fn persist_fail_and_delete_fail_does_not_forget() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({
+            "id": "inst-both-fail",
+            "status": "provisioning",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT).path("/v1/instances");
+        then.status(500).json_body(json!({"error": "busy"}));
+    });
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("state.json");
+    std::fs::create_dir(&path).expect("state path is a directory");
+    std::mem::forget(dir);
+    let fs = Arc::new(FleetState::new(path));
+    let mut config = RouterConfig::default();
+    config.verda.enabled = true;
+    config.verda.base_url = server.base_url();
+    config.verda.ssh_key_id = Some("key-1".into());
+    config.verda.poll_interval_seconds = 0.5;
+    config.verda.create_timeout_seconds = 5.0;
+    config.verda.auto_scale = false;
+    let config = Arc::new(config);
+    let registry = Arc::new(Registry::new(&config));
+    let mgr = VerdaManager::new(config, client(&server), registry.clone(), fs);
+    let result = mgr.create_additional().await;
+    assert!(result.is_err());
+    assert!(delete.calls() >= 1);
+    assert!(registry
+        .get(&NodeId::parse("verda-inst-both-fail").unwrap())
+        .is_none());
+}
+
+#[tokio::test]
+async fn orphan_reclaim_destroys_only_owned_orphan_not_permanent_or_illumination() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([
+            {
+                "id": "inst-old",
+                "status": "running",
+                "location_code": "HEL",
+                "instance_type": "gpu-l4",
+                "tags": [{"key": "managed_by", "value": "illumination-ollama-router"}],
+            },
+            instance_status("inst-orphan", "provisioning"),
+            instance_status("inst-kept", "provisioning"),
+        ]));
+    });
+    let del_orphan = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-orphan"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let del_kept = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-kept"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let del_illumination = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-old"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, registry, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.orphan_reclaim_enabled = true;
+        c.verda.orphan_reclaim_grace_seconds = 0.0;
+    });
+    registry.upsert_permanent(NodeConfig {
+        id: NodeId::parse("local").unwrap(),
+        url: Some("http://127.0.0.1:11434".into()),
+        capacity_url: None,
+        labels: vec!["cpu".into()],
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    persist_owned(&fs, "inst-kept");
+    mgr.reconcile().await;
+    assert_eq!(del_orphan.calls(), 1);
+    assert_eq!(del_kept.calls(), 0);
+    assert_eq!(del_illumination.calls(), 0);
+    assert!(registry.get(&NodeId::parse("local").unwrap()).is_some());
+    assert!(fs
+        .list_verda_nodes()
+        .unwrap()
+        .contains_key("verda-inst-kept"));
+}
+
+#[tokio::test]
+async fn orphan_reclaim_skips_registry_create_in_flight() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .json_body(json!([instance_status("inst-creating", "provisioning")]));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT).path("/v1/instances");
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, registry, _) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.orphan_reclaim_grace_seconds = 0.0;
+    });
+    registry.upsert_verda(verda_node("inst-creating"));
+    mgr.reconcile().await;
+    assert_eq!(delete.calls(), 0);
+}
+
+#[tokio::test]
+async fn orphan_reclaim_skips_inside_grace() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .json_body(json!([instance_status("inst-fresh", "provisioning")]));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT).path("/v1/instances");
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, _, _) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.orphan_reclaim_grace_seconds = 1800.0;
+    });
+    mgr.reconcile().await;
+    assert_eq!(delete.calls(), 0);
+}
+
+#[tokio::test]
+async fn idle_scale_down_skips_inflight_then_destroys_after_dec() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .json_body(json!([owned_instance("inst-idle")]));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"inst-idle","delete_permanently":true}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, registry, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = true;
+        c.verda.auto_scale_min_instances = 0;
+        c.verda.auto_scale_max_instances = 4;
+        c.verda.idle_scale_down_enabled = true;
+        c.verda.idle_timeout_seconds = 0.0;
+        c.verda.idle_grace_after_create_seconds = 0.0;
+        c.verda.orphan_reclaim_enabled = false;
+    });
+    let nid = NodeId::parse("verda-inst-idle").unwrap();
+    registry.upsert_verda(verda_node("inst-idle"));
+    persist_owned(&fs, "inst-idle");
+    assert!(registry.inflight_inc(&nid));
+    mgr.reconcile().await;
+    assert_eq!(delete.calls(), 0);
+    assert!(registry.get(&nid).is_some());
+    registry.inflight_dec(&nid);
+    mgr.reconcile().await;
+    assert_eq!(delete.calls(), 1);
+    assert!(registry.get(&nid).is_none());
+}
+
+#[tokio::test]
+async fn excess_trim_destroys_idle_not_inflight_ignoring_list_order() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([
+            owned_instance("busy"),
+            owned_instance("idle-a"),
+            owned_instance("idle-b"),
+        ]));
+    });
+    let del_busy = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"busy"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let del_a = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"idle-a"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let del_b = server.mock(|when, then| {
+        when.method(PUT)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"id":"idle-b"}"#);
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, registry, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = true;
+        c.verda.auto_scale_min_instances = 0;
+        c.verda.auto_scale_max_instances = 1;
+        c.verda.idle_scale_down_enabled = false;
+        c.verda.orphan_reclaim_enabled = false;
+    });
+    registry.upsert_verda(verda_node("busy"));
+    registry.upsert_verda(verda_node("idle-a"));
+    registry.upsert_verda(verda_node("idle-b"));
+    persist_owned(&fs, "busy");
+    persist_owned(&fs, "idle-a");
+    persist_owned(&fs, "idle-b");
+    let busy = NodeId::parse("verda-busy").unwrap();
+    assert!(registry.inflight_inc(&busy));
+    mgr.reconcile().await;
+    assert_eq!(del_busy.calls(), 0);
+    assert!(del_a.calls() + del_b.calls() >= 1);
+    assert!(registry.get(&busy).is_some());
+    assert_eq!(registry.inflight(&busy), 1);
+}
+
+#[tokio::test]
+async fn create_additional_refuses_when_live_owned_at_max() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .json_body(json!([owned_instance("inst-live")]));
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({"id": "should-not"}));
+    });
+    let (mgr, registry, _) = manager_with(&server, |c| {
+        c.verda.auto_scale = true;
+        c.verda.auto_scale_max_instances = 1;
+    });
+    assert!(registry.snapshot().is_empty());
+    let out = mgr.create_additional().await.expect("capped");
+    assert_eq!(out["status"], "none");
+    assert_eq!(post.calls(), 0);
+}
+
+#[tokio::test]
+async fn create_additional_lock_caps_concurrent_creates() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    stub_tags(&server);
+    let posts = Arc::new(AtomicUsize::new(0));
+    let listed = posts.clone();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .is_true(move |_| listed.load(Ordering::SeqCst) == 0);
+        then.status(200).json_body(json!([]));
+    });
+    let listed_after = posts.clone();
+    server.mock(|when, then| {
+        when.method(GET)
+            .path("/v1/instances")
+            .is_true(move |_| listed_after.load(Ordering::SeqCst) > 0);
+        then.status(200)
+            .json_body(json!([owned_instance("inst-cap")]));
+    });
+    let flag = posts.clone();
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances").is_true(move |_| {
+            flag.fetch_add(1, Ordering::SeqCst);
+            true
+        });
+        then.status(200).json_body(json!({
+            "id": "inst-cap",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances/inst-cap");
+        then.status(200).json_body(json!({
+            "id": "inst-cap",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let (mgr, _, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = true;
+        c.verda.auto_scale_max_instances = 1;
+    });
+    persist_test_enroll(&fs, "verda-inst-cap", &server.base_url());
+    let mgr = Arc::new(mgr);
+    let a = {
+        let mgr = Arc::clone(&mgr);
+        tokio::spawn(async move { mgr.create_additional().await })
+    };
+    let b = {
+        let mgr = Arc::clone(&mgr);
+        tokio::spawn(async move { mgr.create_additional().await })
+    };
+    let _ = a.await.expect("join a");
+    let _ = b.await.expect("join b");
+    assert_eq!(post.calls(), 1);
+}
+
 #[test]
 fn forbidden_provider_symbols_absent() {
     let sources = [

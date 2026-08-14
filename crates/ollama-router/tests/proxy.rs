@@ -1212,3 +1212,53 @@ async fn auto_pull_wait_disconnect_does_not_inc_inflight() {
     let text = String::from_utf8_lossy(&text);
     assert!(text.contains("disconnected"), "{text}");
 }
+
+#[tokio::test]
+async fn draining_verda_is_skipped_for_client_forward() {
+    let keep = MockServer::start();
+    let spot = MockServer::start();
+    let keep_ok = keep.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let spot_hit = spot.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.2]]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "keep",
+        &keep.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    state
+        .registry
+        .upsert_verda(node("spot", &spot.base_url(), 24.0, 1, None));
+    mark_ready(&state, "keep", &["qwen3-embedding:8b"]);
+    mark_ready(&state, "spot", &["qwen3-embedding:8b"]);
+    assert!(state.registry.set_draining(&nid("spot"), true));
+
+    let (status, headers, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/embed",
+            json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-upstream")
+            .and_then(|v| v.to_str().ok()),
+        Some("keep")
+    );
+    assert_eq!(spot_hit.calls(), 0);
+    keep_ok.assert();
+}

@@ -17,6 +17,8 @@ use crate::types::{
 const TOKEN_PATH: &str = "/v1/oauth2/token";
 const TOKEN_LEEWAY: Duration = Duration::from_secs(30);
 const MAX_429_WAIT: Duration = Duration::from_secs(60);
+const LIST_PAGE_SIZE: u32 = 100;
+const LIST_MAX_PAGES: u32 = 50;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VerdaError {
@@ -259,12 +261,50 @@ impl VerdaClient {
     }
 
     async fn get_list(&self, path: &str) -> Result<Vec<Value>, VerdaError> {
-        let resp = self.request(reqwest::Method::GET, path, None, None).await?;
-        let data: Value = resp
-            .json()
-            .await
-            .map_err(|err| VerdaError::Message(format!("json: {err}")))?;
-        Ok(as_list(data))
+        let mut collected = Vec::new();
+        let mut page = 1u32;
+        let mut total: Option<u64> = None;
+        let sep = if path.contains('?') { '&' } else { '?' };
+        loop {
+            let paged = format!("{path}{sep}page={page}&pageSize={LIST_PAGE_SIZE}");
+            let resp = self
+                .request(reqwest::Method::GET, &paged, None, None)
+                .await?;
+            if page == 1 {
+                total = resp
+                    .headers()
+                    .get("x-total-count")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|s| s.parse::<u64>().ok());
+            }
+            let data: Value = resp
+                .json()
+                .await
+                .map_err(|err| VerdaError::Message(format!("json: {err}")))?;
+            let chunk = as_list(data);
+            let chunk_len = chunk.len();
+            collected.extend(chunk);
+            let Some(expected) = total else {
+                break;
+            };
+            let collected_len = u64::try_from(collected.len()).unwrap_or(u64::MAX);
+            if chunk_len == 0 || collected_len >= expected {
+                break;
+            }
+            page += 1;
+            if page > LIST_MAX_PAGES {
+                return Err(VerdaError::Message(
+                    "Verda list incomplete: page cap reached".into(),
+                ));
+            }
+        }
+        if let Some(expected) = total {
+            let collected_len = u64::try_from(collected.len()).unwrap_or(u64::MAX);
+            if collected_len < expected {
+                return Err(VerdaError::Message("Verda list incomplete".into()));
+            }
+        }
+        Ok(collected)
     }
 
     pub async fn get_instance_availability(&self) -> Result<Vec<InstanceAvailability>, VerdaError> {

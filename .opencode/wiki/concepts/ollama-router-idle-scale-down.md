@@ -6,7 +6,7 @@ sourceRefs:
   - crates/ollama-router-core/src/fleet
   - crates/ollama-router-verda
   - crates/ollama-router/src/proxy
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-14
 ---
 
 # Ollama Router Idle Scale-Down
@@ -49,8 +49,18 @@ request; otherwise `registered_at`. A router **restart does not mass-destroy**
 cloud GPUs.
 
 Candidates sort longest-idle first. Never destroy below `auto_scale_min_instances`.
-Verda destroy uses `delete_permanently`. Failed destroy **retains** Registry and
-FleetState ownership so reconcile can retry the still-billed resource.
+
+Before destroy, the manager marks the Verda node **draining** (ranking skips it;
+`Registry::inflight_inc` refuses new client forwards so the proxy retries another
+node before the first byte). It then re-reads `inflight` and the idle timestamps.
+If inflight is non-zero or the node is no longer idle, it **undrains** and skips.
+Only then does Verda destroy use `delete_permanently`. Failed destroy **keeps
+draining** and **retains** Registry and FleetState ownership so reconcile can
+retry the still-billed resource.
+
+Trimming above `auto_scale_max_instances` uses the same drain-and-verify path.
+Victim order is lowest activity (`last_client_request_at` else `registered_at`),
+then lowest inflight — never list order, never a fleet.yaml host.
 
 ## Demand-driven scale-up
 
@@ -61,7 +71,9 @@ When idle teardown leaves no healthy capacity, the next client miss
 **503 + `Retry-After: 30`**. Cold create may take minutes (provision + model pull).
 
 Demand skips when `auto_scale` is false or owned `verda-*` count is already at
-`auto_scale_max_instances` (`0` means unlimited).
+`auto_scale_max_instances` (`0` means unlimited). `create_additional` also
+enforces that cap under `ensure_lock` against a complete owned instance list
+(plus registry Verda ids as a floor).
 
 `create_additional` is scale-out: it must not adopt an existing running resource.
 `ensure(create=true)` stays adopt-first for startup and admin.
@@ -86,6 +98,8 @@ can double-create spots. The file lock is same-host only. Do not add Redis.
 | `auto_scale_min_instances` | `0` | `VERDA_AUTO_SCALE_MIN_INSTANCES` |
 | `auto_scale_max_instances` | `2` | `VERDA_AUTO_SCALE_MAX_INSTANCES` |
 | `auto_scale` | `true` | `VERDA_AUTO_SCALE` |
+| `orphan_reclaim_enabled` | `true` | `VERDA_ORPHAN_RECLAIM_ENABLED` |
+| `orphan_reclaim_grace_seconds` | `1800` | `VERDA_ORPHAN_RECLAIM_GRACE_SECONDS` |
 
 Day-1: `auto_scale_min_instances=0`, idle 900s, enable Verda only when needed.
 Do **not** install node-local cron/systemd idle killers — health probes fake

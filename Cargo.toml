@@ -44,6 +44,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 md-5 = "0.10"
 base64 = "0.22"
 secrecy = "0.10"
+sha2 = "0.10"
 sysinfo = "0.35"
 time = { version = "0.3", default-features = false, features = ["formatting", "std"] }
 
