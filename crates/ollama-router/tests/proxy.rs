@@ -1539,3 +1539,633 @@ async fn inflight_cas_does_not_overshoot_cap() {
     watch.abort();
     assert!(max_a.load(Ordering::Relaxed) <= 1);
 }
+
+fn openai_chat(model: &str) -> Value {
+    json!({
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": false
+    })
+}
+
+#[tokio::test]
+async fn openai_chat_sets_last_client_request_at() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id":"cmpl-1","choices":[{"message":{"role":"assistant","content":"ok"}}]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let gpu = nid("gpu");
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.registry.last_client_request_at(&gpu).is_some());
+    mock.assert();
+}
+
+#[tokio::test]
+async fn openai_get_chat_and_ps_do_not_set_last_client() {
+    let server = MockServer::start();
+    let ps = server.mock(|when, then| {
+        when.method(GET).path("/api/ps");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    let chat = server.mock(|when, then| {
+        when.method(GET).path("/v1/chat/completions");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let gpu = nid("gpu");
+
+    let (chat_status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert!(
+        chat_status == StatusCode::NOT_FOUND || chat_status == StatusCode::METHOD_NOT_ALLOWED,
+        "GET /v1/chat/completions must not forward, got {chat_status}"
+    );
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    assert_eq!(chat.calls(), 0);
+
+    let (ps_status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/api/ps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ps_status, StatusCode::OK);
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    ps.assert();
+}
+
+#[tokio::test]
+async fn openai_chat_cold_load_reserves_vram() {
+    let server = MockServer::start();
+    let _mock = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .delay(Duration::from_secs(30))
+            .body(r#"{"id":"cmpl-1"}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.1:8b"]);
+    let registry = std::sync::Arc::clone(&state.registry);
+    let gpu = nid("gpu");
+    let handle = tokio::spawn(make_app(state).oneshot(json_req(
+        Method::POST,
+        "/v1/chat/completions",
+        openai_chat("llama3.1:8b"),
+    )));
+    let started = Instant::now();
+    loop {
+        if registry.inflight(&gpu) == 1 {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            panic!("inflight never incremented");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        registry.reserved_vram_gb(&gpu) > 0.0,
+        "cold OpenAI chat should reserve vram"
+    );
+    handle.abort();
+    let _ = handle.await;
+}
+
+#[tokio::test]
+async fn openai_paths_set_request_class_header() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"data":[{"embedding":[0.1]}]}"#);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id":"cmpl-1"}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        80.0,
+        1,
+        None,
+    )]));
+    mark_ready(
+        &state,
+        "gpu",
+        &["all-minilm", "llama3.1:70b", "llama3.2:3b"],
+    );
+
+    let (_, headers, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/v1/embeddings",
+            json!({"model": "all-minilm", "input": ["hello"]}),
+        ),
+    )
+    .await;
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("embed")
+    );
+
+    let (_, headers, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.1:70b"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("large")
+    );
+
+    let (_, headers, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ),
+    )
+    .await;
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("small")
+    );
+}
+
+#[tokio::test]
+async fn openai_chat_sse_matches_upstream_chunks() {
+    let server = MockServer::start();
+    let stream = b"data: {\"id\":\"cmpl-1\",\"choices\":[{\"delta\":{\"content\":\"Hi\"}}]}\n\ndata: [DONE]\n\n";
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "text/event-stream")
+            .body(stream);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            json!({
+                "model": "llama3.2:3b",
+                "messages": [{"role": "user", "content": "hi"}],
+                "stream": true
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_ref(), stream);
+    mock.assert();
+}
+
+#[tokio::test]
+async fn openai_embeddings_does_not_rewrite_to_embed() {
+    let server = MockServer::start();
+    let openai = server.mock(|when, then| {
+        when.method(POST).path("/v1/embeddings");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"data":[{"embedding":[0.1]}]}"#);
+    });
+    let native = server.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200).body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["all-minilm"]);
+    let (status, _, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/embeddings",
+            json!({"model": "all-minilm", "input": ["hello", "world"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    openai.assert();
+    assert_eq!(native.calls(), 0);
+}
+
+#[tokio::test]
+async fn openai_retry_on_503_excludes_failed_node() {
+    let a = MockServer::start();
+    let c = MockServer::start();
+    let fail = a.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(503).body(r#"{"error":{"message":"busy"}}"#);
+    });
+    let ok = c.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id":"cmpl-1"}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("node-a", &a.base_url(), 8.0, 1, None),
+        node("node-c", &c.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "node-a", &["llama3.2:3b"]);
+    mark_ready(&state, "node-c", &["llama3.2:3b"]);
+    let (status, headers, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-upstream")
+            .and_then(|v| v.to_str().ok()),
+        Some("node-c")
+    );
+    fail.assert();
+    ok.assert();
+}
+
+async fn spawn_broken_sse_upstream() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(head).await;
+                let _ = sock.write_all(br#"data: {"id":"x"}"#).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn openai_mid_stream_failure_credits_fail_streak_without_retry() {
+    let (broken, broken_h) = spawn_broken_sse_upstream().await;
+    let other = MockServer::start();
+    let other_hit = other.mock(|when, then| {
+        when.method(POST).path("/v1/chat/completions");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"id":"cmpl-1"}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("node-a", &broken, 8.0, 1, None),
+        node("node-b", &other.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "node-a", &["llama3.2:3b"]);
+    mark_ready(&state, "node-b", &["llama3.2:3b"]);
+    let a = nid("node-a");
+    state.registry.mark_request_failure(&a);
+    state.registry.mark_request_failure(&a);
+    assert_eq!(state.registry.fail_streak(&a), 2);
+
+    let response = make_app(state.clone())
+        .oneshot(json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = response.into_body().collect().await;
+    assert_eq!(state.registry.fail_streak(&a), 3);
+    assert!(!state.registry.get(&a).unwrap().healthy);
+    assert_eq!(other_hit.calls(), 0);
+    broken_h.abort();
+}
+
+#[tokio::test]
+async fn openai_capacity_miss_uses_error_envelope_and_retry_after() {
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    let (status, headers, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("30")
+    );
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_object().expect("openai error object");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("no_healthy_nodes"));
+    assert_eq!(error["type"], "server_error");
+    assert_eq!(error["code"], "no_healthy_nodes");
+}
+
+#[tokio::test]
+async fn openai_exhausted_retry_is_openai_shaped_502() {
+    let state = state_from(RouterConfig {
+        nodes: vec![node("gpu", "http://127.0.0.1:1", 24.0, 1, None)],
+        timeouts: TimeoutsConfig {
+            connect_seconds: 0.2,
+            ..TimeoutsConfig::default()
+        },
+        ..RouterConfig::default()
+    });
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/chat/completions",
+            openai_chat("llama3.2:3b"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_object().expect("openai error object");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("upstream unavailable"));
+    assert_eq!(error["type"], "server_error");
+    assert_eq!(error["code"], "upstream_unavailable");
+}
+
+#[tokio::test]
+async fn native_chat_capacity_miss_stays_ollama_string() {
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/chat",
+            json!({"model": "llama3.2:3b", "messages": []}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("no_healthy_nodes"));
+}
+
+#[tokio::test]
+async fn openai_retrieve_model_from_aggregated_union() {
+    let state = state_from(fleet_config(vec![
+        node("a", "http://127.0.0.1:9", 8.0, 1, None),
+        node("b", "http://127.0.0.1:10", 24.0, 1, None),
+    ]));
+    mark_ready(&state, "a", &["llama3.2:3b"]);
+    mark_ready(&state, "b", &["llama3.1:8b"]);
+    let (status, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/v1/models/llama3.2:3b")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["id"], "llama3.2:3b");
+    assert_eq!(parsed["object"], "model");
+
+    let (missing, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/v1/models/missing:7b")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(missing, StatusCode::NOT_FOUND);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "model_not_found");
+    assert_eq!(parsed["error"]["type"], "invalid_request_error");
+}
+
+#[tokio::test]
+async fn unsupported_mutate_is_501_without_upstream() {
+    let server = MockServer::start();
+    let push = server.mock(|when, then| {
+        when.method(POST).path("/api/push");
+        then.status(200).body("{}");
+    });
+    let copy = server.mock(|when, then| {
+        when.method(POST).path("/api/copy");
+        then.status(200).body("{}");
+    });
+    let create = server.mock(|when, then| {
+        when.method(POST).path("/api/create");
+        then.status(200).body("{}");
+    });
+    let blobs = server.mock(|when, then| {
+        when.method(POST).path("/api/blobs/sha256-dead");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    for path in [
+        "/api/push",
+        "/api/copy",
+        "/api/create",
+        "/api/blobs/sha256-dead",
+    ] {
+        let (status, _, body) = send(
+            state.clone(),
+            json_req(Method::POST, path, json!({"model": "llama3.2:3b"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{path}");
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap()
+                .contains("not_a_fleet_operation"),
+            "{path}"
+        );
+    }
+    assert_eq!(push.calls(), 0);
+    assert_eq!(copy.calls(), 0);
+    assert_eq!(create.calls(), 0);
+    assert_eq!(blobs.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_show_is_generic_metadata_and_not_idle() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/api/show");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"modelfile":"FROM llama"}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.1:70b"]);
+    let gpu = nid("gpu");
+    let (status, headers, _) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/show", json!({"name": "llama3.1:70b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("generic")
+    );
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    assert_eq!(state.registry.inflight(&gpu), 0);
+    mock.assert();
+}
+
+#[tokio::test]
+async fn unknown_openai_path_is_404_without_inflight() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/v1/images/generations");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let gpu = nid("gpu");
+    let (status, _, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/v1/images/generations",
+            json!({"model": "llama3.2:3b", "prompt": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "unknown_path");
+    assert_eq!(parsed["error"]["type"], "invalid_request_error");
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    assert_eq!(hit.calls(), 0);
+}

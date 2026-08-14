@@ -39,11 +39,11 @@
 
 Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-balances generate, chat, and embed across a mixed CPU+GPU fleet you already run (the router process itself needs **no GPU**), then optionally bursts onto Verda NVIDIA **spot** GPUs over a self-hosted zrok **private** share.
 
-- **Ollama surface** — `POST /api/generate`, `/api/chat`, `/api/embed` (plus `/api/embeddings` rewritten to `/api/embed` for Ollama ≤0.32). Aggregated `GET /api/tags` and OpenAI-compatible `GET /v1/models`. NDJSON streaming.
+- **Ollama + OpenAI surface** — native `POST /api/generate`, `/api/chat`, `/api/embed` (plus `/api/embeddings` rewritten to `/api/embed` for Ollama ≤0.32). OpenAI passthrough `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` (Ollama's shim on the ranked node; counts as client demand). Aggregated `GET /api/tags`, `GET /v1/models`, and `GET /v1/models/{id}`. Native streams are NDJSON; OpenAI streams are SSE.
 - **Utilization WLC** — rank by `inflight / capacity`, then RAM pressure, then class preference (embed / small / medium / large). Saturated nodes are never a fallback.
 - **fleet.yaml inventory** — `OLLAMA_ROUTER_FLEET` + durable FleetState + Verda. Tunables YAML is tunables only.
 - **Verda spots** — cheapest, then smallest GPU inside an inclusive 8–80 GiB VRAM window. Public `:11434` and hostname public tunnels (`*.zrok.io` etc.) are never healthy.
-- **Idle teardown** — router-owned. Only proxied client forwards reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count. **Never destroy fleet.yaml hosts.**
+- **Idle teardown** — router-owned. Only proxied client inference forwards (native generate/chat/embed **and** OpenAI chat/completions/embeddings) reset the timer. Health, `/api/ps`, capacity, admin, and the warm-keeper do not count. **Never destroy fleet.yaml hosts.**
 - **Capacity miss** — coalesced async Verda `create_additional` (not adopt-first `ensure`). The client gets **503 + `Retry-After`**, never a blocked provision. **v1: one router replica** — two processes sharing FleetState can double-create; do not add Redis.
 
 - **Node agent on each Ollama host** — `ollama-node-agent` (`setup` elevated, `serve` unprivileged on `:11436`). Shared JSON in `ollama-capacity-types`. GiB = bytes / `1024³`. The router does not install Ollama.

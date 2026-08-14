@@ -1,6 +1,6 @@
 ---
 name: idle-scale-down
-description: Implements router-owned Verda idle teardown driven only by last_client_request_at from inflight_inc on generate/chat/embed. Use when changing registry inflight, health probes, warm-keeper, cloud reconcile, or idle timeout knobs.
+description: Implements router-owned Verda idle teardown driven only by last_client_request_at from inflight_inc on generate/chat/embed and OpenAI /v1 inference. Use when changing registry inflight, health probes, warm-keeper, cloud reconcile, or idle timeout knobs.
 ---
 
 # Idle scale-down
@@ -11,12 +11,14 @@ Implementation: `crates/ollama-router-core/src/cloud/` + `Registry::inflight_inc
 ## Single write site
 
 `last_client_request_at` updates **only** inside `inflight_inc`, and
-`inflight_inc` is called **only** from proxied client generate / chat / embed.
+`inflight_inc` is called **only** from proxied client inference forwards
+(native generate/chat/embed **and** OpenAI `/v1/chat/completions`,
+`/v1/completions`, `/v1/embeddings`). POST only.
 
 | Counts | Does not count |
 |--------|----------------|
 | Client generate/chat/embed forwards | Health `set_healthy` |
-| | `/api/ps` |
+| OpenAI chat/completions/embeddings | `/api/ps` |
 | | Capacity agent |
 | | Admin `/router/v1/*` |
 | | Warm-keeper (occupies inflight without `inflight_inc`) |
@@ -32,9 +34,9 @@ Destroy with `delete_permanently`. Failed destroy keeps ownership.
 
 ## Demand scale-up
 
-Client miss → coalesced async Verda `ensure` → **503 + Retry-After**. Do not
-block the request on provision. `create_additional` must not adopt existing
-capacity.
+Client miss → coalesced async Verda `create_additional` → **503 + Retry-After**.
+Do not block the request on provision. `create_additional` must not adopt
+existing capacity. `ensure` stays adopt-first for startup and admin.
 
 ## Knobs
 

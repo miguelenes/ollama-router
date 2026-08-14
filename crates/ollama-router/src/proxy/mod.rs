@@ -1,4 +1,8 @@
 //! NDJSON streaming reverse proxy; `/api/embeddings` → `/api/embed`.
+//!
+//! OpenAI `POST /v1/chat/completions`, `/v1/completions`, and `/v1/embeddings`
+//! are passthrough client forwards (idle + reservation). Router-originated
+//! errors on `/v1/*` use the OpenAI error envelope.
 
 mod telemetry;
 
@@ -19,12 +23,13 @@ use futures_util::Stream;
 use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
-use ollama_router_core::fleet::{InflightAdmit, NodeId, NodeSnapshot, Registry};
+use ollama_router_core::fleet::{normalize_model, InflightAdmit, NodeId, NodeSnapshot, Registry};
 use ollama_router_core::http_util::reqwest_error_for_log;
 use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify, estimate_request_ram_gb, estimate_request_vram_gb,
-    placement_eligible_node_ids, rank_nodes, RankOutcome, RequestClass, RoutingError, TargetSpec,
+    is_inference_path, placement_eligible_node_ids, rank_nodes, RankOutcome, RequestClass,
+    RoutingError, TargetSpec,
 };
 use serde_json::{json, Value};
 use tokio::sync::OwnedSemaphorePermit;
@@ -59,6 +64,17 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     if clean == "/v1/models" && method == Method::GET {
         return aggregated_openai_models(state);
     }
+    if method == Method::GET {
+        if let Some(id) = openai_model_id(clean) {
+            return openai_model_by_id(state, id);
+        }
+    }
+    if uses_openai_error_shape(clean) && !is_supported_openai_path(&method, clean) {
+        return openai_unknown_path(clean);
+    }
+    if is_unsupported_mutate(clean) {
+        return unsupported_fleet_mutate(clean);
+    }
 
     let (parts, incoming_body) = req.into_parts();
     let incoming_headers = parts.headers;
@@ -77,17 +93,31 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
         .await
         {
             Ok(bytes) => {
-                model = extract_model(&bytes);
+                model = extract_named_field(&bytes, "model");
+                if model.is_none() && clean == "/api/show" {
+                    model = extract_named_field(&bytes, "name");
+                }
                 body = bytes;
             }
             Err(BodyCapError::InvalidContentLength) => {
-                return json_error(
+                return router_error(
+                    &path,
                     StatusCode::BAD_REQUEST,
-                    json!({"error": "ollama-router: invalid Content-Length"}),
+                    "ollama-router: invalid Content-Length",
+                    "invalid_content_length",
                     None,
                 );
             }
             Err(BodyCapError::TooLarge) => {
+                if uses_openai_error_shape(&path) {
+                    return router_error(
+                        &path,
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "ollama-router: request body exceeds configured limit",
+                        "payload_too_large",
+                        None,
+                    );
+                }
                 return json_error(
                     StatusCode::PAYLOAD_TOO_LARGE,
                     json!({
@@ -98,9 +128,11 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
                 );
             }
             Err(BodyCapError::Interrupted) => {
-                return json_error(
+                return router_error(
+                    &path,
                     StatusCode::BAD_REQUEST,
-                    json!({"error": "ollama-router: request body interrupted"}),
+                    "ollama-router: request body interrupted",
+                    "body_interrupted",
                     None,
                 );
             }
@@ -207,7 +239,7 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
             DemandScale::request_scale_up(state.demand.as_ref(), reason);
         }
         state.metrics.route_reason(reason.as_reason_code());
-        let response = no_candidate_response(reason, model, request_class, policy);
+        let response = no_candidate_response(path, reason, model, request_class, policy);
         state.metrics.observe_request(
             request_class.as_str(),
             response.status().as_u16(),
@@ -270,7 +302,7 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
                     }
                     ForwardError::Fatal { kind, message } => {
                         state.registry.mark_request_failure(&node.id);
-                        let response = upstream_unavailable(kind, message);
+                        let response = upstream_unavailable(path, kind, message);
                         state.metrics.observe_request(
                             request_class.as_str(),
                             response.status().as_u16(),
@@ -298,18 +330,23 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
             DemandScale::request_scale_up(state.demand.as_ref(), RoutingError::Saturated);
             json_error(
                 StatusCode::SERVICE_UNAVAILABLE,
-                json!({
-                    "error": format!(
+                client_error_body(
+                    path,
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    &format!(
                         "ollama-router: all attempted nodes are overloaded (upstream http {status}) [class: {request_class}, reason: {}]",
                         RoutingError::Saturated.as_reason_code()
-                    )
-                }),
+                    ),
+                    RoutingError::Saturated.as_reason_code(),
+                ),
                 Some(policy.saturated_retry_after_seconds),
             )
         }
-        Some(ForwardError::Retryable { reason, message }) => upstream_unavailable(reason, &message),
-        Some(ForwardError::Fatal { kind, message }) => upstream_unavailable(&kind, &message),
-        None => upstream_unavailable("unknown", "no node"),
+        Some(ForwardError::Retryable { reason, message }) => {
+            upstream_unavailable(path, reason, &message)
+        }
+        Some(ForwardError::Fatal { kind, message }) => upstream_unavailable(path, &kind, &message),
+        None => upstream_unavailable(path, "unknown", "no node"),
     };
     state.metrics.observe_request(
         request_class.as_str(),
@@ -382,7 +419,7 @@ async fn forward_once(
         url.push_str(q);
     }
 
-    let client_forward = is_client_forward(call.path);
+    let client_forward = is_client_forward(&call.method, call.path);
     let timeout = class_timeout(&state.config.timeouts, call.request_class);
     let headers = forward_headers(call.incoming_headers);
     let permit = state
@@ -492,10 +529,15 @@ async fn forward_once(
         "route"
     );
 
-    // Client drop of the Axum body drops `bytes_stream`, which aborts the upstream HTTP body.
+    let collector = IncrementalCollector::for_content_type(
+        response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+    );
     let stream = ProxyStream {
         inner: Box::pin(response.bytes_stream()),
-        collector: IncrementalCollector::new(),
+        collector,
         inflight: Some(guard),
         _permit: Some(permit),
         node: node.id.as_str().to_string(),
@@ -509,11 +551,8 @@ async fn forward_once(
     Ok(res)
 }
 
-fn is_client_forward(path: &str) -> bool {
-    matches!(
-        path.trim_end_matches('/'),
-        "/api/generate" | "/api/chat" | "/api/embed" | "/api/embeddings"
-    )
+fn is_client_forward(method: &Method, path: &str) -> bool {
+    *method == Method::POST && is_inference_path(path)
 }
 
 fn maybe_reserve(
@@ -711,12 +750,12 @@ async fn read_body_capped(
     }
 }
 
-fn extract_model(body: &[u8]) -> Option<String> {
+fn extract_named_field(body: &[u8], key: &str) -> Option<String> {
     if body.is_empty() {
         return None;
     }
     let data: Value = serde_json::from_slice(body).ok()?;
-    data.get("model")?
+    data.get(key)?
         .as_str()
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -925,6 +964,7 @@ fn observe_reject(
 }
 
 fn pull_enqueued_response(
+    path: &str,
     model: &str,
     job_id: &JobId,
     nodes: &[NodeId],
@@ -932,20 +972,23 @@ fn pull_enqueued_response(
 ) -> Response {
     let node_ids: Vec<&str> = nodes.iter().map(NodeId::as_str).collect();
     let nodes_fmt = node_ids.join(", ");
-    json_error(
+    let message = format!(
+        "ollama-router: model {model} missing; pull enqueued on placement nodes {nodes_fmt} (job {job_id}, retry in {retry_after}s)"
+    );
+    let mut body = client_error_body(
+        path,
         StatusCode::SERVICE_UNAVAILABLE,
-        json!({
-            "error": format!(
-                "ollama-router: model {model} missing; pull enqueued on placement nodes {nodes_fmt} (job {job_id}, retry in {retry_after}s)"
-            ),
-            "reason": "pull_enqueued",
-            "job_id": job_id.to_string(),
-            "model": model,
-            "nodes": node_ids,
-            "retry_after_seconds": retry_after,
-        }),
-        Some(retry_after),
-    )
+        &message,
+        "pull_enqueued",
+    );
+    if let Some(obj) = body.as_object_mut() {
+        obj.insert("reason".into(), json!("pull_enqueued"));
+        obj.insert("job_id".into(), json!(job_id.to_string()));
+        obj.insert("model".into(), json!(model));
+        obj.insert("nodes".into(), json!(node_ids));
+        obj.insert("retry_after_seconds".into(), json!(retry_after));
+    }
+    json_error(StatusCode::SERVICE_UNAVAILABLE, body, Some(retry_after))
 }
 
 async fn auto_pull_on_miss(
@@ -969,8 +1012,13 @@ async fn auto_pull_on_miss(
         state
             .metrics
             .route_reason(RoutingError::Capacity.as_reason_code());
-        let response =
-            no_candidate_response(RoutingError::Capacity, Some(model), request_class, policy);
+        let response = no_candidate_response(
+            path,
+            RoutingError::Capacity,
+            Some(model),
+            request_class,
+            policy,
+        );
         return AutoPullResult::Done(observe_reject(state, request_class, start, response));
     }
 
@@ -992,6 +1040,7 @@ async fn auto_pull_on_miss(
                 .metrics
                 .route_reason(RoutingError::ModelMissing.as_reason_code());
             let response = no_candidate_response(
+                path,
                 RoutingError::ModelMissing,
                 Some(model),
                 request_class,
@@ -1015,13 +1064,14 @@ async fn auto_pull_on_miss(
     let retry_after = policy.pull_miss_retry_after_seconds;
     let wait = policy.auto_pull_wait_seconds;
     if wait <= 0.0 {
-        let response = pull_enqueued_response(model, &job.id, &eligible, retry_after);
+        let response = pull_enqueued_response(path, model, &job.id, &eligible, retry_after);
         return AutoPullResult::Done(observe_reject(state, request_class, start, response));
     }
 
     wait_for_pull(
         state,
         PullWait {
+            path,
             request_class,
             model,
             start,
@@ -1035,6 +1085,7 @@ async fn auto_pull_on_miss(
 }
 
 struct PullWait<'a> {
+    path: &'a str,
     request_class: RequestClass,
     model: &'a str,
     start: Instant,
@@ -1046,6 +1097,7 @@ struct PullWait<'a> {
 
 async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
     let PullWait {
+        path,
         request_class,
         model,
         start,
@@ -1062,7 +1114,7 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
     loop {
         if Instant::now() >= deadline {
             guard.record("timeout");
-            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
             return AutoPullResult::Done(observe_reject(state, request_class, start, response));
         }
 
@@ -1079,7 +1131,7 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
                 return AutoPullResult::Forward(ranked);
             }
             guard.record("pull_finished");
-            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
             return AutoPullResult::Done(observe_reject(state, request_class, start, response));
         }
 
@@ -1089,7 +1141,7 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
             .is_some_and(|job| !job.status.is_incomplete())
         {
             guard.record("pull_finished");
-            let response = pull_enqueued_response(model, &job_id, eligible, retry_after);
+            let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
             return AutoPullResult::Done(observe_reject(state, request_class, start, response));
         }
 
@@ -1098,6 +1150,7 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
 }
 
 fn no_candidate_response(
+    path: &str,
     reason: RoutingError,
     model: Option<&str>,
     request_class: RequestClass,
@@ -1113,23 +1166,173 @@ fn no_candidate_response(
     ));
     json_error(
         StatusCode::SERVICE_UNAVAILABLE,
-        json!({"error": detail}),
+        client_error_body(
+            path,
+            StatusCode::SERVICE_UNAVAILABLE,
+            &detail,
+            reason.as_reason_code(),
+        ),
         reason.retry_after_seconds(policy),
     )
 }
 
-fn upstream_unavailable(kind: &str, message: &str) -> Response {
+fn upstream_unavailable(path: &str, kind: &str, message: &str) -> Response {
+    let detail = format!(
+        "ollama-router: upstream unavailable ({}: {})",
+        kind,
+        truncate(message, 200)
+    );
     json_error(
         StatusCode::BAD_GATEWAY,
+        client_error_body(
+            path,
+            StatusCode::BAD_GATEWAY,
+            &detail,
+            "upstream_unavailable",
+        ),
+        None,
+    )
+}
+
+fn uses_openai_error_shape(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    p == "/v1" || p.starts_with("/v1/")
+}
+
+fn is_supported_openai_path(method: &Method, path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    match (method, p) {
+        (&Method::GET, "/v1/models") => true,
+        (&Method::GET, rest) if openai_model_id(rest).is_some() => true,
+        (&Method::POST, "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings") => true,
+        _ => false,
+    }
+}
+
+fn openai_model_id(path: &str) -> Option<&str> {
+    path.strip_prefix("/v1/models/").filter(|id| !id.is_empty())
+}
+
+fn is_unsupported_mutate(path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    matches!(p, "/api/push" | "/api/copy" | "/api/create") || p.starts_with("/api/blobs")
+}
+
+fn openai_error_type(status: StatusCode) -> &'static str {
+    match status.as_u16() {
+        400 | 404 | 413 => "invalid_request_error",
+        _ => "server_error",
+    }
+}
+
+fn client_error_body(path: &str, status: StatusCode, message: &str, code: &str) -> Value {
+    if uses_openai_error_shape(path) {
+        json!({
+            "error": {
+                "message": message,
+                "type": openai_error_type(status),
+                "code": code,
+            }
+        })
+    } else {
+        json!({"error": message})
+    }
+}
+
+fn router_error(
+    path: &str,
+    status: StatusCode,
+    message: &str,
+    code: &str,
+    retry_after: Option<u32>,
+) -> Response {
+    json_error(
+        status,
+        client_error_body(path, status, message, code),
+        retry_after,
+    )
+}
+
+fn openai_unknown_path(path: &str) -> Response {
+    router_error(
+        path,
+        StatusCode::NOT_FOUND,
+        "ollama-router: unknown OpenAI-compatible path",
+        "unknown_path",
+        None,
+    )
+}
+
+fn unsupported_fleet_mutate(path: &str) -> Response {
+    json_error(
+        StatusCode::NOT_IMPLEMENTED,
         json!({
             "error": format!(
-                "ollama-router: upstream unavailable ({}: {})",
-                kind,
-                truncate(message, 200)
+                "ollama-router: {path} is not a fleet operation; use POST /api/pull or admin /router/v1/models/ensure [reason: not_a_fleet_operation]"
             )
         }),
         None,
     )
+}
+
+/// Aggregated retrieve for `GET /v1/models/{id}`. Soft-fail/partial like the list.
+pub(crate) fn openai_model_by_id(state: &AppState, id: &str) -> Response {
+    let decoded = percent_decode_path(id);
+    let target = normalize_model(&decoded);
+    let found = state
+        .registry
+        .aggregated_tags()
+        .into_iter()
+        .find(|(name, _nodes)| name == &target);
+    match found {
+        Some((name, _nodes)) => {
+            state.metrics.observe_discovery("openai_models");
+            json_error(
+                StatusCode::OK,
+                json!({
+                    "id": name,
+                    "object": "model",
+                    "created": 0,
+                    "owned_by": "library",
+                }),
+                None,
+            )
+        }
+        None => router_error(
+            "/v1/models",
+            StatusCode::NOT_FOUND,
+            &format!("The model '{decoded}' does not exist"),
+            "model_not_found",
+            None,
+        ),
+    }
+}
+
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(high), Some(low)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((high << 4) | low);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_string())
+}
+
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn json_error(status: StatusCode, body: Value, retry_after: Option<u32>) -> Response {

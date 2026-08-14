@@ -19,9 +19,10 @@ observed for `idle_timeout_seconds`. Implemented on the shared cloud manager in
 
 The proxy updates the per-node idle timestamp only inside
 `Registry::inflight_inc` (atomic millis; `last_client_request_at` is the
-reader) — called exclusively from client forward paths
-(`generate`, `chat`, `embed` / embeddings). That write site is the **only**
-activity signal for idle scale-down.
+reader) — called exclusively from client inference forwards
+(`POST /api/generate`, `/api/chat`, `/api/embed` / embeddings, and OpenAI
+`POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings`). That write
+site is the **only** activity signal for idle scale-down.
 
 Does **not** count:
 
