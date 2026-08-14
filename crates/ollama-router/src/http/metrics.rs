@@ -571,7 +571,7 @@ impl Metrics {
                     && node.url.as_deref().is_some_and(url_is_safe_overlay)
             });
             set_i(&self.tunnel_up, &[id], i64::from(tunnel_up));
-            for gpu in &node.gpus_detail {
+            for gpu in node.gpus_detail.iter() {
                 let gpu_id = gpu.index.to_string();
                 let labels = [id, gpu_id.as_str()];
                 set_g(&self.gpu_vram, &labels, gpu.vram_total_gb);

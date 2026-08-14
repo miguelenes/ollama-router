@@ -812,8 +812,8 @@ impl PullOrchestrator {
         if let Some(reg) = &self.inner.registry {
             if let Ok(id) = NodeId::parse(node_id) {
                 if let Some(node) = reg.get(&id) {
-                    return match node.url {
-                        Some(url) if !url.is_empty() => (Some(url), None),
+                    return match node.url.as_deref() {
+                        Some(url) if !url.is_empty() => (Some(url.to_string()), None),
                         _ => (None, Some("node has no url (not yet provisioned)".into())),
                     };
                 }

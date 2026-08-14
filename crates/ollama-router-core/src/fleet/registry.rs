@@ -1,8 +1,13 @@
 //! Live in-memory fleet view: health, inflight, models, reservations.
+//!
+//! Membership (`HashMap` of `Arc<Node>`) is guarded by a process-wide `RwLock`
+//! taken only on insert/remove/upsert. Per-request counters live in atomics on
+//! each `Node` so generate/chat/embed do not take a global write lock.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::{Duration, Instant};
 
 use crate::capacity::{
     merge_capacity, CapacityInventory, CapacityReport, CapacitySource, GpuBackend, GpuDetail,
@@ -96,12 +101,57 @@ fn models_match(have: &HashSet<String>, requested: &str) -> bool {
     false
 }
 
+static PROCESS_EPOCH: OnceLock<Instant> = OnceLock::new();
+
+fn process_epoch() -> Instant {
+    *PROCESS_EPOCH.get_or_init(Instant::now)
+}
+
+/// Monotonic millis since process epoch. `0` is reserved for "never".
+fn now_ms() -> u64 {
+    let ms = process_epoch()
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX));
+    (ms as u64).max(1)
+}
+
+fn instant_from_ms(ms: u64) -> Instant {
+    process_epoch() + Duration::from_millis(ms)
+}
+
+fn load_f64(atom: &AtomicU64) -> f64 {
+    f64::from_bits(atom.load(Ordering::Relaxed))
+}
+
+fn store_f64(atom: &AtomicU64, value: f64) {
+    atom.store(value.to_bits(), Ordering::Relaxed);
+}
+
+fn saturating_fetch_add(atom: &AtomicU32) {
+    let _ = atom.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_add(1))
+    });
+}
+
+/// Saturating decrement; returns the new value.
+fn saturating_fetch_sub(atom: &AtomicU32) -> u32 {
+    atom.fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+        Some(v.saturating_sub(1))
+    })
+    .map_or(0, |prev| prev.saturating_sub(1))
+}
+
+fn opt_arc_str(value: Option<String>) -> Option<Arc<str>> {
+    value.map(Arc::from)
+}
+
 /// Ranking / forwarding snapshot of one node. Pure; no locks.
 #[derive(Clone, Debug)]
 pub struct NodeSnapshot {
     pub id: NodeId,
-    pub url: Option<String>,
-    pub labels: Vec<String>,
+    pub url: Option<Arc<str>>,
+    pub labels: Arc<[String]>,
     pub healthy: bool,
     pub models: Arc<HashSet<String>>,
     pub loaded_models: Arc<HashSet<String>>,
@@ -125,15 +175,15 @@ pub struct NodeSnapshot {
     pub loaded_model_count: Option<u32>,
     pub disk_total_gb: Option<f64>,
     pub disk_available_gb: Option<f64>,
-    pub gpus_detail: Vec<GpuSnapshot>,
+    pub gpus_detail: Arc<[GpuSnapshot]>,
     pub pressure_level: PressureLevel,
     pub fail_streak: u32,
     pub draining: bool,
     pub origin: NodeOrigin,
-    pub capacity_url: Option<String>,
+    pub capacity_url: Option<Arc<str>>,
     pub capacity_source: CapacitySource,
-    pub capacity_error: Option<String>,
-    pub unhealthy_reason: Option<String>,
+    pub capacity_error: Option<Arc<str>>,
+    pub unhealthy_reason: Option<Arc<str>>,
 }
 
 impl NodeSnapshot {
@@ -203,7 +253,7 @@ impl NodeSnapshot {
 }
 
 /// Bounded per-GPU row for Prometheus `{node,gpu}` series. No marketing names.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct GpuSnapshot {
     pub index: i32,
     pub vram_total_gb: f64,
@@ -232,22 +282,26 @@ impl GpuSnapshot {
     }
 }
 
-struct NodeState {
-    config: NodeConfig,
+#[derive(Default)]
+struct ReservationLedger {
+    vram: HashMap<u64, (String, f64)>,
+    ram: HashMap<u64, (String, f64)>,
+    next_id: u64,
+    reserved_vram_gb: f64,
+    reserved_ram_gb: f64,
+}
+
+struct Cold {
+    url: Option<Arc<str>>,
+    capacity_url: Option<Arc<str>>,
+    labels: Arc<[String]>,
+    max_inflight: Option<u32>,
+    static_capacity: Capacity,
     healthy: bool,
-    fail_streak: u32,
     success_streak: u32,
     models: Arc<HashSet<String>>,
     loaded_models: Arc<HashSet<String>>,
-    inflight: u32,
-    last_client_request_at: Option<Instant>,
-    registered_at: Instant,
     loaded_vram_gb: Option<f64>,
-    reserved_vram_gb: f64,
-    reserved_ram_gb: f64,
-    reservations: HashMap<u64, (String, f64)>,
-    ram_reservations: HashMap<u64, (String, f64)>,
-    next_reservation_id: u64,
     ram_available_gb: Option<f64>,
     ram_available_ratio: Option<f64>,
     vram_free_gb: Option<f64>,
@@ -262,119 +316,188 @@ struct NodeState {
     loaded_model_count: Option<u32>,
     disk_total_gb: Option<f64>,
     disk_available_gb: Option<f64>,
-    gpus_detail: Vec<GpuSnapshot>,
+    gpus_detail: Arc<[GpuSnapshot]>,
     pressure_level: PressureLevel,
     capacity_effective: Capacity,
     capacity_discovered: Option<Capacity>,
     capacity_source: CapacitySource,
-    capacity_error: Option<String>,
-    unhealthy_reason: Option<String>,
+    capacity_error: Option<Arc<str>>,
+    unhealthy_reason: Option<Arc<str>>,
     next_probe_at: Instant,
     probe_backoff: f64,
-    origin: NodeOrigin,
-    draining: bool,
 }
 
-impl NodeState {
+struct Node {
+    id: NodeId,
+    origin: NodeOrigin,
+    registered_at: Instant,
+    inflight: AtomicU32,
+    last_client_ms: AtomicU64,
+    reserved_vram_bits: AtomicU64,
+    reserved_ram_bits: AtomicU64,
+    draining: AtomicBool,
+    fail_streak: AtomicU32,
+    reservations: Mutex<ReservationLedger>,
+    cold: RwLock<Cold>,
+}
+
+impl Node {
     fn from_config(config: NodeConfig, origin: NodeOrigin) -> Self {
         let merged = merge_capacity(&config.static_capacity, None, None);
+        let id = config.id.clone();
         Self {
-            config,
-            healthy: false,
-            fail_streak: 0,
-            success_streak: 0,
-            models: Arc::new(HashSet::new()),
-            loaded_models: Arc::new(HashSet::new()),
-            inflight: 0,
-            last_client_request_at: None,
-            registered_at: Instant::now(),
-            loaded_vram_gb: None,
-            reserved_vram_gb: 0.0,
-            reserved_ram_gb: 0.0,
-            reservations: HashMap::new(),
-            ram_reservations: HashMap::new(),
-            next_reservation_id: 0,
-            ram_available_gb: None,
-            ram_available_ratio: None,
-            vram_free_gb: None,
-            vram_free_known: false,
-            vram_used_gb: None,
-            vram_used_known: false,
-            gpu_util_pct: None,
-            gpu_util_known: false,
-            gpu_backend: GpuBackend::Unknown,
-            cpu_usage_pct: None,
-            ollama_running: None,
-            loaded_model_count: None,
-            disk_total_gb: None,
-            disk_available_gb: None,
-            gpus_detail: Vec::new(),
-            pressure_level: PressureLevel::Unknown,
-            capacity_effective: merged.capacity,
-            capacity_discovered: None,
-            capacity_source: merged.source,
-            capacity_error: None,
-            unhealthy_reason: None,
-            next_probe_at: Instant::now(),
-            probe_backoff: 0.0,
+            id,
             origin,
-            draining: false,
+            registered_at: Instant::now(),
+            inflight: AtomicU32::new(0),
+            last_client_ms: AtomicU64::new(0),
+            reserved_vram_bits: AtomicU64::new(0.0f64.to_bits()),
+            reserved_ram_bits: AtomicU64::new(0.0f64.to_bits()),
+            draining: AtomicBool::new(false),
+            fail_streak: AtomicU32::new(0),
+            reservations: Mutex::new(ReservationLedger::default()),
+            cold: RwLock::new(Cold {
+                url: opt_arc_str(config.url),
+                capacity_url: opt_arc_str(config.capacity_url),
+                labels: Arc::from(config.labels),
+                max_inflight: config.max_inflight,
+                static_capacity: config.static_capacity,
+                healthy: false,
+                success_streak: 0,
+                models: Arc::new(HashSet::new()),
+                loaded_models: Arc::new(HashSet::new()),
+                loaded_vram_gb: None,
+                ram_available_gb: None,
+                ram_available_ratio: None,
+                vram_free_gb: None,
+                vram_free_known: false,
+                vram_used_gb: None,
+                vram_used_known: false,
+                gpu_util_pct: None,
+                gpu_util_known: false,
+                gpu_backend: GpuBackend::Unknown,
+                cpu_usage_pct: None,
+                ollama_running: None,
+                loaded_model_count: None,
+                disk_total_gb: None,
+                disk_available_gb: None,
+                gpus_detail: Arc::from(Vec::new()),
+                pressure_level: PressureLevel::Unknown,
+                capacity_effective: merged.capacity,
+                capacity_discovered: None,
+                capacity_source: merged.source,
+                capacity_error: None,
+                unhealthy_reason: None,
+                next_probe_at: Instant::now(),
+                probe_backoff: 0.0,
+            }),
         }
     }
 
-    fn apply_permanent_config(&mut self, config: NodeConfig) {
-        self.config.url = config.url;
-        self.config.labels = config.labels;
-        self.config.capacity_url = config.capacity_url;
-        self.config.max_inflight = config.max_inflight;
-        self.config.static_capacity = config.static_capacity;
-        remarge(self);
-        self.draining = false;
+    fn cold_read(&self) -> RwLockReadGuard<'_, Cold> {
+        self.cold
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn cold_write(&self) -> RwLockWriteGuard<'_, Cold> {
+        self.cold
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn ledger(&self) -> std::sync::MutexGuard<'_, ReservationLedger> {
+        self.reservations
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn apply_permanent_config(&self, config: NodeConfig) {
+        let mut cold = self.cold_write();
+        cold.url = opt_arc_str(config.url);
+        cold.labels = Arc::from(config.labels);
+        cold.capacity_url = opt_arc_str(config.capacity_url);
+        cold.max_inflight = config.max_inflight;
+        cold.static_capacity = config.static_capacity;
+        remarge(&mut cold);
+        drop(cold);
+        self.draining.store(false, Ordering::Release);
     }
 
     fn snapshot(&self) -> NodeSnapshot {
+        let cold = self.cold_read();
         NodeSnapshot {
-            id: self.config.id.clone(),
-            url: self.config.url.clone(),
-            labels: self.config.labels.clone(),
-            healthy: self.healthy,
-            models: Arc::clone(&self.models),
-            loaded_models: Arc::clone(&self.loaded_models),
-            inflight: self.inflight,
-            max_inflight: self.config.max_inflight,
-            capacity: self.capacity_effective,
-            reserved_vram_gb: self.reserved_vram_gb,
-            reserved_ram_gb: self.reserved_ram_gb,
-            loaded_vram_gb: self.loaded_vram_gb,
-            ram_available_gb: self.ram_available_gb,
-            ram_available_ratio: self.ram_available_ratio,
-            vram_free_gb: self.vram_free_gb,
-            vram_free_known: self.vram_free_known,
-            vram_used_gb: self.vram_used_gb,
-            vram_used_known: self.vram_used_known,
-            gpu_util_pct: self.gpu_util_pct,
-            gpu_util_known: self.gpu_util_known,
-            gpu_backend: self.gpu_backend,
-            cpu_usage_pct: self.cpu_usage_pct,
-            ollama_running: self.ollama_running,
-            loaded_model_count: self.loaded_model_count,
-            disk_total_gb: self.disk_total_gb,
-            disk_available_gb: self.disk_available_gb,
-            gpus_detail: self.gpus_detail.clone(),
-            pressure_level: self.pressure_level,
-            fail_streak: self.fail_streak,
-            draining: self.draining,
+            id: self.id.clone(),
+            url: cold.url.clone(),
+            labels: Arc::clone(&cold.labels),
+            healthy: cold.healthy,
+            models: Arc::clone(&cold.models),
+            loaded_models: Arc::clone(&cold.loaded_models),
+            inflight: self.inflight.load(Ordering::Relaxed),
+            max_inflight: cold.max_inflight,
+            capacity: cold.capacity_effective,
+            reserved_vram_gb: load_f64(&self.reserved_vram_bits),
+            reserved_ram_gb: load_f64(&self.reserved_ram_bits),
+            loaded_vram_gb: cold.loaded_vram_gb,
+            ram_available_gb: cold.ram_available_gb,
+            ram_available_ratio: cold.ram_available_ratio,
+            vram_free_gb: cold.vram_free_gb,
+            vram_free_known: cold.vram_free_known,
+            vram_used_gb: cold.vram_used_gb,
+            vram_used_known: cold.vram_used_known,
+            gpu_util_pct: cold.gpu_util_pct,
+            gpu_util_known: cold.gpu_util_known,
+            gpu_backend: cold.gpu_backend,
+            cpu_usage_pct: cold.cpu_usage_pct,
+            ollama_running: cold.ollama_running,
+            loaded_model_count: cold.loaded_model_count,
+            disk_total_gb: cold.disk_total_gb,
+            disk_available_gb: cold.disk_available_gb,
+            gpus_detail: Arc::clone(&cold.gpus_detail),
+            pressure_level: cold.pressure_level,
+            fail_streak: self.fail_streak.load(Ordering::Relaxed),
+            draining: self.draining.load(Ordering::Acquire),
             origin: self.origin,
-            capacity_url: self.config.capacity_url.clone(),
-            capacity_source: self.capacity_source,
-            capacity_error: self.capacity_error.clone(),
-            unhealthy_reason: self.unhealthy_reason.clone(),
+            capacity_url: cold.capacity_url.clone(),
+            capacity_source: cold.capacity_source,
+            capacity_error: cold.capacity_error.clone(),
+            unhealthy_reason: cold.unhealthy_reason.clone(),
         }
+    }
+
+    fn node_config(&self) -> NodeConfig {
+        let cold = self.cold_read();
+        NodeConfig {
+            id: self.id.clone(),
+            url: cold.url.as_ref().map(|s| s.to_string()),
+            capacity_url: cold.capacity_url.as_ref().map(|s| s.to_string()),
+            labels: cold.labels.to_vec(),
+            static_capacity: cold.static_capacity,
+            max_inflight: cold.max_inflight,
+        }
+    }
+
+    fn last_client_request_at(&self) -> Option<Instant> {
+        match self.last_client_ms.load(Ordering::Relaxed) {
+            0 => None,
+            ms => Some(instant_from_ms(ms)),
+        }
+    }
+
+    fn is_droppable(&self) -> bool {
+        self.origin == NodeOrigin::Permanent
+            && self.draining.load(Ordering::Acquire)
+            && self.inflight.load(Ordering::Acquire) == 0
+    }
+
+    fn sync_reserved(&self, ledger: &ReservationLedger) {
+        store_f64(&self.reserved_vram_bits, ledger.reserved_vram_gb);
+        store_f64(&self.reserved_ram_bits, ledger.reserved_ram_gb);
     }
 }
 
 struct Inner {
-    nodes: HashMap<NodeId, NodeState>,
+    nodes: HashMap<NodeId, Arc<Node>>,
 }
 
 /// Live fleet registry. Safe to share across Axum tasks (`Arc<Registry>`).
@@ -394,7 +517,7 @@ impl Registry {
             .map(|n| {
                 (
                     n.id.clone(),
-                    NodeState::from_config(n.clone(), NodeOrigin::Permanent),
+                    Arc::new(Node::from_config(n.clone(), NodeOrigin::Permanent)),
                 )
             })
             .collect();
@@ -418,6 +541,27 @@ impl Registry {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
+    fn node(&self, id: &NodeId) -> Option<Arc<Node>> {
+        self.read().nodes.get(id).cloned()
+    }
+
+    /// Drop this row if it is still the same `Arc` and is drain-idle.
+    ///
+    /// Must not be called while holding a per-node lock.
+    fn remove_if_droppable(&self, id: &NodeId, expected: &Arc<Node>) {
+        if !expected.is_droppable() {
+            return;
+        }
+        let mut inner = self.write();
+        if inner
+            .nodes
+            .get(id)
+            .is_some_and(|n| Arc::ptr_eq(n, expected) && n.is_droppable())
+        {
+            inner.nodes.remove(id);
+        }
+    }
+
     /// Policy snapshot used by ranking.
     pub fn policy(&self) -> &PolicyConfig {
         &self.policy
@@ -435,21 +579,21 @@ impl Registry {
 
     /// Ranking snapshot of every configured node.
     pub fn snapshot(&self) -> Vec<NodeSnapshot> {
-        self.read()
-            .nodes
-            .values()
-            .map(NodeState::snapshot)
-            .collect()
+        let nodes: Vec<Arc<Node>> = {
+            let inner = self.read();
+            inner.nodes.values().cloned().collect()
+        };
+        nodes.iter().map(|n| n.snapshot()).collect()
     }
 
     /// Snapshot of one node.
     pub fn get(&self, id: &NodeId) -> Option<NodeSnapshot> {
-        self.read().nodes.get(id).map(NodeState::snapshot)
+        self.node(id).map(|n| n.snapshot())
     }
 
     /// Clone the live `NodeConfig` (SSH host may have been remapped).
     pub fn node_config(&self, id: &NodeId) -> Option<NodeConfig> {
-        self.read().nodes.get(id).map(|n| n.config.clone())
+        self.node(id).map(|n| n.node_config())
     }
 
     /// Set the Ollama routing URL after enroll.
@@ -468,14 +612,14 @@ impl Registry {
         {
             return Err("refusing public share routing URL".into());
         }
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return Ok(());
         };
-        node.config.url = Some(trimmed.to_string());
-        node.healthy = false;
-        node.success_streak = 0;
-        node.next_probe_at = Instant::now();
+        let mut cold = node.cold_write();
+        cold.url = Some(Arc::from(trimmed));
+        cold.healthy = false;
+        cold.success_streak = 0;
+        cold.next_probe_at = Instant::now();
         Ok(())
     }
 
@@ -492,38 +636,40 @@ impl Registry {
         {
             return Err("refusing public share capacity URL".into());
         }
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.config.capacity_url = Some(trimmed.to_string());
+        if let Some(node) = self.node(id) {
+            node.cold_write().capacity_url = Some(Arc::from(trimmed));
         }
         Ok(())
     }
 
     /// Live origin for `id`, if the node exists.
     pub fn origin(&self, id: &NodeId) -> Option<NodeOrigin> {
-        self.read().nodes.get(id).map(|n| n.origin)
+        self.node(id).map(|n| n.origin)
     }
 
     /// Replace live labels (admin PUT). Does not write fleet.yaml.
     pub fn set_node_labels(&self, id: &NodeId, labels: Vec<String>) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.config.labels = labels;
+        if let Some(node) = self.node(id) {
+            node.cold_write().labels = Arc::from(labels);
         }
     }
 
     /// Instant the node was first registered (idle grace).
     pub fn registered_at(&self, id: &NodeId) -> Option<Instant> {
-        self.read().nodes.get(id).map(|n| n.registered_at)
+        self.node(id).map(|n| n.registered_at)
     }
 
     /// Mark a node healthy (tests). Bypasses `success_threshold`.
     pub fn set_healthy(&self, id: &NodeId) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.healthy = true;
-            node.fail_streak = 0;
-            node.success_streak = self.health.success_threshold;
-            node.unhealthy_reason = None;
-            node.probe_backoff = 0.0;
-        }
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        node.fail_streak.store(0, Ordering::Relaxed);
+        let mut cold = node.cold_write();
+        cold.healthy = true;
+        cold.success_streak = self.health.success_threshold;
+        cold.unhealthy_reason = None;
+        cold.probe_backoff = 0.0;
     }
 
     /// Mark a node unhealthy (tests).
@@ -533,98 +679,113 @@ impl Registry {
 
     /// Mark unhealthy with an allowlisted reason (`no_url`, `public_url_blocked`, …).
     pub fn mark_unhealthy(&self, id: &NodeId, reason: Option<&str>) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.healthy = false;
-            node.success_streak = 0;
-            node.unhealthy_reason = reason.map(str::to_string);
-        }
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        let mut cold = node.cold_write();
+        cold.healthy = false;
+        cold.success_streak = 0;
+        cold.unhealthy_reason = reason.map(Arc::from);
     }
 
     /// Immediate bench for missing / public URLs (fail streak at threshold).
     pub fn mark_unreachable(&self, id: &NodeId, reason: &str) {
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        node.healthy = false;
-        node.success_streak = 0;
-        node.fail_streak = node.fail_streak.max(self.health.fail_streak_threshold);
-        node.unhealthy_reason = Some(reason.to_string());
-        node.probe_backoff = self.health.interval_seconds;
-        node.next_probe_at = Instant::now()
-            + std::time::Duration::from_secs_f64(self.health.interval_seconds.max(0.05));
+        let threshold = self.health.fail_streak_threshold;
+        let _ = node
+            .fail_streak
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.max(threshold))
+            });
+        let mut cold = node.cold_write();
+        cold.healthy = false;
+        cold.success_streak = 0;
+        cold.unhealthy_reason = Some(Arc::from(reason));
+        cold.probe_backoff = self.health.interval_seconds;
+        cold.next_probe_at =
+            Instant::now() + Duration::from_secs_f64(self.health.interval_seconds.max(0.05));
     }
 
     /// Record a successful `/api/tags` probe. `success_threshold` gates recovery.
     pub fn note_probe_success(&self, id: &NodeId) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
         let threshold = self.health.success_threshold;
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.success_streak = node.success_streak.saturating_add(1);
-            node.fail_streak = 0;
-            if !node.healthy && node.success_streak >= threshold {
-                node.healthy = true;
-                node.unhealthy_reason = None;
-                node.probe_backoff = 0.0;
-            }
+        node.fail_streak.store(0, Ordering::Relaxed);
+        let mut cold = node.cold_write();
+        cold.success_streak = cold.success_streak.saturating_add(1);
+        if !cold.healthy && cold.success_streak >= threshold {
+            cold.healthy = true;
+            cold.unhealthy_reason = None;
+            cold.probe_backoff = 0.0;
         }
     }
 
     /// Record a failed `/api/tags` probe. Unhealthy once fail streak hits threshold.
     pub fn note_probe_failure(&self, id: &NodeId, reason: &str) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
         let threshold = self.health.fail_streak_threshold;
         let interval = self.health.interval_seconds;
         let backoff_max = self.health.backoff_max_seconds;
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.fail_streak = node.fail_streak.saturating_add(1);
-            node.success_streak = 0;
-            if node.healthy && node.fail_streak >= threshold {
-                node.healthy = false;
-                node.unhealthy_reason = Some(reason.to_string());
-            }
-            if !node.healthy {
-                let doubled = if node.probe_backoff > 0.0 {
-                    node.probe_backoff * 2.0
-                } else {
-                    interval
-                };
-                node.probe_backoff = doubled.max(interval).min(backoff_max);
+        let new_fail = node
+            .fail_streak
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(1))
+            })
+            .map_or(0, |prev| prev.saturating_add(1));
+        let mut cold = node.cold_write();
+        cold.success_streak = 0;
+        if cold.healthy && new_fail >= threshold {
+            cold.healthy = false;
+            cold.unhealthy_reason = Some(Arc::from(reason));
+        }
+        if !cold.healthy {
+            let doubled = if cold.probe_backoff > 0.0 {
+                cold.probe_backoff * 2.0
             } else {
-                node.probe_backoff = 0.0;
-            }
+                interval
+            };
+            cold.probe_backoff = doubled.max(interval).min(backoff_max);
+        } else {
+            cold.probe_backoff = 0.0;
         }
     }
 
     /// Schedule the next probe instant (health loop + tests).
     pub fn set_next_probe_at(&self, id: &NodeId, at: Instant) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.next_probe_at = at;
+        if let Some(node) = self.node(id) {
+            node.cold_write().next_probe_at = at;
         }
     }
 
     /// When the next probe is due.
     pub fn next_probe_at(&self, id: &NodeId) -> Option<Instant> {
-        self.read().nodes.get(id).map(|n| n.next_probe_at)
+        self.node(id).map(|n| n.cold_read().next_probe_at)
     }
 
     /// Current backoff delay in seconds (0 while healthy).
     pub fn probe_backoff(&self, id: &NodeId) -> f64 {
-        self.read()
-            .nodes
-            .get(id)
-            .map(|n| n.probe_backoff)
+        self.node(id)
+            .map(|n| n.cold_read().probe_backoff)
             .unwrap_or(0.0)
     }
 
     /// Replace the on-disk model set reported by `/api/tags`.
     pub fn update_models(&self, id: &NodeId, models: impl IntoIterator<Item = impl AsRef<str>>) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.models = Arc::new(
-                models
-                    .into_iter()
-                    .map(|m| normalize_model(m.as_ref()))
-                    .collect(),
-            );
-        }
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        node.cold_write().models = Arc::new(
+            models
+                .into_iter()
+                .map(|m| normalize_model(m.as_ref()))
+                .collect(),
+        );
     }
 
     /// Record live `/api/ps` state (tests inject warmth).
@@ -634,89 +795,90 @@ impl Registry {
         loaded_models: impl IntoIterator<Item = impl AsRef<str>>,
         loaded_vram_gb: Option<f64>,
     ) {
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        node.loaded_models = Arc::new(
+        let loaded = Arc::new(
             loaded_models
                 .into_iter()
                 .map(|m| normalize_model(m.as_ref()))
-                .collect(),
+                .collect::<HashSet<_>>(),
         );
-        node.loaded_vram_gb = loaded_vram_gb;
-        reconcile_ps_reservations(node);
-        remarge(node);
+        {
+            let mut cold = node.cold_write();
+            cold.loaded_models = Arc::clone(&loaded);
+            cold.loaded_vram_gb = loaded_vram_gb;
+            remarge(&mut cold);
+        }
+        reconcile_ps_reservations(&node, &loaded);
     }
 
     /// Admit a client generate/chat/embed forward. Writes `last_client_request_at`.
     pub fn inflight_inc(&self, id: &NodeId) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.inflight = node.inflight.saturating_add(1);
-            node.last_client_request_at = Some(Instant::now());
-        }
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        saturating_fetch_add(&node.inflight);
+        node.last_client_ms.store(now_ms(), Ordering::Relaxed);
     }
 
     /// Release one inflight slot. Draining permanent nodes with zero inflight are dropped.
     pub fn inflight_dec(&self, id: &NodeId) {
-        let mut inner = self.write();
-        if let Some(node) = inner.nodes.get_mut(id) {
-            node.inflight = node.inflight.saturating_sub(1);
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        if saturating_fetch_sub(&node.inflight) == 0 {
+            self.remove_if_droppable(id, &node);
         }
-        sweep_drained(&mut inner);
     }
 
     /// Occupy an inflight slot without touching idle (warm-keeper only).
     pub fn occupancy_inc(&self, id: &NodeId) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.inflight = node.inflight.saturating_add(1);
+        if let Some(node) = self.node(id) {
+            saturating_fetch_add(&node.inflight);
         }
     }
 
     /// Release a warm-keeper occupancy slot. Sweeps drained nodes.
     pub fn occupancy_dec(&self, id: &NodeId) {
-        let mut inner = self.write();
-        if let Some(node) = inner.nodes.get_mut(id) {
-            node.inflight = node.inflight.saturating_sub(1);
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        if saturating_fetch_sub(&node.inflight) == 0 {
+            self.remove_if_droppable(id, &node);
         }
-        sweep_drained(&mut inner);
     }
 
     /// In-process idle timestamp of last client generate/chat/embed.
     pub fn last_client_request_at(&self, id: &NodeId) -> Option<Instant> {
-        self.read()
-            .nodes
-            .get(id)
-            .and_then(|n| n.last_client_request_at)
+        self.node(id).and_then(|n| n.last_client_request_at())
     }
 
     /// Current inflight count.
     pub fn inflight(&self, id: &NodeId) -> u32 {
-        self.read().nodes.get(id).map(|n| n.inflight).unwrap_or(0)
+        self.node(id)
+            .map(|n| n.inflight.load(Ordering::Relaxed))
+            .unwrap_or(0)
     }
 
     /// Current fail streak.
     pub fn fail_streak(&self, id: &NodeId) -> u32 {
-        self.read()
-            .nodes
-            .get(id)
-            .map(|n| n.fail_streak)
+        self.node(id)
+            .map(|n| n.fail_streak.load(Ordering::Relaxed))
             .unwrap_or(0)
     }
 
     /// Current reserved VRAM.
     pub fn reserved_vram_gb(&self, id: &NodeId) -> f64 {
-        self.read()
-            .nodes
-            .get(id)
-            .map(|n| n.reserved_vram_gb)
+        self.node(id)
+            .map(|n| load_f64(&n.reserved_vram_bits))
             .unwrap_or(0.0)
     }
 
     /// Clear the fail streak after a successful upstream response.
     pub fn mark_request_success(&self, id: &NodeId) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.fail_streak = 0;
+        if let Some(node) = self.node(id) {
+            node.fail_streak.store(0, Ordering::Relaxed);
         }
     }
 
@@ -734,15 +896,23 @@ impl Registry {
         if credit == 0 {
             return;
         }
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        node.fail_streak = node.fail_streak.saturating_add(credit);
-        if node.healthy && node.fail_streak >= self.health.fail_streak_threshold {
-            node.healthy = false;
-            node.success_streak = 0;
-            node.unhealthy_reason = Some("probe_failures".into());
+        let new_fail = node
+            .fail_streak
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+                Some(v.saturating_add(credit))
+            })
+            .map_or(0, |prev| prev.saturating_add(credit));
+        if new_fail < self.health.fail_streak_threshold {
+            return;
+        }
+        let mut cold = node.cold_write();
+        if cold.healthy {
+            cold.healthy = false;
+            cold.success_streak = 0;
+            cold.unhealthy_reason = Some(Arc::from("probe_failures"));
         }
     }
 
@@ -751,13 +921,15 @@ impl Registry {
         if estimate_gb <= 0.0 {
             return None;
         }
-        let mut inner = self.write();
-        let node = inner.nodes.get_mut(id)?;
-        let reservation_id = node.next_reservation_id;
-        node.next_reservation_id = node.next_reservation_id.saturating_add(1);
-        node.reservations
+        let node = self.node(id)?;
+        let mut ledger = node.ledger();
+        let reservation_id = ledger.next_id;
+        ledger.next_id = ledger.next_id.saturating_add(1);
+        ledger
+            .vram
             .insert(reservation_id, (normalize_model(model), estimate_gb));
-        node.reserved_vram_gb += estimate_gb;
+        ledger.reserved_vram_gb += estimate_gb;
+        node.sync_reserved(&ledger);
         Some(reservation_id)
     }
 
@@ -766,12 +938,13 @@ impl Registry {
         let Some(reservation_id) = reservation_id else {
             return;
         };
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        if let Some((_, estimate)) = node.reservations.remove(&reservation_id) {
-            node.reserved_vram_gb = (node.reserved_vram_gb - estimate).max(0.0);
+        let mut ledger = node.ledger();
+        if let Some((_, estimate)) = ledger.vram.remove(&reservation_id) {
+            ledger.reserved_vram_gb = (ledger.reserved_vram_gb - estimate).max(0.0);
+            node.sync_reserved(&ledger);
         }
     }
 
@@ -780,13 +953,15 @@ impl Registry {
         if estimate_gb <= 0.0 {
             return None;
         }
-        let mut inner = self.write();
-        let node = inner.nodes.get_mut(id)?;
-        let reservation_id = node.next_reservation_id;
-        node.next_reservation_id = node.next_reservation_id.saturating_add(1);
-        node.ram_reservations
+        let node = self.node(id)?;
+        let mut ledger = node.ledger();
+        let reservation_id = ledger.next_id;
+        ledger.next_id = ledger.next_id.saturating_add(1);
+        ledger
+            .ram
             .insert(reservation_id, (normalize_model(model), estimate_gb));
-        node.reserved_ram_gb += estimate_gb;
+        ledger.reserved_ram_gb += estimate_gb;
+        node.sync_reserved(&ledger);
         Some(reservation_id)
     }
 
@@ -795,19 +970,20 @@ impl Registry {
         let Some(reservation_id) = reservation_id else {
             return;
         };
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        if let Some((_, estimate)) = node.ram_reservations.remove(&reservation_id) {
-            node.reserved_ram_gb = (node.reserved_ram_gb - estimate).max(0.0);
+        let mut ledger = node.ledger();
+        if let Some((_, estimate)) = ledger.ram.remove(&reservation_id) {
+            ledger.reserved_ram_gb = (ledger.reserved_ram_gb - estimate).max(0.0);
+            node.sync_reserved(&ledger);
         }
     }
 
     /// Store agent-reported pressure (soft-fail capacity probe). Does not change health.
     pub fn set_pressure_level(&self, id: &NodeId, level: PressureLevel) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.pressure_level = level;
+        if let Some(node) = self.node(id) {
+            node.cold_write().pressure_level = level;
         }
     }
 
@@ -818,59 +994,60 @@ impl Registry {
         report: &CapacityReport,
         pressure_level: Option<PressureLevel>,
     ) {
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
+        let Some(node) = self.node(id) else {
             return;
         };
-        node.capacity_discovered = Some(report.as_capacity());
-        node.vram_free_gb = Some(report.vram_free_gb);
-        node.vram_free_known = report.vram_free_is_known();
-        node.vram_used_gb = Some(report.vram_used_gb);
-        node.vram_used_known = report.vram_used_is_known();
-        node.gpu_backend = report.gpu_backend.unwrap_or_default();
+        let mut cold = node.cold_write();
+        cold.capacity_discovered = Some(report.as_capacity());
+        cold.vram_free_gb = Some(report.vram_free_gb);
+        cold.vram_free_known = report.vram_free_is_known();
+        cold.vram_used_gb = Some(report.vram_used_gb);
+        cold.vram_used_known = report.vram_used_is_known();
+        cold.gpu_backend = report.gpu_backend.unwrap_or_default();
         let utils: Vec<f64> = report
             .gpus_detail
             .iter()
             .filter_map(|gpu| gpu.utilization_gpu_pct)
             .collect();
         if utils.is_empty() {
-            node.gpu_util_pct = None;
-            node.gpu_util_known = false;
+            cold.gpu_util_pct = None;
+            cold.gpu_util_known = false;
         } else {
-            node.gpu_util_pct = Some(utils.iter().sum::<f64>() / utils.len() as f64);
-            node.gpu_util_known = true;
+            cold.gpu_util_pct = Some(utils.iter().sum::<f64>() / utils.len() as f64);
+            cold.gpu_util_known = true;
         }
-        node.cpu_usage_pct = report.cpu_usage_pct.or_else(|| {
+        cold.cpu_usage_pct = report.cpu_usage_pct.or_else(|| {
             report
                 .pressure
                 .as_ref()
                 .and_then(|pressure| pressure.cpu_usage_pct)
         });
-        node.ollama_running = report.ollama_running;
-        node.loaded_model_count = report.loaded_model_count.map(|n| n.max(0) as u32);
-        node.disk_total_gb = report.disk_total_gb;
-        node.disk_available_gb = report.disk_available_gb;
-        node.gpus_detail = report
+        cold.ollama_running = report.ollama_running;
+        cold.loaded_model_count = report.loaded_model_count.map(|n| n.max(0) as u32);
+        cold.disk_total_gb = report.disk_total_gb;
+        cold.disk_available_gb = report.disk_available_gb;
+        cold.gpus_detail = report
             .gpus_detail
             .iter()
             .take(MAX_GPU_METRIC_ROWS)
             .map(GpuSnapshot::from_detail)
-            .collect();
+            .collect::<Vec<_>>()
+            .into();
         if let Some(pressure) = report.pressure.as_ref() {
-            node.ram_available_gb = pressure.ram_available_gb;
-            node.ram_available_ratio = pressure.ram_available_ratio;
+            cold.ram_available_gb = pressure.ram_available_gb;
+            cold.ram_available_ratio = pressure.ram_available_ratio;
         }
         if let Some(level) = pressure_level {
-            node.pressure_level = level;
+            cold.pressure_level = level;
         }
-        node.capacity_error = None;
-        remarge(node);
+        cold.capacity_error = None;
+        remarge(&mut cold);
     }
 
     /// Allowlisted capacity miss (`http_status` / `timeout` / `unreachable` / `parse`).
     pub fn set_capacity_error(&self, id: &NodeId, reason: &str) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            node.capacity_error = Some(reason.to_string());
+        if let Some(node) = self.node(id) {
+            node.cold_write().capacity_error = Some(Arc::from(reason));
         }
     }
 
@@ -883,9 +1060,14 @@ impl Registry {
 
     /// Exclude a permanent node from ranking immediately; drop it when inflight hits 0.
     pub fn begin_remove_permanent(&self, id: &NodeId) {
-        let mut inner = self.write();
-        begin_remove_permanent_locked(&mut inner, id);
-        sweep_drained(&mut inner);
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        if node.origin != NodeOrigin::Permanent {
+            return;
+        }
+        node.draining.store(true, Ordering::Release);
+        self.remove_if_droppable(id, &node);
     }
 
     /// Diff fleet.yaml membership by `NodeId`. Never deletes Verda rows.
@@ -895,7 +1077,7 @@ impl Registry {
         let stale: Vec<NodeId> = inner
             .nodes
             .iter()
-            .filter(|(_, n)| n.origin == NodeOrigin::Permanent && !incoming.contains(&n.config.id))
+            .filter(|(_, n)| n.origin == NodeOrigin::Permanent && !incoming.contains(&n.id))
             .map(|(id, _)| id.clone())
             .collect();
         for id in stale {
@@ -904,14 +1086,14 @@ impl Registry {
         for node in nodes {
             upsert_permanent_locked(&mut inner, node.clone());
         }
-        sweep_drained(&mut inner);
+        sweep_drained_locked(&mut inner);
     }
 
     /// Insert or refresh a Verda ephemeral (tests / future manager). Does not overwrite Permanent.
     pub fn upsert_verda(&self, config: NodeConfig) {
         let mut inner = self.write();
         let id = config.id.clone();
-        match inner.nodes.get_mut(&id) {
+        match inner.nodes.get(&id) {
             Some(existing) if existing.origin == NodeOrigin::Verda => {
                 existing.apply_permanent_config(config);
             }
@@ -919,7 +1101,7 @@ impl Registry {
             None => {
                 inner
                     .nodes
-                    .insert(id, NodeState::from_config(config, NodeOrigin::Verda));
+                    .insert(id, Arc::new(Node::from_config(config, NodeOrigin::Verda)));
             }
         }
     }
@@ -934,6 +1116,15 @@ impl Registry {
         {
             inner.nodes.remove(id);
         }
+    }
+
+    /// Drop permanent nodes that are draining with zero inflight.
+    ///
+    /// Completion paths already remove the decremented node in O(1). The health
+    /// supervisor calls this as a safety net, not on every request.
+    pub fn sweep_drained(&self) {
+        let mut inner = self.write();
+        sweep_drained_locked(&mut inner);
     }
 
     /// Sticky-affinity owner from an existing snapshot: prefer a warm healthy holder of `model`.
@@ -984,19 +1175,19 @@ impl Registry {
     }
 }
 
-fn remarge(node: &mut NodeState) {
+fn remarge(cold: &mut Cold) {
     let merged = merge_capacity(
-        &node.config.static_capacity,
-        node.capacity_discovered.as_ref(),
-        node.loaded_vram_gb,
+        &cold.static_capacity,
+        cold.capacity_discovered.as_ref(),
+        cold.loaded_vram_gb,
     );
-    node.capacity_effective = merged.capacity;
-    node.capacity_source = merged.source;
+    cold.capacity_effective = merged.capacity;
+    cold.capacity_source = merged.source;
 }
 
 fn upsert_permanent_locked(inner: &mut Inner, config: NodeConfig) {
     let id = config.id.clone();
-    match inner.nodes.get_mut(&id) {
+    match inner.nodes.get(&id) {
         Some(existing) if existing.origin == NodeOrigin::Verda => {
             tracing::warn!(
                 node = %id,
@@ -1004,56 +1195,56 @@ fn upsert_permanent_locked(inner: &mut Inner, config: NodeConfig) {
             );
         }
         Some(existing) => {
-            existing.origin = NodeOrigin::Permanent;
             existing.apply_permanent_config(config);
         }
         None => {
-            inner
-                .nodes
-                .insert(id, NodeState::from_config(config, NodeOrigin::Permanent));
+            inner.nodes.insert(
+                id,
+                Arc::new(Node::from_config(config, NodeOrigin::Permanent)),
+            );
         }
     }
 }
 
 fn begin_remove_permanent_locked(inner: &mut Inner, id: &NodeId) {
-    let Some(node) = inner.nodes.get_mut(id) else {
+    let Some(node) = inner.nodes.get(id) else {
         return;
     };
     if node.origin != NodeOrigin::Permanent {
         return;
     }
-    node.draining = true;
+    node.draining.store(true, Ordering::Release);
 }
 
-fn sweep_drained(inner: &mut Inner) {
-    inner.nodes.retain(|_, node| {
-        !(node.origin == NodeOrigin::Permanent && node.draining && node.inflight == 0)
-    });
+fn sweep_drained_locked(inner: &mut Inner) {
+    inner.nodes.retain(|_, node| !node.is_droppable());
 }
 
-fn reconcile_ps_reservations(node: &mut NodeState) {
-    let stale: Vec<u64> = node
-        .reservations
+fn reconcile_ps_reservations(node: &Node, loaded_models: &HashSet<String>) {
+    let mut ledger = node.ledger();
+    let stale: Vec<u64> = ledger
+        .vram
         .iter()
-        .filter(|(_, (model, _))| models_match(&node.loaded_models, model))
+        .filter(|(_, (model, _))| models_match(loaded_models, model))
         .map(|(id, _)| *id)
         .collect();
     for id in stale {
-        if let Some((_, estimate)) = node.reservations.remove(&id) {
-            node.reserved_vram_gb = (node.reserved_vram_gb - estimate).max(0.0);
+        if let Some((_, estimate)) = ledger.vram.remove(&id) {
+            ledger.reserved_vram_gb = (ledger.reserved_vram_gb - estimate).max(0.0);
         }
     }
-    let stale_ram: Vec<u64> = node
-        .ram_reservations
+    let stale_ram: Vec<u64> = ledger
+        .ram
         .iter()
-        .filter(|(_, (model, _))| models_match(&node.loaded_models, model))
+        .filter(|(_, (model, _))| models_match(loaded_models, model))
         .map(|(id, _)| *id)
         .collect();
     for id in stale_ram {
-        if let Some((_, estimate)) = node.ram_reservations.remove(&id) {
-            node.reserved_ram_gb = (node.reserved_ram_gb - estimate).max(0.0);
+        if let Some((_, estimate)) = ledger.ram.remove(&id) {
+            ledger.reserved_ram_gb = (ledger.reserved_ram_gb - estimate).max(0.0);
         }
     }
+    node.sync_reserved(&ledger);
 }
 
 #[cfg(test)]
@@ -1127,7 +1318,7 @@ mod tests {
 
         let snap_a = registry.get(&id).unwrap();
         assert_eq!(snap_a.url.as_deref(), Some("http://a-new:11434"));
-        assert_eq!(snap_a.labels, ["gpu"]);
+        assert_eq!(snap_a.labels.as_ref(), &["gpu".to_string()][..]);
         assert_eq!(snap_a.capacity.vram_gb, Some(16.0));
         assert_eq!(snap_a.inflight, 1);
         assert_eq!(snap_a.origin, NodeOrigin::Permanent);
@@ -1398,5 +1589,42 @@ mod tests {
         assert!((snap.vram_free_gb.unwrap() - 31.0).abs() < 1e-9);
         assert_eq!(snap.gpus_detail.len(), 1);
         assert!(!snap.gpu_util_known);
+    }
+
+    #[test]
+    fn concurrent_inflight_and_reserve_do_not_wrap() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1), node("b", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Arc::new(Registry::new(&config));
+        let a = nid("a");
+        let b = nid("b");
+        std::thread::scope(|scope| {
+            for _ in 0..4 {
+                let registry = Arc::clone(&registry);
+                let a = a.clone();
+                let b = b.clone();
+                scope.spawn(move || {
+                    for i in 0..200 {
+                        registry.inflight_inc(&a);
+                        let _ = registry.snapshot();
+                        let rid = registry.reserve_vram(&a, "llama", 1.0);
+                        registry.release_vram(&a, rid);
+                        registry.inflight_dec(&a);
+                        registry.occupancy_inc(&b);
+                        registry.occupancy_dec(&b);
+                        if i == 0 {
+                            assert!(registry.last_client_request_at(&a).is_some());
+                        }
+                    }
+                });
+            }
+        });
+        assert_eq!(registry.inflight(&a), 0);
+        assert_eq!(registry.inflight(&b), 0);
+        assert!(registry.last_client_request_at(&a).is_some());
+        assert!(registry.last_client_request_at(&b).is_none());
+        assert_eq!(registry.reserved_vram_gb(&a), 0.0);
     }
 }

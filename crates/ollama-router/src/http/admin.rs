@@ -661,10 +661,10 @@ fn node_public_view(node: &ollama_router_core::fleet::NodeSnapshot) -> serde_jso
     models.sort();
     json!({
         "id": node.id.as_str(),
-        "url": node.url,
+        "url": node.url.as_deref(),
         "origin": node.origin.as_str(),
         "healthy": node.healthy,
-        "labels": node.labels,
+        "labels": node.labels.as_ref(),
         "inflight": node.inflight,
         "models": models,
         "capacity": node.capacity,

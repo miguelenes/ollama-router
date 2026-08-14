@@ -87,6 +87,7 @@ fn reconcile_tasks(
     rng: &mut u64,
     shutdown: &CancellationToken,
 ) {
+    state.registry.sweep_drained();
     let snap = state.registry.snapshot();
     let live: HashSet<NodeId> = snap
         .iter()

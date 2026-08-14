@@ -17,8 +17,9 @@ observed for `idle_timeout_seconds`. Implemented on the shared cloud manager in
 
 ## Activity signal
 
-The proxy updates `NodeState.last_client_request_at` only inside
-`Registry::inflight_inc` — called exclusively from client forward paths
+The proxy updates the per-node idle timestamp only inside
+`Registry::inflight_inc` (atomic millis; `last_client_request_at` is the
+reader) — called exclusively from client forward paths
 (`generate`, `chat`, `embed` / embeddings). That write site is the **only**
 activity signal for idle scale-down.
 
