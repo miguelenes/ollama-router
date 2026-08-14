@@ -55,6 +55,7 @@ impl FromStr for JobId {
 pub enum JobKind {
     Pull,
     Delete,
+    Provision,
 }
 
 impl JobKind {
@@ -62,6 +63,7 @@ impl JobKind {
         match self {
             Self::Pull => "pull",
             Self::Delete => "delete",
+            Self::Provision => "provision",
         }
     }
 }
@@ -79,6 +81,7 @@ impl FromStr for JobKind {
         match s.trim() {
             "pull" => Ok(Self::Pull),
             "delete" => Ok(Self::Delete),
+            "provision" => Ok(Self::Provision),
             _ => Err(()),
         }
     }

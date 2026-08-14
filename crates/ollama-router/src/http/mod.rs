@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::State;
+use axum::extract::{Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
@@ -181,6 +181,29 @@ async fn proxy_route(State(state): State<AppState>, req: Request<axum::body::Bod
     proxy::handle(&state, req).await
 }
 
+async fn ui_index() -> Response {
+    (
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        include_str!("../../ui/dist/index.html"),
+    )
+        .into_response()
+}
+
+async fn ui_asset(Path(path): Path<String>) -> Response {
+    let (content_type, body): (&str, &'static [u8]) = match path.as_str() {
+        "assets/app.js" => (
+            "text/javascript; charset=utf-8",
+            include_bytes!("../../ui/dist/assets/app.js"),
+        ),
+        "assets/index.css" => (
+            "text/css; charset=utf-8",
+            include_bytes!("../../ui/dist/assets/index.css"),
+        ),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    ([(header::CONTENT_TYPE, content_type)], body).into_response()
+}
+
 pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
     let mut res = Json(body).into_response();
     *res.status_mut() = status;
@@ -193,6 +216,9 @@ pub fn make_app(state: AppState) -> Router {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/metrics", get(metrics))
+        .route("/router/ui", get(ui_index))
+        .route("/router/ui/", get(ui_index))
+        .route("/router/ui/{*path}", get(ui_asset))
         .route("/api/tags", get(proxy_route))
         .route("/v1/models", get(proxy_route))
         .route("/api/pull", post(proxy_route))
@@ -201,6 +227,8 @@ pub fn make_app(state: AppState) -> Router {
             "/router/v1/nodes",
             get(admin::list_nodes).put(admin::put_node),
         )
+        .route("/router/v1/readiness", get(admin::readiness))
+        .route("/router/v1/readiness/recheck", post(admin::recheck))
         .route("/router/v1/models", get(admin::list_models))
         .route("/router/v1/models/ensure", post(admin::ensure_models))
         .route("/router/v1/models/delete", post(admin::delete_models))

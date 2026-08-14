@@ -216,6 +216,154 @@ pub async fn list_nodes(State(state): State<AppState>, headers: HeaderMap) -> Re
     Json(json!({"nodes": body})).into_response()
 }
 
+/// Consolidated operator-facing readiness view. Unlike `/readyz`, this is
+/// diagnostic and intentionally returns the affected nodes and next action.
+pub async fn readiness(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    readiness_view(&state)
+}
+
+fn readiness_view(state: &AppState) -> Response {
+    let nodes = state.registry.snapshot();
+    let healthy: Vec<_> = nodes.iter().filter(|n| n.healthy && !n.draining).collect();
+    let desired = desired_models(state);
+    let mut blockers = Vec::new();
+
+    if nodes.is_empty() {
+        blockers.push(json!({
+            "kind": "no_nodes",
+            "severity": "critical",
+            "node_ids": [],
+            "model_names": desired,
+            "summary": "No nodes are configured in fleet.yaml.",
+            "action": "Add a node-agent-backed entry to fleet.yaml, then reload the inventory."
+        }));
+    } else {
+        for node in nodes.iter().filter(|n| !n.healthy || n.draining) {
+            let reason = node
+                .unhealthy_reason
+                .as_deref()
+                .unwrap_or(if node.draining { "draining" } else { "unknown" });
+            let (summary, action, kind) = diagnostic_copy(reason);
+            blockers.push(json!({
+                "kind": kind,
+                "severity": "error",
+                "node_ids": [node.id.as_str()],
+                "model_names": [],
+                "summary": format!("{}: {}", node.id, summary),
+                "action": action,
+                "reason": reason,
+            }));
+        }
+        if healthy.is_empty() && blockers.is_empty() {
+            blockers.push(json!({
+                "kind": "all_unhealthy",
+                "severity": "critical",
+                "node_ids": nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                "model_names": [],
+                "summary": "All configured nodes are unavailable for inference.",
+                "action": "Inspect node diagnostics and recheck the fleet."
+            }));
+        }
+        let missing: Vec<String> = desired
+            .iter()
+            .filter(|model| !healthy.iter().any(|node| node.has_model(model)))
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            blockers.push(json!({
+                "kind": "model_missing",
+                "severity": "warning",
+                "node_ids": healthy.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+                "model_names": missing,
+                "summary": "Desired models are not present on a healthy node.",
+                "action": "Use Ensure in the model coverage matrix to start a tracked pull."
+            }));
+        }
+    }
+
+    let ready = blockers.is_empty();
+    let state_map = state.fleet_state.snapshot();
+    let active_job_recovery = state
+        .orchestrator
+        .list_jobs()
+        .into_iter()
+        .find(|job| job.kind.as_str() == "provision" && job.status.is_incomplete());
+    let verda_recovery = state.verda.as_ref().map(|manager| manager.recovery());
+    let recovery = active_job_recovery
+        .and_then(|job| serde_json::to_value(job).ok())
+        .or_else(|| verda_recovery.filter(|value| !value.is_null()));
+    Json(json!({
+        "ready": ready,
+        "state": if ready { "ready" } else if recovery.is_some() { "recovering" } else { "action_required" },
+        "blockers": blockers,
+        "counts": {
+            "total": nodes.len(),
+            "healthy": healthy.len(),
+            "unhealthy": nodes.iter().filter(|n| !n.healthy).count(),
+            "draining": nodes.iter().filter(|n| n.draining).count(),
+            "permanent": nodes.iter().filter(|n| n.origin == NodeOrigin::Permanent).count(),
+            "verda": nodes.iter().filter(|n| n.origin == NodeOrigin::Verda).count(),
+        },
+        "recovery": recovery,
+        "enrolled_nodes": state_map.keys().collect::<Vec<_>>(),
+    })).into_response()
+}
+
+pub async fn recheck(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    crate::health::recheck_all(&state).await;
+    readiness_view(&state)
+}
+
+fn desired_models(state: &AppState) -> Vec<String> {
+    let mut models = state
+        .config
+        .effective_model_tiers()
+        .iter()
+        .flat_map(|tier| tier.models.iter())
+        .map(|model| model.trim().to_ascii_lowercase())
+        .filter(|model| !model.is_empty())
+        .collect::<Vec<_>>();
+    models.sort();
+    models.dedup();
+    models
+}
+
+fn diagnostic_copy(reason: &str) -> (&'static str, &'static str, &'static str) {
+    match reason {
+        "no_url" => (
+            "has no routing URL",
+            "Add a safe private overlay URL to fleet.yaml and reload.",
+            "missing_url",
+        ),
+        "public_url_blocked" => (
+            "uses a blocked public URL",
+            "Replace it with a loopback/private zrok share.",
+            "tunnel_blocked",
+        ),
+        "probe_failures" => (
+            "is not responding to Ollama health probes",
+            "Check Ollama and the node tunnel, then recheck.",
+            "ollama_unreachable",
+        ),
+        "draining" => (
+            "is draining",
+            "Wait for in-flight requests to finish or correct fleet inventory.",
+            "draining",
+        ),
+        _ => (
+            "has an unknown health failure",
+            "Inspect capacity and agent diagnostics, then recheck.",
+            "unknown",
+        ),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 pub struct PutNodeRequest {
     pub id: String,
@@ -659,6 +807,8 @@ pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Respon
 fn node_public_view(node: &ollama_router_core::fleet::NodeSnapshot) -> serde_json::Value {
     let mut models: Vec<_> = node.models.iter().cloned().collect();
     models.sort();
+    let mut loaded_models: Vec<_> = node.loaded_models.iter().cloned().collect();
+    loaded_models.sort();
     json!({
         "id": node.id.as_str(),
         "url": node.url.as_deref(),
@@ -670,6 +820,20 @@ fn node_public_view(node: &ollama_router_core::fleet::NodeSnapshot) -> serde_jso
         "capacity": node.capacity,
         "pressure": node.pressure_level.as_str(),
         "vram_free_gb": node.vram_free_gb,
+        "loaded_models": loaded_models,
+        "unhealthy_reason": node.unhealthy_reason.as_deref(),
+        "capacity_error": node.capacity_error.as_deref(),
+        "capacity_source": format!("{:?}", node.capacity_source).to_ascii_lowercase(),
+        "capacity_url_present": node.capacity_url.is_some(),
+        "fail_streak": node.fail_streak,
+        "draining": node.draining,
+        "loaded_vram_gb": node.loaded_vram_gb,
+        "ram_available_gb": node.ram_available_gb,
+        "ram_available_ratio": node.ram_available_ratio,
+        "gpu_util_pct": node.gpu_util_pct,
+        "cpu_usage_pct": node.cpu_usage_pct,
+        "disk_available_gb": node.disk_available_gb,
+        "ollama_running": node.ollama_running,
     })
 }
 

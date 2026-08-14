@@ -89,6 +89,37 @@ async fn admin_ensure_forbidden_without_token() {
 }
 
 #[tokio::test]
+async fn readiness_explains_empty_inventory() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/router/v1/readiness")
+        .header(header::AUTHORIZATION, "Bearer secret")
+        .body(Body::empty())
+        .expect("request");
+    let (status, body) = send(state, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["ready"], false);
+    assert_eq!(value["state"], "action_required");
+    assert_eq!(value["blockers"][0]["kind"], "no_nodes");
+    assert_eq!(value["counts"]["total"], 0);
+}
+
+#[tokio::test]
+async fn readiness_console_is_served_without_admin_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/router/ui")
+        .body(Body::empty())
+        .expect("request");
+    let (status, body) = send(state, request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(String::from_utf8_lossy(&body).contains("/router/ui/assets/app.js"));
+}
+
+#[tokio::test]
 async fn admin_ensure_202_and_get_job() {
     let server = MockServer::start();
     server.mock(|when, then| {

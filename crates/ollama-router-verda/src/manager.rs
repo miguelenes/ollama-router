@@ -47,6 +47,15 @@ pub struct VerdaManager {
     inner: Arc<Inner>,
 }
 
+#[derive(Clone, Debug)]
+struct Recovery {
+    id: uuid::Uuid,
+    reason: &'static str,
+    stage: &'static str,
+    status: &'static str,
+    detail: Option<String>,
+}
+
 struct Inner {
     config: Arc<RouterConfig>,
     client: VerdaClient,
@@ -58,6 +67,7 @@ struct Inner {
     demand: std::sync::Mutex<Option<JoinHandle<()>>>,
     events: std::sync::Mutex<Option<Arc<dyn FleetEvents>>>,
     shutdown: CancellationToken,
+    recovery: std::sync::Mutex<Option<Recovery>>,
 }
 
 impl VerdaManager {
@@ -102,6 +112,7 @@ impl VerdaManager {
                 demand: std::sync::Mutex::new(None),
                 events: std::sync::Mutex::new(None),
                 shutdown,
+                recovery: std::sync::Mutex::new(None),
             }),
         }
     }
@@ -902,6 +913,33 @@ impl VerdaManager {
         json!({"enabled": self.inner.config.verda.enabled, "instances": out})
     }
 
+    /// Snapshot the latest demand recovery without exposing provider secrets.
+    pub fn recovery(&self) -> Value {
+        let recovery = self
+            .inner
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match recovery.as_ref() {
+            Some(item) => json!({
+                "id": item.id,
+                "reason": item.reason,
+                "stage": item.stage,
+                "status": item.status,
+                "detail": item.detail,
+            }),
+            None => Value::Null,
+        }
+    }
+
+    fn set_recovery(&self, recovery: Recovery) {
+        *self
+            .inner
+            .recovery
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(recovery);
+    }
+
     pub async fn reconcile(&self) {
         if self.shutdown_cancelled() {
             return;
@@ -1147,6 +1185,14 @@ impl DemandScale for VerdaManager {
             tracing::info!(reason = reason_code, "verda_demand_scale_up_coalesced");
             return;
         }
+        let recovery_id = uuid::Uuid::new_v4();
+        self.set_recovery(Recovery {
+            id: recovery_id,
+            reason: reason_code,
+            stage: "provisioning",
+            status: "pending",
+            detail: None,
+        });
         let inner = self.inner.clone();
         let shutdown = self.inner.shutdown.clone();
         self.emit("demand");
@@ -1155,11 +1201,50 @@ impl DemandScale for VerdaManager {
             if shutdown.is_cancelled() {
                 return;
             }
+            mgr.set_recovery(Recovery {
+                id: recovery_id,
+                reason: reason_code,
+                stage: "provisioning",
+                status: "running",
+                detail: None,
+            });
             tracing::info!(reason = reason_code, "verda_demand_scale_up");
-            if let Err(err) = mgr.create_additional().await {
-                if !shutdown.is_cancelled() {
+            match mgr.create_additional().await {
+                Ok(result) => {
+                    let status = result
+                        .get("status")
+                        .and_then(Value::as_str)
+                        .unwrap_or("none");
+                    mgr.set_recovery(Recovery {
+                        id: recovery_id,
+                        reason: reason_code,
+                        stage: if status == "created" {
+                            "enrollment"
+                        } else {
+                            "provisioning"
+                        },
+                        status: if status == "created" {
+                            "ready"
+                        } else {
+                            "failed"
+                        },
+                        detail: result
+                            .get("detail")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                    });
+                }
+                Err(err) if !shutdown.is_cancelled() => {
+                    mgr.set_recovery(Recovery {
+                        id: recovery_id,
+                        reason: reason_code,
+                        stage: "provisioning",
+                        status: "failed",
+                        detail: Some(err.to_string()),
+                    });
                     tracing::error!(reason = reason_code, error = %err, "verda_demand_ensure_failed");
                 }
+                Err(_) => {}
             }
         }));
     }

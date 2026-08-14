@@ -9,6 +9,17 @@
   "links": [
     {
       "asDropdown": false,
+      "icon": "external link",
+      "includeVars": false,
+      "keepTime": false,
+      "targetBlank": false,
+      "title": "Fleet readiness console",
+      "tooltip": "Live readiness, blockers, and recovery actions",
+      "type": "link",
+      "url": "/router/ui"
+    },
+    {
+      "asDropdown": false,
       "icon": "dashboard",
       "includeVars": false,
       "keepTime": true,

@@ -584,6 +584,16 @@ impl PullOrchestrator {
                 match kind {
                     JobKind::Pull => orch.ensure_one(id, n, m).await,
                     JobKind::Delete => orch.delete_one(id, n, m).await,
+                    JobKind::Provision => {
+                        orch.set_target(
+                            &id,
+                            &n,
+                            &m,
+                            TargetStatus::Failed,
+                            Some("provision jobs are managed by the cloud manager".into()),
+                        )
+                        .await
+                    }
                 }
             });
             keys.insert(abort.id(), (node_id, model));

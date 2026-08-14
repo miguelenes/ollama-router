@@ -80,6 +80,22 @@ pub async fn run(state: AppState, shutdown: CancellationToken) {
     }
 }
 
+/// Run one immediate probe for every live node. This is intentionally separate
+/// from the supervisor loop so an operator recheck never changes client
+/// activity or the normal probe cadence.
+pub async fn recheck_all(state: &AppState) {
+    let health = state.registry.health().clone();
+    let nodes = state
+        .registry
+        .snapshot()
+        .into_iter()
+        .filter(|node| !node.draining)
+        .collect::<Vec<_>>();
+    for node in nodes {
+        probe_cycle(state, &health, &node, true).await;
+    }
+}
+
 fn reconcile_tasks(
     state: &AppState,
     sem: &Arc<Semaphore>,

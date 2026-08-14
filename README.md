@@ -89,6 +89,12 @@ Permanent hosts stay GitOps: `PUT /router/v1/nodes` and enroll upsert a live Ver
 
 Unauthenticated: `GET /healthz`, `GET /readyz`, `GET /metrics` (Prometheus text 0.0.4). Admin `/router/v1/*` requires `Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN` (unset → 403).
 
+### Fleet readiness console
+
+Open [`/router/ui`](http://127.0.0.1:11434/router/ui) for the operator console. It polls the consolidated `GET /router/v1/readiness`, node diagnostics, model coverage, and live jobs from the same-origin admin API. The bearer token is held in memory only; it is never placed in local storage, URLs, or logs. The console can recheck health, reload the GitOps inventory, and ensure models, but it never writes `fleet.yaml` or performs destructive fleet operations.
+
+`GET /router/v1/readiness` returns `ready`, `action_required`, or `recovering`, ranked blockers with affected node/model IDs and next actions, counts, and the latest Verda recovery state. `POST /router/v1/readiness/recheck` runs an immediate diagnostic probe without counting as client activity.
+
 | Method | Path | Role |
 | --- | --- | --- |
 | GET | `/router/v1/nodes` | Live inventory (no secrets) |
