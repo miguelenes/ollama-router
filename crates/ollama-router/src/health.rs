@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ollama_router_core::capacity::{bytes_to_gib, capacity_target, CapacityClient};
 use ollama_router_core::config::HealthConfig;
 use ollama_router_core::fleet::{routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel};
+use ollama_router_core::http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -223,14 +224,23 @@ async fn probe_cycle_inner(
     let request = state.client.get(&tags_url).timeout(probe_timeout).send();
     match request.await {
         Ok(resp) if resp.status().is_success() => {
-            let names = parse_tag_names(resp).await;
-            state.registry.update_models(&node.id, names);
-            state.registry.note_probe_success(&node.id);
-            if health.ps_probe_enabled {
-                probe_ps(state, health, node).await;
-            }
-            if do_capacity {
-                probe_capacity(state, health, node).await;
+            match parse_tag_names(resp, health.max_probe_body_bytes).await {
+                Ok(names) => {
+                    state.registry.update_models(&node.id, names);
+                    state.registry.note_probe_success(&node.id);
+                    if health.ps_probe_enabled {
+                        probe_ps(state, health, node).await;
+                    }
+                    if do_capacity {
+                        probe_capacity(state, health, node).await;
+                    }
+                }
+                Err(_) => {
+                    tracing::debug!(node = %node.id, "health probe tags body rejected");
+                    state
+                        .registry
+                        .note_probe_failure(&node.id, "probe_failures");
+                }
             }
         }
         Ok(resp) => {
@@ -244,7 +254,11 @@ async fn probe_cycle_inner(
                 .note_probe_failure(&node.id, "probe_failures");
         }
         Err(err) => {
-            tracing::debug!(node = %node.id, error = %err, "health probe error");
+            tracing::debug!(
+                node = %node.id,
+                error = %reqwest_error_for_log(err),
+                "health probe error"
+            );
             state
                 .registry
                 .note_probe_failure(&node.id, "probe_failures");
@@ -262,7 +276,7 @@ async fn probe_ps(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) 
         Ok(resp) if resp.status().is_success() => resp,
         Ok(_) | Err(_) => return,
     };
-    let Ok(bytes) = resp.bytes().await else {
+    let Ok(bytes) = read_reqwest_capped(resp, health.max_probe_body_bytes).await else {
         return;
     };
     let Ok(body) = serde_json::from_slice::<PsResponse>(&bytes) else {
@@ -307,7 +321,12 @@ async fn probe_capacity(state: &AppState, health: &HealthConfig, node: &NodeSnap
     let client = CapacityClient::new(state.client.clone());
     let timeout = Duration::from_secs_f64(health.capacity_probe_timeout_seconds);
     match client
-        .probe(&target, health.capacity_probe_token.as_deref(), timeout)
+        .probe(
+            &target,
+            health.capacity_probe_token.as_deref(),
+            timeout,
+            health.max_probe_body_bytes,
+        )
         .await
     {
         Ok(probe) => {
@@ -345,19 +364,19 @@ fn schedule_next(state: &AppState, health: &HealthConfig, id: &NodeId, rng: &mut
         .set_next_probe_at(id, Instant::now() + Duration::from_secs_f64(delay));
 }
 
-async fn parse_tag_names(resp: reqwest::Response) -> Vec<String> {
-    let Ok(bytes) = resp.bytes().await else {
-        return Vec::new();
-    };
-    let Ok(body) = serde_json::from_slice::<TagsResponse>(&bytes) else {
-        return Vec::new();
-    };
-    body.models
+async fn parse_tag_names(
+    resp: reqwest::Response,
+    max_bytes: u64,
+) -> Result<Vec<String>, ProbeBodyError> {
+    let bytes = read_reqwest_capped(resp, max_bytes).await?;
+    let body = serde_json::from_slice::<TagsResponse>(&bytes).map_err(|_| ProbeBodyError::Parse)?;
+    Ok(body
+        .models
         .into_iter()
         .flatten()
         .filter_map(|m| m.name)
         .filter(|n| !n.trim().is_empty())
-        .collect()
+        .collect())
 }
 
 #[derive(Deserialize)]

@@ -213,6 +213,20 @@ nodes:
     }
 
     #[test]
+    fn nan_vram_is_invalid() {
+        let yaml = r#"
+version: 1
+nodes:
+  - id: desk
+    url: http://desk:11434
+    capacity:
+      vram_gb: .nan
+"#;
+        let err = parse_fleet_yaml(yaml, origin()).unwrap_err();
+        assert!(err.to_string().contains("finite"));
+    }
+
+    #[test]
     fn unknown_field_rejected() {
         assert!(parse_fleet_yaml(
             "version: 1\nnodes:\n  - id: a\n    url: http://a:11434\n    thunder: true\n",

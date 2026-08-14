@@ -139,7 +139,7 @@ async fn client_reads_fixture_and_pressure_level() {
         pressure_url: format!("{}/v1/pressure", server.base_url()),
     };
     let probe = client
-        .probe(&target, None, Duration::from_secs(2))
+        .probe(&target, None, Duration::from_secs(2), 8 * 1024 * 1024)
         .await
         .expect("probe");
     assert!((probe.report.vram_gb - 8.0).abs() < 1e-9);
@@ -159,7 +159,7 @@ async fn client_soft_fails_on_http_error_without_json_feature() {
         pressure_url: format!("{}/v1/pressure", server.base_url()),
     };
     let err = client
-        .probe(&target, None, Duration::from_secs(2))
+        .probe(&target, None, Duration::from_secs(2), 8 * 1024 * 1024)
         .await
         .expect_err("http");
     assert_eq!(err, CapacityError::Http { status: 503 });
@@ -191,7 +191,7 @@ async fn pressure_miss_still_returns_capacity() {
     )
     .expect("target");
     let probe = client
-        .probe(&target, None, Duration::from_secs(2))
+        .probe(&target, None, Duration::from_secs(2), 8 * 1024 * 1024)
         .await
         .expect("capacity ok");
     assert!(probe.pressure_level.is_none());
@@ -233,7 +233,7 @@ async fn client_reads_rocm_fixture() {
         pressure_url: format!("{}/v1/pressure", server.base_url()),
     };
     let probe = client
-        .probe(&target, None, Duration::from_secs(2))
+        .probe(&target, None, Duration::from_secs(2), 8 * 1024 * 1024)
         .await
         .expect("probe");
     assert_eq!(probe.report.gpu_backend, Some(GpuBackend::Rocm));

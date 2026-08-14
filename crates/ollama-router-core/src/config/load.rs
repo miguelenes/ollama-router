@@ -308,6 +308,7 @@ ready_requires_embedding_model: true
         assert_eq!(config.policy.auto_pull_wait_seconds, 0.0);
         assert!((config.health.probe_jitter_ratio - 0.2).abs() < f64::EPSILON);
         assert_eq!(config.health.max_concurrent_probes, 8);
+        assert_eq!(config.health.max_probe_body_bytes, 8 * 1024 * 1024);
         assert!(config.desired_model_tiers.is_empty());
         assert_eq!(config.verda.min_vram_gb, 8.0);
         assert_eq!(config.verda.max_vram_gb, Some(80.0));
@@ -396,6 +397,12 @@ ready_requires_embedding_model: true
     fn verda_vram_bounds_rejected() {
         assert!(parse_yaml("verda:\n  max_vram_gb: -1\n").is_err());
         assert!(parse_yaml("verda:\n  min_vram_gb: 48\n  max_vram_gb: 24\n").is_err());
+    }
+
+    #[test]
+    fn non_finite_policy_and_capacity_rejected() {
+        assert!(parse_yaml("policy:\n  inflight_weight: .nan\n").is_err());
+        assert!(parse_yaml("policy:\n  ram_headroom: .inf\n").is_err());
     }
 
     #[test]

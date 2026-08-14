@@ -1,22 +1,24 @@
 //! httpmock coverage for streaming, retry, body cap, tags, and 503/502.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::http::{header, HeaderMap, Method, Request, StatusCode};
 use bytes::Bytes;
+use futures_util::stream;
 use http_body_util::BodyExt;
 use httpmock::prelude::*;
 use ollama_router::http::{make_app, AppState};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{
-    Capacity, NodeConfig, PolicyConfig, RouterConfig, TimeoutsConfig,
+    Capacity, NodeConfig, PolicyConfig, RouterConfig, TimeoutsConfig, UpstreamPoolConfig,
 };
 use ollama_router_core::fleet::NodeId;
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 use tower::ServiceExt;
 
@@ -354,6 +356,34 @@ async fn oversize_declared_body_is_413() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     let parsed: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(parsed["max_request_body_bytes"], 8);
+}
+
+#[tokio::test]
+async fn interrupted_body_is_400() {
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let chunks = stream::iter([
+        Ok::<_, std::io::Error>(Bytes::from_static(br#"{"model":"llama3.2:3b"}"#)),
+        Err(std::io::Error::other("client gone")),
+    ]);
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/api/generate")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from_stream(chunks))
+        .unwrap();
+    let (status, _, body) = send(state, req).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let err = parsed["error"].as_str().unwrap();
+    assert!(err.contains("interrupted"), "{err}");
+    assert!(!err.contains("exceeds configured limit"), "{err}");
 }
 
 #[tokio::test]
@@ -1261,4 +1291,251 @@ async fn draining_verda_is_skipped_for_client_forward() {
     );
     assert_eq!(spot_hit.calls(), 0);
     keep_ok.assert();
+}
+
+async fn spawn_broken_ndjson_upstream() -> (String, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let head = b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+                let _ = sock.write_all(head).await;
+                let _ = sock.write_all(br#"{"model":"x"}"#).await;
+            });
+        }
+    });
+    (format!("http://{addr}"), handle)
+}
+
+#[tokio::test]
+async fn pool_wait_does_not_hold_inflight_or_reservations() {
+    let server = MockServer::start();
+    let _mock = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .delay(Duration::from_secs(30))
+            .body(r#"{"response":"ok"}"#);
+    });
+    let mut config = fleet_config(vec![node("gpu", &server.base_url(), 24.0, 1, None)]);
+    config.upstream = UpstreamPoolConfig {
+        max_connections: 1,
+        max_keepalive_connections: 1,
+    };
+    let state = state_from(config);
+    mark_ready(&state, "gpu", &["llama3.1:8b"]);
+    let registry = std::sync::Arc::clone(&state.registry);
+    let gpu = nid("gpu");
+    let app = make_app(state.clone());
+    let first = tokio::spawn(app.oneshot(json_req(
+        Method::POST,
+        "/api/generate",
+        json!({"model": "llama3.1:8b", "prompt": "x"}),
+    )));
+    let started = Instant::now();
+    loop {
+        if registry.inflight(&gpu) == 1 {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            panic!("inflight never incremented");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let reserved = registry.reserved_vram_gb(&gpu);
+    assert!(reserved > 0.0, "cold load should reserve vram");
+
+    let app2 = make_app(state);
+    let second = tokio::spawn(app2.oneshot(json_req(
+        Method::POST,
+        "/api/generate",
+        json!({"model": "llama3.1:8b", "prompt": "y"}),
+    )));
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(registry.inflight(&gpu), 1);
+    assert!((registry.reserved_vram_gb(&gpu) - reserved).abs() < 1e-9);
+
+    second.abort();
+    let _ = second.await;
+    sleep(Duration::from_millis(50)).await;
+    assert_eq!(registry.inflight(&gpu), 1);
+
+    first.abort();
+    let _ = first.await;
+    let started = Instant::now();
+    loop {
+        if registry.inflight(&gpu) == 0 {
+            break;
+        }
+        if started.elapsed() > Duration::from_secs(2) {
+            panic!("inflight not released after abort");
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn mid_stream_failure_credits_fail_streak_without_retry() {
+    let (broken, broken_h) = spawn_broken_ndjson_upstream().await;
+    let other = MockServer::start();
+    let other_hit = other.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("node-a", &broken, 8.0, 1, None),
+        node("node-b", &other.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "node-a", &["qwen3-embedding:8b"]);
+    mark_ready(&state, "node-b", &["qwen3-embedding:8b"]);
+    let a = nid("node-a");
+    state.registry.mark_request_failure(&a);
+    state.registry.mark_request_failure(&a);
+    assert_eq!(state.registry.fail_streak(&a), 2);
+    assert!(state.registry.get(&a).unwrap().healthy);
+
+    let response = make_app(state.clone())
+        .oneshot(json_req(
+            Method::POST,
+            "/api/embed",
+            json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+        ))
+        .await
+        .expect("oneshot");
+    assert_eq!(response.status(), StatusCode::OK);
+    let _ = response.into_body().collect().await;
+    assert_eq!(state.registry.fail_streak(&a), 3);
+    assert!(!state.registry.get(&a).unwrap().healthy);
+    assert_eq!(other_hit.calls(), 0);
+    broken_h.abort();
+}
+
+#[tokio::test]
+async fn complete_stream_clears_fail_streak() {
+    let server = MockServer::start();
+    let _ok = server.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3-embedding:8b"]);
+    let gpu = nid("gpu");
+    state.registry.mark_request_failure(&gpu);
+    state.registry.mark_request_failure(&gpu);
+    assert_eq!(state.registry.fail_streak(&gpu), 2);
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/api/embed",
+            json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state.registry.fail_streak(&gpu), 0);
+}
+
+#[tokio::test]
+async fn loaded_vram_capacity_miss_skips_admission_wait() {
+    let state = state_from(RouterConfig {
+        nodes: vec![node("gpu", "http://127.0.0.1:9", 24.0, 1, None)],
+        policy: PolicyConfig {
+            admission_wait_ms: 500,
+            ..PolicyConfig::default()
+        },
+        ..RouterConfig::default()
+    });
+    mark_ready(&state, "gpu", &["llama3.1:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("gpu"), ["other:1b"], Some(20.0));
+    let started = Instant::now();
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "llama3.1:8b", "prompt": "x"}),
+        ),
+    )
+    .await;
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_str().unwrap();
+    assert!(error.contains("insufficient_capacity"), "{error}");
+    assert!(
+        elapsed < Duration::from_millis(300),
+        "admission wait should not run on loaded-vram miss: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn inflight_cas_does_not_overshoot_cap() {
+    let a_srv = MockServer::start();
+    let b_srv = MockServer::start();
+    let _a = a_srv.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .delay(Duration::from_millis(400))
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let _b = b_srv.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .delay(Duration::from_millis(400))
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.2]]}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("node-a", &a_srv.base_url(), 8.0, 1, Some(1)),
+        node("node-b", &b_srv.base_url(), 8.0, 1, Some(1)),
+    ]));
+    mark_ready(&state, "node-a", &["qwen3-embedding:8b"]);
+    mark_ready(&state, "node-b", &["qwen3-embedding:8b"]);
+    let registry = std::sync::Arc::clone(&state.registry);
+    let a = nid("node-a");
+    let max_a = Arc::new(AtomicU32::new(0));
+    let max_watch = Arc::clone(&max_a);
+    let watch = tokio::spawn(async move {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(2) {
+            let n = registry.inflight(&a);
+            max_watch.fetch_max(n, Ordering::Relaxed);
+            sleep(Duration::from_millis(5)).await;
+        }
+    });
+    let r1 = tokio::spawn(make_app(state.clone()).oneshot(json_req(
+        Method::POST,
+        "/api/embed",
+        json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+    )));
+    let r2 = tokio::spawn(make_app(state).oneshot(json_req(
+        Method::POST,
+        "/api/embed",
+        json!({"model": "qwen3-embedding:8b", "input": ["y"]}),
+    )));
+    let _ = r1.await;
+    let _ = r2.await;
+    watch.abort();
+    assert!(max_a.load(Ordering::Relaxed) <= 1);
 }

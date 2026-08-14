@@ -9,8 +9,8 @@ pub(crate) mod url_policy;
 pub use file::{fleet_path_from_env, load_fleet_nodes, parse_fleet_yaml, DEFAULT_FLEET_PATH};
 pub use ids::{NodeId, RouterId, VerdaInstanceId};
 pub use registry::{
-    model_base, normalize_model, suggested_max_inflight, GpuSnapshot, NodeOrigin, NodeSnapshot,
-    PressureLevel, Registry,
+    model_base, normalize_model, suggested_max_inflight, GpuSnapshot, InflightAdmit, NodeOrigin,
+    NodeSnapshot, PressureLevel, Registry,
 };
 pub use state::{
     EnrollPersist, FleetState, FleetStateEntry, FleetStateError, VerdaNodePersist,

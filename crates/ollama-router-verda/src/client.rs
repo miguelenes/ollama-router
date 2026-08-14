@@ -9,6 +9,7 @@ use serde_json::Value;
 use tokio::sync::Mutex;
 
 use ollama_router_core::config::{OsEnv, VerdaConfig};
+use ollama_router_core::http_util::reqwest_error_for_log;
 
 use crate::types::{
     Image, Instance, InstanceAvailability, InstanceType, SshKey, StartupScript, TokenResponse,
@@ -209,9 +210,9 @@ impl VerdaClient {
                 Ok(resp) => resp,
                 Err(err) => {
                     if attempt >= 3 {
-                        let err = err.without_url();
                         return Err(VerdaError::Message(format!(
-                            "Verda request failed after retries: {err}"
+                            "Verda request failed after retries: {}",
+                            reqwest_error_for_log(err)
                         )));
                     }
                     attempt += 1;

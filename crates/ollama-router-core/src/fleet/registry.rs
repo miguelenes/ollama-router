@@ -31,6 +31,26 @@ impl NodeOrigin {
     }
 }
 
+/// Outcome of [`Registry::inflight_inc`]. Distinguishes drain vs cap refusal.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InflightAdmit {
+    /// Slot claimed; `last_client_request_at` written.
+    Admitted,
+    /// Node is not in the live map.
+    Missing,
+    /// Verda draining or forget-pending; caller should retry another node.
+    Draining,
+    /// Effective inflight cap reached; caller should retry another node.
+    Saturated,
+}
+
+impl InflightAdmit {
+    /// True when a slot was claimed.
+    pub fn admitted(self) -> bool {
+        matches!(self, Self::Admitted)
+    }
+}
+
 /// RAM pressure classification used by scoring and hard filters.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PressureLevel {
@@ -88,6 +108,35 @@ pub fn suggested_max_inflight(vram_gb: f64) -> u32 {
     } else {
         8
     }
+}
+
+fn effective_max_inflight(
+    explicit: Option<u32>,
+    default: Option<u32>,
+    vram_gb: f64,
+    pressure: PressureLevel,
+) -> u32 {
+    if let Some(max) = explicit {
+        return max;
+    }
+    if let Some(max) = default {
+        return max;
+    }
+    let mut effective = suggested_max_inflight(vram_gb);
+    match pressure {
+        PressureLevel::Elevated => effective = effective.saturating_sub(1).max(1),
+        PressureLevel::Critical => effective = 1,
+        PressureLevel::Unknown | PressureLevel::Ok => {}
+    }
+    effective
+}
+
+fn finite_or_none(value: f64) -> Option<f64> {
+    value.is_finite().then_some(value)
+}
+
+fn finite_opt(value: Option<f64>) -> Option<f64> {
+    value.and_then(finite_or_none)
 }
 
 fn models_match(have: &HashSet<String>, requested: &str) -> bool {
@@ -225,19 +274,12 @@ impl NodeSnapshot {
 
     /// Pressure-aware cap used for the saturation hard filter.
     pub fn max_inflight_effective(&self, default_max_inflight: Option<u32>) -> u32 {
-        if let Some(max) = self.max_inflight {
-            return max;
-        }
-        if let Some(max) = default_max_inflight {
-            return max;
-        }
-        let mut effective = suggested_max_inflight(self.vram_gb());
-        match self.pressure_level {
-            PressureLevel::Elevated => effective = effective.saturating_sub(1).max(1),
-            PressureLevel::Critical => effective = 1,
-            PressureLevel::Unknown | PressureLevel::Ok => {}
-        }
-        effective
+        effective_max_inflight(
+            self.max_inflight,
+            default_max_inflight,
+            self.vram_gb(),
+            self.pressure_level,
+        )
     }
 
     /// True when inflight has reached the effective cap.
@@ -271,13 +313,13 @@ impl GpuSnapshot {
     fn from_detail(detail: &GpuDetail) -> Self {
         Self {
             index: detail.index,
-            vram_total_gb: detail.vram_total_gb,
-            vram_used_gb: detail.vram_used_gb,
-            vram_free_gb: detail.vram_free_gb,
-            vram_free_known: detail.vram_free_is_known(),
-            vram_used_known: detail.vram_used_is_known(),
-            utilization_gpu_pct: detail.utilization_gpu_pct,
-            temperature_c: detail.temperature_c,
+            vram_total_gb: finite_or_none(detail.vram_total_gb).unwrap_or(0.0),
+            vram_used_gb: finite_or_none(detail.vram_used_gb).unwrap_or(0.0),
+            vram_free_gb: finite_or_none(detail.vram_free_gb).unwrap_or(0.0),
+            vram_free_known: detail.vram_free_is_known() && detail.vram_free_gb.is_finite(),
+            vram_used_known: detail.vram_used_is_known() && detail.vram_used_gb.is_finite(),
+            utilization_gpu_pct: finite_opt(detail.utilization_gpu_pct),
+            temperature_c: finite_opt(detail.temperature_c),
         }
     }
 }
@@ -336,6 +378,7 @@ struct Node {
     reserved_vram_bits: AtomicU64,
     reserved_ram_bits: AtomicU64,
     draining: AtomicBool,
+    forget_pending: AtomicBool,
     fail_streak: AtomicU32,
     reservations: Mutex<ReservationLedger>,
     cold: RwLock<Cold>,
@@ -354,6 +397,7 @@ impl Node {
             reserved_vram_bits: AtomicU64::new(0.0f64.to_bits()),
             reserved_ram_bits: AtomicU64::new(0.0f64.to_bits()),
             draining: AtomicBool::new(false),
+            forget_pending: AtomicBool::new(false),
             fail_streak: AtomicU32::new(0),
             reservations: Mutex::new(ReservationLedger::default()),
             cold: RwLock::new(Cold {
@@ -422,6 +466,7 @@ impl Node {
         remarge(&mut cold);
         drop(cold);
         self.draining.store(false, Ordering::Release);
+        self.forget_pending.store(false, Ordering::Release);
     }
 
     fn snapshot(&self) -> NodeSnapshot {
@@ -485,9 +530,13 @@ impl Node {
     }
 
     fn is_droppable(&self) -> bool {
-        self.origin == NodeOrigin::Permanent
-            && self.draining.load(Ordering::Acquire)
-            && self.inflight.load(Ordering::Acquire) == 0
+        if self.inflight.load(Ordering::Acquire) != 0 {
+            return false;
+        }
+        match self.origin {
+            NodeOrigin::Permanent => self.draining.load(Ordering::Acquire),
+            NodeOrigin::Verda => self.forget_pending.load(Ordering::Acquire),
+        }
     }
 
     fn sync_reserved(&self, ledger: &ReservationLedger) {
@@ -591,7 +640,10 @@ impl Registry {
         self.node(id).map(|n| n.snapshot())
     }
 
-    /// Clone the live `NodeConfig` (SSH host may have been remapped).
+    /// Clone the live `NodeConfig`.
+    ///
+    /// The routing URL may have been set by enroll to a zrok private share;
+    /// the router never SSHes.
     pub fn node_config(&self, id: &NodeId) -> Option<NodeConfig> {
         self.node(id).map(|n| n.node_config())
     }
@@ -815,19 +867,46 @@ impl Registry {
 
     /// Admit a client generate/chat/embed forward. Writes `last_client_request_at`.
     ///
-    /// Returns `false` when the node is missing or a draining Verda node (caller
-    /// should retry another node before first byte). Permanent draining still
-    /// admits inflight so in-flight inventory removes can drain to zero.
-    pub fn inflight_inc(&self, id: &NodeId) -> bool {
+    /// Refuses a missing node, a draining or forget-pending Verda node, or a
+    /// node already at `max_inflight_effective`. Permanent draining still
+    /// admits so in-flight inventory removes can drain to zero.
+    pub fn inflight_inc(&self, id: &NodeId) -> InflightAdmit {
         let Some(node) = self.node(id) else {
-            return false;
+            return InflightAdmit::Missing;
         };
-        if node.origin == NodeOrigin::Verda && node.draining.load(Ordering::Acquire) {
-            return false;
+        if node.origin == NodeOrigin::Verda
+            && (node.draining.load(Ordering::Acquire)
+                || node.forget_pending.load(Ordering::Acquire))
+        {
+            return InflightAdmit::Draining;
         }
-        saturating_fetch_add(&node.inflight);
-        node.last_client_ms.store(now_ms(), Ordering::Relaxed);
-        true
+        let cap = {
+            let cold = node.cold_read();
+            effective_max_inflight(
+                cold.max_inflight,
+                self.policy.default_max_inflight,
+                cold.capacity_effective.vram_gb(),
+                cold.pressure_level,
+            )
+        };
+        loop {
+            let cur = node.inflight.load(Ordering::Acquire);
+            if cur >= cap {
+                return InflightAdmit::Saturated;
+            }
+            match node.inflight.compare_exchange_weak(
+                cur,
+                cur.saturating_add(1),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => {
+                    node.last_client_ms.store(now_ms(), Ordering::Relaxed);
+                    return InflightAdmit::Admitted;
+                }
+                Err(_) => continue,
+            }
+        }
     }
 
     /// Release one inflight slot. Draining permanent nodes with zero inflight are dropped.
@@ -841,6 +920,9 @@ impl Registry {
     }
 
     /// Occupy an inflight slot without touching idle (warm-keeper only).
+    ///
+    /// Uncapped: the warm keeper already self-limits via
+    /// `model_warm_max_inflight_ratio`.
     pub fn occupancy_inc(&self, id: &NodeId) {
         if let Some(node) = self.node(id) {
             saturating_fetch_add(&node.inflight);
@@ -1006,16 +1088,26 @@ impl Registry {
             return;
         };
         let mut cold = node.cold_write();
-        cold.capacity_discovered = Some(report.as_capacity());
-        cold.vram_free_gb = Some(report.vram_free_gb);
-        cold.vram_free_known = report.vram_free_is_known();
-        cold.vram_used_gb = Some(report.vram_used_gb);
-        cold.vram_used_known = report.vram_used_is_known();
+        let mut discovered = report.as_capacity();
+        if discovered
+            .vram_gb
+            .is_some_and(|v| !v.is_finite() || v < 0.0)
+        {
+            discovered.vram_gb = None;
+        }
+        if discovered.ram_gb.is_some_and(|v| !v.is_finite() || v < 0.0) {
+            discovered.ram_gb = None;
+        }
+        cold.capacity_discovered = Some(discovered);
+        cold.vram_free_gb = finite_or_none(report.vram_free_gb);
+        cold.vram_free_known = report.vram_free_is_known() && report.vram_free_gb.is_finite();
+        cold.vram_used_gb = finite_or_none(report.vram_used_gb);
+        cold.vram_used_known = report.vram_used_is_known() && report.vram_used_gb.is_finite();
         cold.gpu_backend = report.gpu_backend.unwrap_or_default();
         let utils: Vec<f64> = report
             .gpus_detail
             .iter()
-            .filter_map(|gpu| gpu.utilization_gpu_pct)
+            .filter_map(|gpu| finite_opt(gpu.utilization_gpu_pct))
             .collect();
         if utils.is_empty() {
             cold.gpu_util_pct = None;
@@ -1024,16 +1116,16 @@ impl Registry {
             cold.gpu_util_pct = Some(utils.iter().sum::<f64>() / utils.len() as f64);
             cold.gpu_util_known = true;
         }
-        cold.cpu_usage_pct = report.cpu_usage_pct.or_else(|| {
+        cold.cpu_usage_pct = finite_opt(report.cpu_usage_pct).or_else(|| {
             report
                 .pressure
                 .as_ref()
-                .and_then(|pressure| pressure.cpu_usage_pct)
+                .and_then(|pressure| finite_opt(pressure.cpu_usage_pct))
         });
         cold.ollama_running = report.ollama_running;
         cold.loaded_model_count = report.loaded_model_count.map(|n| n.max(0) as u32);
-        cold.disk_total_gb = report.disk_total_gb;
-        cold.disk_available_gb = report.disk_available_gb;
+        cold.disk_total_gb = finite_opt(report.disk_total_gb);
+        cold.disk_available_gb = finite_opt(report.disk_available_gb);
         cold.gpus_detail = report
             .gpus_detail
             .iter()
@@ -1042,8 +1134,8 @@ impl Registry {
             .collect::<Vec<_>>()
             .into();
         if let Some(pressure) = report.pressure.as_ref() {
-            cold.ram_available_gb = pressure.ram_available_gb;
-            cold.ram_available_ratio = pressure.ram_available_ratio;
+            cold.ram_available_gb = finite_opt(pressure.ram_available_gb);
+            cold.ram_available_ratio = finite_opt(pressure.ram_available_ratio);
         }
         if let Some(level) = pressure_level {
             cold.pressure_level = level;
@@ -1114,16 +1206,22 @@ impl Registry {
         }
     }
 
-    /// Drop a Verda node from the live registry. Permanent hosts are ignored.
+    /// Forget a Verda node. Permanent hosts are ignored.
+    ///
+    /// Sets forget-pending (not the same as idle-destroy `draining`). Drops the
+    /// row immediately when inflight is 0; otherwise ranking skips it and
+    /// `inflight_dec` / `occupancy_dec` sweep when the counter hits zero.
+    /// Failed-destroy draining Verda rows are not forget-pending and stay.
     pub fn remove_verda(&self, id: &NodeId) {
-        let mut inner = self.write();
-        if inner
-            .nodes
-            .get(id)
-            .is_some_and(|n| n.origin == NodeOrigin::Verda)
-        {
-            inner.nodes.remove(id);
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        if node.origin != NodeOrigin::Verda {
+            return;
         }
+        node.forget_pending.store(true, Ordering::Release);
+        node.draining.store(true, Ordering::Release);
+        self.remove_if_droppable(id, &node);
     }
 
     /// Mark a Verda node draining so ranking stops selecting it. No-op for
@@ -1332,12 +1430,12 @@ mod tests {
         let desk = nid("desk");
         assert!(registry.set_draining(&spot, true));
         assert!(!registry.set_draining(&desk, true));
-        assert!(!registry.inflight_inc(&spot));
+        assert_eq!(registry.inflight_inc(&spot), InflightAdmit::Draining);
         assert_eq!(registry.inflight(&spot), 0);
-        assert!(registry.inflight_inc(&desk));
+        assert_eq!(registry.inflight_inc(&desk), InflightAdmit::Admitted);
         assert_eq!(registry.inflight(&desk), 1);
         assert!(registry.set_draining(&spot, false));
-        assert!(registry.inflight_inc(&spot));
+        assert_eq!(registry.inflight_inc(&spot), InflightAdmit::Admitted);
         assert_eq!(registry.inflight(&spot), 1);
     }
 
@@ -1663,17 +1761,15 @@ mod tests {
                 let a = a.clone();
                 let b = b.clone();
                 scope.spawn(move || {
-                    for i in 0..200 {
-                        registry.inflight_inc(&a);
-                        let _ = registry.snapshot();
-                        let rid = registry.reserve_vram(&a, "llama", 1.0);
-                        registry.release_vram(&a, rid);
-                        registry.inflight_dec(&a);
+                    for _i in 0..200 {
+                        if registry.inflight_inc(&a).admitted() {
+                            let _ = registry.snapshot();
+                            let rid = registry.reserve_vram(&a, "llama", 1.0);
+                            registry.release_vram(&a, rid);
+                            registry.inflight_dec(&a);
+                        }
                         registry.occupancy_inc(&b);
                         registry.occupancy_dec(&b);
-                        if i == 0 {
-                            assert!(registry.last_client_request_at(&a).is_some());
-                        }
                     }
                 });
             }
@@ -1683,5 +1779,100 @@ mod tests {
         assert!(registry.last_client_request_at(&a).is_some());
         assert!(registry.last_client_request_at(&b).is_none());
         assert_eq!(registry.reserved_vram_gb(&a), 0.0);
+    }
+
+    #[test]
+    fn inflight_inc_cas_respects_cap() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Arc::new(Registry::new(&config));
+        let id = nid("a");
+        let outcomes = Arc::new(Mutex::new(Vec::new()));
+        std::thread::scope(|scope| {
+            for _ in 0..16 {
+                let registry = Arc::clone(&registry);
+                let id = id.clone();
+                let outcomes = Arc::clone(&outcomes);
+                scope.spawn(move || {
+                    let admit = registry.inflight_inc(&id);
+                    outcomes.lock().unwrap().push(admit);
+                });
+            }
+        });
+        let outcomes = outcomes.lock().unwrap();
+        let admitted = outcomes
+            .iter()
+            .filter(|a| **a == InflightAdmit::Admitted)
+            .count();
+        let saturated = outcomes
+            .iter()
+            .filter(|a| **a == InflightAdmit::Saturated)
+            .count();
+        assert_eq!(admitted, 2);
+        assert_eq!(saturated, 14);
+        assert_eq!(registry.inflight(&id), 2);
+    }
+
+    #[test]
+    fn remove_verda_with_inflight_tombstones_then_drops() {
+        let registry = Registry::new(&RouterConfig::default());
+        registry.upsert_verda(node("spot", 24.0, 1));
+        let spot = nid("spot");
+        registry.set_healthy(&spot);
+        assert_eq!(registry.inflight_inc(&spot), InflightAdmit::Admitted);
+        registry.remove_verda(&spot);
+        let snap = registry.get(&spot).expect("tombstone");
+        assert!(snap.draining);
+        assert_eq!(snap.inflight, 1);
+        let ranked = crate::routing::rank_nodes(
+            &registry.snapshot(),
+            crate::routing::RequestClass::Small,
+            None,
+            registry.policy(),
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(ranked.ranked.iter().all(|n| n.id.as_str() != "spot"));
+        registry.inflight_dec(&spot);
+        assert!(registry.get(&spot).is_none());
+    }
+
+    #[test]
+    fn set_draining_does_not_drop_idle_verda() {
+        let registry = Registry::new(&RouterConfig::default());
+        registry.upsert_verda(node("spot", 24.0, 1));
+        let spot = nid("spot");
+        assert!(registry.set_draining(&spot, true));
+        assert!(registry.get(&spot).is_some());
+        registry.sweep_drained();
+        assert!(registry.get(&spot).is_some());
+    }
+
+    #[test]
+    fn apply_capacity_report_drops_non_finite_ratio() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        let mut report = CapacityReport {
+            vram_gb: 8.0,
+            gpus: 1,
+            ram_gb: 32.0,
+            ..CapacityReport::default()
+        };
+        report.pressure = Some(crate::capacity::Pressure {
+            ram_available_gb: Some(24.0),
+            ram_available_ratio: Some(f64::NAN),
+            ..Default::default()
+        });
+        registry.apply_capacity_report(&id, &report, Some(PressureLevel::Ok));
+        let snap = registry.get(&id).unwrap();
+        assert!(snap.ram_available_ratio.is_none());
+        assert_eq!(snap.ram_available_gb, Some(24.0));
     }
 }

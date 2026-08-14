@@ -1437,7 +1437,7 @@ async fn idle_scale_down_skips_inflight_then_destroys_after_dec() {
     let nid = NodeId::parse("verda-inst-idle").unwrap();
     registry.upsert_verda(verda_node("inst-idle"));
     persist_owned(&fs, "inst-idle");
-    assert!(registry.inflight_inc(&nid));
+    assert!(registry.inflight_inc(&nid).admitted());
     mgr.reconcile().await;
     assert_eq!(delete.calls(), 0);
     assert!(registry.get(&nid).is_some());
@@ -1492,7 +1492,7 @@ async fn excess_trim_destroys_idle_not_inflight_ignoring_list_order() {
     persist_owned(&fs, "idle-a");
     persist_owned(&fs, "idle-b");
     let busy = NodeId::parse("verda-busy").unwrap();
-    assert!(registry.inflight_inc(&busy));
+    assert!(registry.inflight_inc(&busy).admitted());
     mgr.reconcile().await;
     assert_eq!(del_busy.calls(), 0);
     assert!(del_a.calls() + del_b.calls() >= 1);

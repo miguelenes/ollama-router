@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use ollama_router_core::fleet::{NodeId, NodeSnapshot, PressureLevel, Registry};
+use ollama_router_core::http_util::{read_reqwest_capped, reqwest_error_for_log};
 use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
@@ -136,7 +137,11 @@ async fn warm_model(state: &AppState, node: &NodeSnapshot, model: &str) {
     {
         Ok(resp) => resp,
         Err(err) => {
-            tracing::debug!(node = %node.id, error = %err, "warm_request_failed");
+            tracing::debug!(
+                node = %node.id,
+                error = %reqwest_error_for_log(err),
+                "warm_request_failed"
+            );
             return;
         }
     };
@@ -148,7 +153,12 @@ async fn warm_model(state: &AppState, node: &NodeSnapshot, model: &str) {
         );
         return;
     }
-    let _ = resp.bytes().await;
+    if read_reqwest_capped(resp, state.config.health.max_probe_body_bytes)
+        .await
+        .is_err()
+    {
+        return;
+    }
     tracing::info!(node = %node.id, model, "warm_model_ok");
 }
 
