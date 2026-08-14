@@ -104,12 +104,29 @@ pub fn is_known_small_base(model: &str, bases: &[&str]) -> bool {
     bases.contains(&base)
 }
 
+/// Native and OpenAI inference paths. The proxy additionally requires `POST`
+/// before `inflight_inc` / reservation (idle activity).
+pub fn is_inference_path(path: &str) -> bool {
+    matches!(
+        path.trim_end_matches('/'),
+        "/api/generate"
+            | "/api/chat"
+            | "/api/embed"
+            | "/api/embeddings"
+            | "/v1/chat/completions"
+            | "/v1/completions"
+            | "/v1/embeddings"
+    )
+}
+
 /// Class implied by the endpoint alone (`None` = needs the model name).
 pub fn classify_path(path: &str) -> Option<RequestClass> {
     let p = path.trim_end_matches('/');
     match p {
-        "/api/embed" | "/api/embeddings" => Some(RequestClass::Embed),
+        "/api/embed" | "/api/embeddings" | "/v1/embeddings" => Some(RequestClass::Embed),
         "/api/pull" => Some(RequestClass::Pull),
+        // Metadata lookup: never size-class as LARGE / generate-timeout.
+        "/api/show" => Some(RequestClass::Generic),
         _ => None,
     }
 }
@@ -229,6 +246,25 @@ mod tests {
             ("/api/chat", Some("llama3.2"), RequestClass::Medium),
             ("/api/tags", None, RequestClass::Generic),
             ("/api/show", None, RequestClass::Generic),
+            ("/api/show", Some("llama3.1:70b"), RequestClass::Generic),
+            ("/v1/embeddings", Some("all-minilm"), RequestClass::Embed),
+            ("/v1/embeddings", None, RequestClass::Embed),
+            (
+                "/v1/chat/completions",
+                Some("llama3.1:70b"),
+                RequestClass::Large,
+            ),
+            (
+                "/v1/chat/completions",
+                Some("llama3.2:3b"),
+                RequestClass::Small,
+            ),
+            ("/v1/completions", Some("llama3.1:8b"), RequestClass::Medium),
+            (
+                "/v1/chat/completions",
+                Some("qwen3-embedding:8b"),
+                RequestClass::Embed,
+            ),
         ];
         for (path, model, expected) in cases {
             assert_eq!(classify(path, *model, &p), *expected, "{path} {model:?}");
@@ -246,6 +282,32 @@ mod tests {
             classify("/api/chat", Some("minicpm-v"), &p),
             RequestClass::Small
         );
+    }
+
+    #[test]
+    fn inference_path_allowlist() {
+        for path in [
+            "/api/generate",
+            "/api/chat",
+            "/api/embed",
+            "/api/embeddings",
+            "/v1/chat/completions",
+            "/v1/completions",
+            "/v1/embeddings",
+            "/v1/chat/completions/",
+        ] {
+            assert!(is_inference_path(path), "{path}");
+        }
+        for path in [
+            "/api/show",
+            "/api/ps",
+            "/api/tags",
+            "/v1/models",
+            "/v1/images/generations",
+            "/api/push",
+        ] {
+            assert!(!is_inference_path(path), "{path}");
+        }
     }
 
     #[test]

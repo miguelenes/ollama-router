@@ -17,10 +17,11 @@ alwaysApply: true
 - Enroll learns the zrok share token via `POST /router/v1/nodes/enroll`
   (fail-closed admin bearer). It must **not** write `fleet.yaml`. `origin=verda`
   only updates an existing `managed_by=verda` FleetState row.
-- Idle: `last_client_request_at` only from `inflight_inc` on generate/chat/embed.
+- Idle: `last_client_request_at` only from `inflight_inc` on generate/chat/embed
+  and OpenAI `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
   Health, `/api/ps`, capacity, admin, warm-keeper do not count. **Never destroy
   fleet.yaml hosts.** Verda teardown uses `delete_permanently`. Failed
-  destroy retains FleetState ownership. Capacity miss → async `ensure` + **503 + Retry-After**.
+  destroy retains FleetState ownership. Capacity miss → async `create_additional` + **503 + Retry-After**.
 - Admin `/router/v1/*`: bearer `OLLAMA_ROUTER_ADMIN_TOKEN`. Unset → 403, no default.
 
 ```yaml

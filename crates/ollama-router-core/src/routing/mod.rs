@@ -6,8 +6,9 @@ mod place;
 mod rank;
 
 pub use classify::{
-    classify, classify_path, classify_with_markers, is_known_small_base, looks_like_embedding,
-    parse_model_size_b, RequestClass, DEFAULT_EMBED_MARKERS, DEFAULT_SMALL_MODEL_BASES,
+    classify, classify_path, classify_with_markers, is_inference_path, is_known_small_base,
+    looks_like_embedding, parse_model_size_b, RequestClass, DEFAULT_EMBED_MARKERS,
+    DEFAULT_SMALL_MODEL_BASES,
 };
 pub use error::RoutingError;
 pub use place::{

@@ -865,7 +865,9 @@ impl Registry {
         reconcile_ps_reservations(&node, &loaded);
     }
 
-    /// Admit a client generate/chat/embed forward. Writes `last_client_request_at`.
+    /// Admit a client inference forward (native generate/chat/embed and OpenAI
+    /// `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`).
+    /// Writes `last_client_request_at`.
     ///
     /// Refuses a missing node, a draining or forget-pending Verda node, or a
     /// node already at `max_inflight_effective`. Permanent draining still
@@ -939,7 +941,7 @@ impl Registry {
         }
     }
 
-    /// In-process idle timestamp of last client generate/chat/embed.
+    /// In-process idle timestamp of last client inference forward.
     pub fn last_client_request_at(&self, id: &NodeId) -> Option<Instant> {
         self.node(id).and_then(|n| n.last_client_request_at())
     }

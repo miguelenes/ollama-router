@@ -1,6 +1,6 @@
 ---
 name: ollama-compat-proxy
-description: Implements the Ollama-compatible proxy surface for this fleet router — generate/chat/embed, /api/embeddings rewrite, aggregated /api/tags and /v1/models, fleet pull/delete, and 503+Retry-After on capacity miss. Use when adding or changing HTTP routes, proxy streaming, admin ensure/delete, or Ollama protocol compatibility.
+description: Implements the Ollama-compatible proxy surface for this fleet router — generate/chat/embed, OpenAI /v1 chat/completions/embeddings passthrough, /api/embeddings rewrite, aggregated /api/tags and /v1/models, fleet pull/delete, and 503+Retry-After on capacity miss. Use when adding or changing HTTP routes, proxy streaming, admin ensure/delete, or Ollama protocol compatibility.
 ---
 
 # Ollama-compatible proxy
@@ -16,9 +16,15 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 | `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). |
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
+| `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Passthrough to Ollama's OpenAI shim on the ranked node. Same `inflight_inc` / reservation / class ranking as native chat/embed. Do **not** rewrite `/v1/embeddings` to `/api/embed`. |
 | `GET /api/tags` | Aggregated **union** of healthy nodes' tags. Not a single-node passthrough. |
 | `GET /v1/models` | Same union in OpenAI list format (`id` / `object` / `created: 0` / `owned_by: library`). |
-| `POST /api/pull`, `/api/delete` | Always fleet orchestrator (stub → 503 until jobs land). Prefer admin. |
+| `GET /v1/models/{id}` | Retrieve from that union (404 OpenAI-shaped if absent). Not a client forward. |
+| `POST /api/show` | Metadata passthrough (`model` or `name`). Forced Generic class. Not idle. |
+| `GET /api/ps`, `/api/version` | Diagnostic single-node passthrough. Not idle. |
+| `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation`. Use admin ensure / `POST /api/pull`. |
+| Other `/v1/*` | **404** OpenAI-shaped. Allowlist only. |
+| `POST /api/pull`, `/api/delete` | Always fleet orchestrator. Prefer admin. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
 | `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
@@ -27,9 +33,11 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 ## Capacity miss
 
 Map `no_nodes` / `no_healthy` / `capacity` / `ram` / `ram_pressure` /
-`saturated` to Ollama-shaped **503** JSON and set `Retry-After`. Kick coalesced
-async Verda demand-scale (`create_additional`) for those reasons. Never block
-the client on provision.
+`saturated` to **503** JSON and set `Retry-After`. Body shape follows the
+request path: Ollama `{"error": "…"}` on `/api/*`, OpenAI
+`{"error": {"message", "type", "code"}}` on `/v1/*` (not `/router/v1/*`).
+Kick coalesced async Verda demand-scale (`create_additional`) for those
+reasons. Never block the client on provision.
 
 `model_missing` has **no** Retry-After when `auto_pull_on_miss` is false (default).
 When the flag is on, the proxy enqueues `start_ensure(Placement)` on
@@ -45,8 +53,8 @@ that lacks the model (Ollama would native-pull). Never `unsafe_single_node_mutat
 - Cap the request body before buffering.
 - Retry another ranked node **only before the first upstream byte**.
 - After the stream starts, pipe bytes; do not retry.
-- `IncrementalCollector`: 1 MiB max unterminated NDJSON frame; do not mutate forwarded chunks.
-- Nonretryable pre-response errors → Ollama-shaped **502**.
+- `IncrementalCollector`: 1 MiB max unterminated frame; NDJSON or SSE (`text/event-stream`); do not mutate forwarded chunks.
+- Nonretryable pre-response errors → **502**, shape follows the request path.
 
 ## Pull / delete
 

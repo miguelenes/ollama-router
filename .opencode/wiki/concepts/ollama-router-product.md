@@ -77,6 +77,12 @@ land). There is no single-node mutate passthrough.
 
 `/api/embeddings` → `/api/embed` is Ollama ≤0.32 protocol compatibility, not debt.
 
+OpenAI `POST /v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` are
+passthrough to the ranked node's Ollama shim (same idle / reservation / class
+ranking as native inference). `GET /v1/models/{id}` is served from the
+aggregated tags union. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
+`/api/create`, and `/api/blobs*` are rejected (`not_a_fleet_operation`).
+
 Cloud instance tag `managed_by=ollama-router`. FleetState `managed_by=verda`
 is an ownership discriminator, not the cloud tag.
 

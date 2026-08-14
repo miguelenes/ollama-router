@@ -22,7 +22,8 @@ services, Thunder, or RunPod.
   exception. `fleet.yaml` LAN URLs stay direct HTTP. Enroll must not write
   `fleet.yaml`.
 - **Idle timer = client forwards only.** `last_client_request_at` is written solely
-  from `inflight_inc` on generate / chat / embed. Health, `/api/ps`, capacity
+  from `inflight_inc` on native generate / chat / embed **and** OpenAI
+  `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`. Health, `/api/ps`, capacity
   probes, admin, and the warm-keeper do not count. After idle destroy: coalesced
   async Verda `create_additional`; the client gets **503 + `Retry-After`**. **Never
   destroy fleet.yaml hosts.** Destroy Verda instances with `delete_permanently`.

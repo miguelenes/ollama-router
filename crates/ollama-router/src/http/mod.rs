@@ -1,4 +1,4 @@
-//! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags and `/v1/models`, proxy fallback.
+//! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags and `/v1/models`, OpenAI inference, proxy fallback.
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
@@ -181,6 +181,10 @@ async fn proxy_route(State(state): State<AppState>, req: Request<axum::body::Bod
     proxy::handle(&state, req).await
 }
 
+async fn openai_model_route(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    proxy::openai_model_by_id(&state, &id)
+}
+
 async fn ui_index() -> Response {
     (
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -221,6 +225,14 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/ui/{*path}", get(ui_asset))
         .route("/api/tags", get(proxy_route))
         .route("/v1/models", get(proxy_route))
+        .route("/v1/models/{*id}", get(openai_model_route))
+        .route("/v1/chat/completions", post(proxy_route))
+        .route("/v1/completions", post(proxy_route))
+        .route("/v1/embeddings", post(proxy_route))
+        .route("/api/show", post(proxy_route))
+        .route("/api/push", post(proxy_route))
+        .route("/api/copy", post(proxy_route))
+        .route("/api/create", post(proxy_route))
         .route("/api/pull", post(proxy_route))
         .route("/api/delete", delete(proxy_route))
         .route(

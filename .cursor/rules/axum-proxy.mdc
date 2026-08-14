@@ -6,16 +6,20 @@ alwaysApply: false
 
 # Axum proxy
 
-- Stream upstream NDJSON. Do not buffer the full response.
+- Stream upstream NDJSON or SSE. Do not buffer the full response.
 - Cap request bodies **before** buffering.
 - Retry another node **only pre-first-byte** (connect/timeout/overload statuses).
   Once a stream has begun, never retry.
 - Rewrite `/api/embeddings` → `/api/embed` (Ollama ≤0.32 compat, not debt).
+  Do **not** rewrite `/v1/embeddings`.
 - `GET /api/tags` is the **aggregated union** across healthy nodes.
-- Capacity / saturation / no-healthy → Ollama-shaped **503** + `Retry-After`.
-- Nonretryable pre-response upstream failures → Ollama-shaped **502**, not raw framework errors.
-- `IncrementalCollector`: cap an unterminated NDJSON frame at **1 MiB**; never alter forwarded chunks.
-- Never log bodies. `inflight_inc` only on generate/chat/embed client forwards.
+  `GET /v1/models` and `GET /v1/models/{id}` use the same union.
+- Capacity / saturation / no-healthy → **503** + `Retry-After`. Body shape
+  follows the request path (Ollama string on `/api/*`, OpenAI envelope on `/v1/*`).
+- Nonretryable pre-response upstream failures → **502**, not raw framework errors.
+- `IncrementalCollector`: cap an unterminated frame at **1 MiB**; never alter forwarded chunks.
+- Never log bodies. `inflight_inc` only on POST inference (native generate/chat/embed
+  and OpenAI chat/completions/embeddings).
 
 ```rust
 // BAD — retry after streaming started
