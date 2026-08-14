@@ -34,14 +34,14 @@ fn de_opt_stringish<'de, D: Deserializer<'de>>(
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "OAuth token JSON field; unused after parse")]
     pub token_type: Option<String>,
     #[serde(default)]
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
     #[serde(default)]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "OAuth token JSON field; unused after parse")]
     pub scope: Option<String>,
 }
 

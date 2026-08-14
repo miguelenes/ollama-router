@@ -6,25 +6,41 @@ use std::time::{Duration, Instant};
 
 use ollama_router_core::fleet::{NodeId, NodeSnapshot, PressureLevel, Registry};
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
 use crate::http::AppState;
 
-/// Loop until the process exits. Spawn only when `policy.model_warm_enabled`.
-pub async fn run(state: AppState) {
+/// Loop until `shutdown` is cancelled. Spawn only when `policy.model_warm_enabled`.
+pub async fn run(state: AppState, shutdown: CancellationToken) {
     if !state.config.policy.model_warm_enabled {
         tracing::info!("warm_keeper_disabled");
         return;
     }
     let interval = Duration::from_secs_f64(state.config.policy.model_warm_interval_seconds);
-    tokio::time::sleep(interval.min(Duration::from_secs(5))).await;
+    tokio::select! {
+        biased;
+        () = shutdown.cancelled() => return,
+        () = tokio::time::sleep(interval.min(Duration::from_secs(5))) => {}
+    }
     let mut cooldowns: HashMap<NodeId, Instant> = HashMap::new();
     loop {
-        tick(&state, &mut cooldowns).await;
-        tokio::time::sleep(interval).await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        tick(&state, &mut cooldowns, &shutdown).await;
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            () = tokio::time::sleep(interval) => {}
+        }
     }
 }
 
-async fn tick(state: &AppState, cooldowns: &mut HashMap<NodeId, Instant>) {
+async fn tick(
+    state: &AppState,
+    cooldowns: &mut HashMap<NodeId, Instant>,
+    shutdown: &CancellationToken,
+) {
     if state.config.effective_model_tiers().is_empty() {
         return;
     }
@@ -35,6 +51,9 @@ async fn tick(state: &AppState, cooldowns: &mut HashMap<NodeId, Instant>) {
         .filter(|n| n.healthy && !n.draining && n.url.is_some())
         .collect();
     for node in nodes {
+        if shutdown.is_cancelled() {
+            return;
+        }
         maybe_warm_one(state, &node, cooldowns).await;
     }
 }

@@ -18,6 +18,7 @@ use ollama_router_verda::VerdaManager;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
+use tokio_util::sync::CancellationToken;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
@@ -53,15 +54,24 @@ pub struct AppState {
 impl AppState {
     /// Production wiring: SQLite orchestrator, no demand scale-up.
     pub fn from_config(config: RouterConfig) -> anyhow::Result<Self> {
+        Self::from_config_with_shutdown(config, CancellationToken::new())
+    }
+
+    /// Same as [`Self::from_config`], sharing the process shutdown token.
+    pub fn from_config_with_shutdown(
+        config: RouterConfig,
+        shutdown: CancellationToken,
+    ) -> anyhow::Result<Self> {
         let client = build_upstream_client(&config)?;
         let pool = Arc::new(Semaphore::new(config.upstream.max_connections as usize));
         let config = Arc::new(config);
         let registry = Arc::new(Registry::new(&config));
         let metrics = Arc::new(Metrics::new()?);
-        let orchestrator = Arc::new(PullOrchestrator::new(
+        let orchestrator = Arc::new(PullOrchestrator::with_shutdown(
             config.clone(),
             client.clone(),
             Some(registry.clone()),
+            shutdown,
         )?);
         orchestrator.set_observer(metrics.clone());
         let admin_token = std::env::var("OLLAMA_ROUTER_ADMIN_TOKEN")

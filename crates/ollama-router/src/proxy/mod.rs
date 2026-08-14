@@ -27,7 +27,6 @@ use ollama_router_core::routing::{
 };
 use serde_json::{json, Value};
 use tokio::sync::OwnedSemaphorePermit;
-use tokio_util::sync::CancellationToken;
 
 pub use telemetry::{IncrementalCollector, MAX_INCOMPLETE_FRAME_BYTES};
 
@@ -110,34 +109,40 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     let request_class = classify(&path, model.as_deref(), &state.config.policy);
     proxy_ranked(
         state,
-        method,
-        &path,
-        query.as_deref(),
-        &incoming_headers,
-        body,
-        model,
-        request_class,
+        ProxyCall {
+            method,
+            path: &path,
+            query: query.as_deref(),
+            incoming_headers: &incoming_headers,
+            body,
+            model,
+            request_class,
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn proxy_ranked(
-    state: &AppState,
+/// Shared generate/chat/embed hop (ranked retry + one upstream).
+struct ProxyCall<'a> {
     method: Method,
-    path: &str,
-    query: Option<&str>,
-    incoming_headers: &HeaderMap,
+    path: &'a str,
+    query: Option<&'a str>,
+    incoming_headers: &'a HeaderMap,
     body: Bytes,
     model: Option<String>,
     request_class: RequestClass,
-) -> Response {
+}
+
+async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
     let start = Instant::now();
     let config = Arc::clone(&state.config);
     let policy = &config.policy;
     let mut excluded: HashSet<NodeId> = HashSet::new();
+    let request_class = call.request_class;
+    let path = call.path;
+    let model = call.model.as_deref();
 
-    let mut outcome = rank(state, request_class, model.as_deref(), &excluded);
+    let mut outcome = rank(state, request_class, model, &excluded);
     if !outcome.ok()
         && outcome.reason == Some(RoutingError::Saturated)
         && policy.overload_wait_ms > 0
@@ -149,33 +154,28 @@ async fn proxy_ranked(
             "overload_wait"
         );
         tokio::time::sleep(Duration::from_millis(u64::from(policy.overload_wait_ms))).await;
-        outcome = rank(state, request_class, model.as_deref(), &excluded);
+        outcome = rank(state, request_class, model, &excluded);
     }
     if !outcome.ok()
         && outcome.reason == Some(RoutingError::Capacity)
         && policy.admission_wait_ms > 0
-        && blocked_only_by_reservations(
-            &state.registry.snapshot(),
-            request_class,
-            model.as_deref(),
-            policy,
-        )
+        && blocked_only_by_reservations(&state.registry.snapshot(), request_class, model, policy)
     {
         tracing::info!(
             path,
             request_class = %request_class,
-            model = model.as_deref().unwrap_or(""),
+            model = model.unwrap_or(""),
             wait_ms = policy.admission_wait_ms,
             "admission_wait"
         );
         tokio::time::sleep(Duration::from_millis(u64::from(policy.admission_wait_ms))).await;
-        outcome = rank(state, request_class, model.as_deref(), &excluded);
+        outcome = rank(state, request_class, model, &excluded);
     }
 
     if !outcome.ok() {
         let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
         if reason == RoutingError::ModelMissing && policy.auto_pull_on_miss {
-            if let Some(model_name) = model.as_deref() {
+            if let Some(model_name) = model {
                 match auto_pull_on_miss(state, path, request_class, model_name, start).await {
                     AutoPullResult::Forward(next) => {
                         outcome = next;
@@ -190,7 +190,7 @@ async fn proxy_ranked(
         tracing::warn!(
             path,
             request_class = %request_class,
-            model = model.as_deref().unwrap_or(""),
+            model = model.unwrap_or(""),
             reason = reason.as_reason_code(),
             "route_rejected"
         );
@@ -198,7 +198,7 @@ async fn proxy_ranked(
             DemandScale::request_scale_up(state.demand.as_ref(), reason);
         }
         state.metrics.route_reason(reason.as_reason_code());
-        let response = no_candidate_response(reason, model.as_deref(), request_class, policy);
+        let response = no_candidate_response(reason, model, request_class, policy);
         state.metrics.observe_request(
             request_class.as_str(),
             response.status().as_u16(),
@@ -217,19 +217,7 @@ async fn proxy_ranked(
         let node = ranked[0].clone();
         excluded.insert(node.id.clone());
         let has_next = attempt + 1 < max_attempts;
-        match forward_once(
-            state,
-            &method,
-            path,
-            query,
-            incoming_headers,
-            &body,
-            &node,
-            request_class,
-            model.as_deref(),
-        )
-        .await
-        {
+        match forward_once(state, &call, &node).await {
             Ok(response) => {
                 state.metrics.observe_request(
                     request_class.as_str(),
@@ -280,7 +268,7 @@ async fn proxy_ranked(
                 }
                 last_error = Some(err);
                 if has_next {
-                    let reranked = rank(state, request_class, model.as_deref(), &excluded);
+                    let reranked = rank(state, request_class, model, &excluded);
                     if !reranked.ok() {
                         break;
                     }
@@ -346,17 +334,10 @@ fn rank(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn forward_once(
     state: &AppState,
-    method: &Method,
-    path: &str,
-    query: Option<&str>,
-    incoming_headers: &HeaderMap,
-    body: &Bytes,
+    call: &ProxyCall<'_>,
     node: &NodeSnapshot,
-    request_class: RequestClass,
-    model: Option<&str>,
 ) -> Result<Response, ForwardError> {
     let Some(base) = node.url.as_deref() else {
         return Err(ForwardError::Fatal {
@@ -364,24 +345,24 @@ async fn forward_once(
             message: "node has no routing URL".into(),
         });
     };
-    let mut upstream_path = path.to_string();
+    let mut upstream_path = call.path.to_string();
     if upstream_path.trim_end_matches('/') == "/api/embeddings" {
         upstream_path = "/api/embed".into();
     }
     let mut url = format!("{base}{upstream_path}");
-    if let Some(q) = query {
+    if let Some(q) = call.query {
         url.push('?');
         url.push_str(q);
     }
 
-    let client_forward = is_client_forward(path);
+    let client_forward = is_client_forward(call.path);
     let (vram_id, ram_id) = if client_forward {
         maybe_reserve(
             &state.registry,
             &state.config.policy,
             node,
-            model,
-            request_class,
+            call.model.as_deref(),
+            call.request_class,
         )
     } else {
         (None, None)
@@ -397,8 +378,8 @@ async fn forward_once(
         counts_inflight: client_forward,
     };
 
-    let timeout = class_timeout(&state.config.timeouts, request_class);
-    let headers = forward_headers(incoming_headers);
+    let timeout = class_timeout(&state.config.timeouts, call.request_class);
+    let headers = forward_headers(call.incoming_headers);
     let permit = state
         .pool
         .clone()
@@ -409,12 +390,12 @@ async fn forward_once(
             message: "connection pool closed".into(),
         })?;
 
-    let mut builder = state.client.request(method.clone(), &url);
+    let mut builder = state.client.request(call.method.clone(), &url);
     for (name, value) in &headers {
         builder = builder.header(name, value);
     }
-    if !body.is_empty() {
-        builder = builder.body(body.clone());
+    if !call.body.is_empty() {
+        builder = builder.body(call.body.clone());
     }
     let request = builder.timeout(timeout).build().map_err(|err| {
         let err = err.without_url();
@@ -453,31 +434,29 @@ async fn forward_once(
         if let Ok(value) = HeaderValue::from_str(node.id.as_str()) {
             out_headers.insert(HeaderName::from_static("x-ollama-router-upstream"), value);
         }
-        if let Ok(value) = HeaderValue::from_str(request_class.as_str()) {
+        if let Ok(value) = HeaderValue::from_str(call.request_class.as_str()) {
             out_headers.insert(HeaderName::from_static("x-ollama-router-class"), value);
         }
     }
 
     state.registry.mark_request_success(&node.id);
     tracing::debug!(
-        path,
-        request_class = %request_class,
+        path = call.path,
+        request_class = %call.request_class,
         node = %node.id,
         status = status.as_u16(),
         "route"
     );
 
-    let token = CancellationToken::new();
-    let cancel_guard = token.clone().drop_guard();
+    // Client drop of the Axum body drops `bytes_stream`, which aborts the upstream HTTP body.
     let stream = ProxyStream {
         inner: Box::pin(response.bytes_stream()),
         collector: IncrementalCollector::new(),
         inflight: Some(guard),
         _permit: Some(permit),
-        _cancel: cancel_guard,
         node: node.id.as_str().to_string(),
-        model: model.map(str::to_string),
-        class: request_class,
+        model: call.model.clone(),
+        class: call.request_class,
     };
 
     let mut res = Response::new(Body::from_stream(stream));
@@ -581,7 +560,6 @@ struct ProxyStream {
     collector: IncrementalCollector,
     inflight: Option<InflightGuard>,
     _permit: Option<OwnedSemaphorePermit>,
-    _cancel: tokio_util::sync::DropGuard,
     node: String,
     model: Option<String>,
     class: RequestClass,
@@ -933,12 +911,11 @@ async fn auto_pull_on_miss(
         return AutoPullResult::Done(observe_reject(state, request_class, start, response));
     }
 
-    let job = match state.orchestrator.start_ensure(
-        &[model.to_string()],
-        TargetSpec::Placement,
-        false,
-        false,
-    ) {
+    let job = match state
+        .orchestrator
+        .start_ensure(&[model.to_string()], TargetSpec::Placement, false, false)
+        .await
+    {
         Ok(job) => job,
         Err(_) => {
             tracing::warn!(
@@ -981,28 +958,39 @@ async fn auto_pull_on_miss(
 
     wait_for_pull(
         state,
-        request_class,
-        model,
-        start,
-        job.id,
-        &eligible,
-        retry_after,
-        wait,
+        PullWait {
+            request_class,
+            model,
+            start,
+            job_id: job.id,
+            eligible: &eligible,
+            retry_after,
+            wait_seconds: wait,
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn wait_for_pull(
-    state: &AppState,
+struct PullWait<'a> {
     request_class: RequestClass,
-    model: &str,
+    model: &'a str,
     start: Instant,
     job_id: JobId,
-    eligible: &[NodeId],
+    eligible: &'a [NodeId],
     retry_after: u32,
     wait_seconds: f64,
-) -> AutoPullResult {
+}
+
+async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
+    let PullWait {
+        request_class,
+        model,
+        start,
+        job_id,
+        eligible,
+        retry_after,
+        wait_seconds,
+    } = wait;
     let deadline = Instant::now() + Duration::from_secs_f64(wait_seconds);
     let mut guard = WaitMetricGuard {
         metrics: Arc::clone(&state.metrics),

@@ -16,6 +16,7 @@ use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::client::{VerdaClient, VerdaError};
 use crate::images::pick_ubuntu24_nvidia_docker_image;
@@ -53,6 +54,7 @@ struct Inner {
     startup_script_id: Mutex<Option<String>>,
     demand: std::sync::Mutex<Option<JoinHandle<()>>>,
     events: std::sync::Mutex<Option<Arc<dyn FleetEvents>>>,
+    shutdown: CancellationToken,
 }
 
 impl VerdaManager {
@@ -61,6 +63,23 @@ impl VerdaManager {
         client: VerdaClient,
         registry: Arc<Registry>,
         fleet_state: Arc<FleetState>,
+    ) -> Self {
+        Self::with_shutdown(
+            config,
+            client,
+            registry,
+            fleet_state,
+            CancellationToken::new(),
+        )
+    }
+
+    /// Same as [`Self::new`], sharing a process-wide shutdown token.
+    pub fn with_shutdown(
+        config: Arc<RouterConfig>,
+        client: VerdaClient,
+        registry: Arc<Registry>,
+        fleet_state: Arc<FleetState>,
+        shutdown: CancellationToken,
     ) -> Self {
         let http = reqwest::Client::builder()
             .use_rustls_tls()
@@ -79,6 +98,7 @@ impl VerdaManager {
                 startup_script_id: Mutex::new(None),
                 demand: std::sync::Mutex::new(None),
                 events: std::sync::Mutex::new(None),
+                shutdown,
             }),
         }
     }
@@ -101,6 +121,52 @@ impl VerdaManager {
             .clone();
         if let Some(events) = events {
             events.verda_event(event);
+        }
+    }
+
+    fn shutdown_cancelled(&self) -> bool {
+        self.inner.shutdown.is_cancelled()
+    }
+
+    fn lock_demand(&self) -> std::sync::MutexGuard<'_, Option<JoinHandle<()>>> {
+        self.inner
+            .demand
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Abort a coalesced `create_additional` task and wait for it to finish.
+    ///
+    /// Drops the demand mutex before awaiting. Call after the process token is
+    /// cancelled and before [`Self::destroy_all_owned`].
+    pub async fn abort_demand(&self) {
+        let handle = {
+            let mut slot = self.lock_demand();
+            slot.take()
+        };
+        let Some(handle) = handle else {
+            return;
+        };
+        handle.abort();
+        match handle.await {
+            Ok(()) => {}
+            Err(err) if err.is_cancelled() => {}
+            Err(err) => {
+                if err.is_panic() {
+                    tracing::error!("verda_demand_task_panic");
+                }
+            }
+        }
+    }
+
+    /// Sleep `duration`, or return immediately when the process is shutting down.
+    ///
+    /// Returns `true` if shutdown won.
+    async fn cancelled_or_sleep(&self, duration: Duration) -> bool {
+        tokio::select! {
+            biased;
+            () = self.inner.shutdown.cancelled() => true,
+            () = tokio::time::sleep(duration) => false,
         }
     }
 
@@ -153,7 +219,7 @@ impl VerdaManager {
             })
     }
 
-    fn persist_verda(
+    async fn persist_verda(
         &self,
         node_id: &NodeId,
         url: &str,
@@ -180,7 +246,8 @@ impl VerdaManager {
         if let Err(err) = self
             .inner
             .fleet_state
-            .persist_verda_node(node_id.as_str(), persist)
+            .persist_verda_node_async(node_id.as_str(), persist)
+            .await
         {
             tracing::error!(node_id = %node_id, error = %err, "verda persist failed");
         }
@@ -208,14 +275,24 @@ impl VerdaManager {
         })
     }
 
-    fn forget_instance(&self, instance_id: &str) {
+    async fn forget_instance(&self, instance_id: &str) {
         let node_id = Self::node_id_for(instance_id);
         self.inner.registry.remove_verda(&node_id);
-        let _ = self.inner.fleet_state.remove(node_id.as_str());
+        if let Err(err) = self.inner.fleet_state.remove_async(node_id.as_str()).await {
+            tracing::warn!(node_id = %node_id, error = %err, "verda forget fleet-state remove failed");
+        }
     }
 
     pub async fn ensure(&self, create: bool) -> Result<Value, VerdaError> {
+        if self.shutdown_cancelled() {
+            tracing::info!("verda_ensure_skipped_shutdown");
+            return Ok(json!({"status": "none"}));
+        }
         let _lock = self.inner.ensure_lock.lock().await;
+        if self.shutdown_cancelled() {
+            tracing::info!("verda_ensure_skipped_shutdown");
+            return Ok(json!({"status": "none"}));
+        }
         self.ensure_locked(create)
             .await
             .inspect_err(|_| self.emit("ensure_failed"))
@@ -232,7 +309,7 @@ impl VerdaManager {
                 .to_ascii_lowercase();
             if TERMINAL.contains(&status.as_str()) || EVICTED.contains(&status.as_str()) {
                 if let Some(id) = instance.instance_id_value() {
-                    self.forget_instance(id);
+                    self.forget_instance(id).await;
                 }
                 continue;
             }
@@ -251,7 +328,15 @@ impl VerdaManager {
     }
 
     pub async fn create_additional(&self) -> Result<Value, VerdaError> {
+        if self.shutdown_cancelled() {
+            tracing::info!("verda_create_skipped_shutdown");
+            return Ok(json!({"status": "none"}));
+        }
         let _lock = self.inner.ensure_lock.lock().await;
+        if self.shutdown_cancelled() {
+            tracing::info!("verda_create_skipped_shutdown");
+            return Ok(json!({"status": "none"}));
+        }
         self.create_additional_locked()
             .await
             .inspect_err(|_| self.emit("ensure_failed"))
@@ -288,7 +373,8 @@ impl VerdaManager {
             return json!({"status": "none"});
         };
         self.inner.registry.upsert_verda(node);
-        self.persist_verda(&node_id, "", instance, &location, &instance_type, None);
+        self.persist_verda(&node_id, "", instance, &location, &instance_type, None)
+            .await;
         let ready = self.wait_enrolled_and_healthy(&node_id).await;
         self.persist_verda(
             &node_id,
@@ -297,7 +383,8 @@ impl VerdaManager {
             &location,
             &instance_type,
             None,
-        );
+        )
+        .await;
         self.emit("adopt");
         json!({
             "status": "adopted",
@@ -325,7 +412,8 @@ impl VerdaManager {
             &choice.location_code,
             &choice.instance_type,
             Some(choice.spot_price),
-        );
+        )
+        .await;
         let ready = self.wait_enrolled_and_healthy(&node_id).await;
         if ready.ok {
             self.persist_verda(
@@ -335,7 +423,8 @@ impl VerdaManager {
                 &choice.location_code,
                 &choice.instance_type,
                 Some(choice.spot_price),
-            );
+            )
+            .await;
         }
         json!({
             "status": "created",
@@ -380,7 +469,13 @@ impl VerdaManager {
                     detail: REASON_ENROLL_TIMEOUT.into(),
                 };
             }
-            tokio::time::sleep(poll).await;
+            if self.cancelled_or_sleep(poll).await {
+                return EnrollWait {
+                    ok: false,
+                    url: None,
+                    detail: "shutdown".into(),
+                };
+            }
         }
     }
 
@@ -391,8 +486,7 @@ impl VerdaManager {
         let url = self
             .inner
             .fleet_state
-            .hydrate_url(node_id)
-            .map_err(|_| REASON_WAITING_FOR_ENROLL)?
+            .snapshot_hydrate_url(node_id)
             .ok_or(REASON_WAITING_FOR_ENROLL)?;
         let tags_url = format!("{}/api/tags", url.trim_end_matches('/'));
         let resp = self
@@ -408,9 +502,7 @@ impl VerdaManager {
         let capacity_url = self
             .inner
             .fleet_state
-            .hydrate_capacity_url(node_id)
-            .ok()
-            .flatten();
+            .snapshot_hydrate_capacity_url(node_id);
         Ok((url, capacity_url))
     }
 
@@ -418,6 +510,10 @@ impl VerdaManager {
         &self,
         private_key_file: Option<&str>,
     ) -> Result<Option<(Instance, SpotChoice)>, VerdaError> {
+        if self.shutdown_cancelled() {
+            tracing::info!("verda_create_skipped_shutdown");
+            return Ok(None);
+        }
         let availability = self.inner.client.get_instance_availability().await?;
         let instance_types = self.inner.client.get_instance_types().await?;
         let images = self.inner.client.get_images().await?;
@@ -449,6 +545,13 @@ impl VerdaManager {
             {
                 Ok(instance) => return Ok(Some((instance, choice))),
                 Err(err) => {
+                    if self.shutdown_cancelled() {
+                        tracing::info!(
+                            instance_type = %choice.instance_type,
+                            "verda_create_aborted_shutdown"
+                        );
+                        return Ok(None);
+                    }
                     tracing::warn!(
                         instance_type = %choice.instance_type,
                         attempt = attempt + 1,
@@ -460,7 +563,13 @@ impl VerdaManager {
                         let base = self.inner.config.verda.create_backoff_base_seconds;
                         if base > 0.0 {
                             let delay = (base * 2f64.powi(attempt as i32)).min(base * 8.0);
-                            tokio::time::sleep(Duration::from_secs_f64(delay)).await;
+                            if self
+                                .cancelled_or_sleep(Duration::from_secs_f64(delay))
+                                .await
+                            {
+                                tracing::info!("verda_create_aborted_shutdown");
+                                return Ok(None);
+                            }
                         }
                     }
                 }
@@ -478,6 +587,9 @@ impl VerdaManager {
         images: &[crate::types::Image],
         private_key_file: Option<&str>,
     ) -> Result<Instance, VerdaError> {
+        if self.shutdown_cancelled() {
+            return Err(VerdaError::Message("shutdown".into()));
+        }
         if self
             .inner
             .client
@@ -496,6 +608,9 @@ impl VerdaManager {
                     "no Ubuntu 24 image available for the selected instance type".into(),
                 )
             })?;
+        if self.shutdown_cancelled() {
+            return Err(VerdaError::Message("shutdown".into()));
+        }
         let ssh_key_id = ensure_ssh_key_id(
             &self.inner.client,
             &self.inner.config.verda,
@@ -503,6 +618,9 @@ impl VerdaManager {
         )
         .await?;
         let startup_script_id = self.ensure_startup_script_id().await?;
+        if self.shutdown_cancelled() {
+            return Err(VerdaError::Message("shutdown".into()));
+        }
         let hostname = hostname_for(&self.router_id());
         let mut payload = json!({
             "instance_type": choice.instance_type,
@@ -657,7 +775,9 @@ impl VerdaManager {
                     timeout.as_secs_f64()
                 )));
             }
-            tokio::time::sleep(poll).await;
+            if self.cancelled_or_sleep(poll).await {
+                return Err(VerdaError::Message("shutdown".into()));
+            }
         }
     }
 
@@ -684,11 +804,16 @@ impl VerdaManager {
         let timeout = Duration::from_secs_f64(self.inner.config.verda.destroy_timeout_seconds);
         let deadline = tokio::time::Instant::now() + timeout;
         let mut ids: BTreeMap<String, Option<String>> = BTreeMap::new();
-        if let Ok(nodes) = self.inner.fleet_state.list_verda_nodes() {
-            for entry in nodes.values() {
-                if let Some(id) = entry.verda_instance_id.clone() {
-                    ids.insert(id, entry.verda_os_volume_id.clone());
-                }
+        let nodes = match self.inner.fleet_state.load_async().await {
+            Ok(all) => all
+                .into_iter()
+                .filter(|(_, e)| e.managed_by.as_deref() == Some("verda"))
+                .collect(),
+            Err(_) => self.inner.fleet_state.snapshot_verda_nodes(),
+        };
+        for entry in nodes.values() {
+            if let Some(id) = entry.verda_instance_id.clone() {
+                ids.insert(id, entry.verda_os_volume_id.clone());
             }
         }
         if let Ok(live) = self.inner.client.list_instances().await {
@@ -716,7 +841,7 @@ impl VerdaManager {
                 Ok(_) => {
                     tracing::info!(instance_id = %instance_id, "verda_destroyed");
                     deleted.push(instance_id.clone());
-                    self.forget_instance(&instance_id);
+                    self.forget_instance(&instance_id).await;
                     self.emit("destroy");
                 }
                 Err(err) => {
@@ -751,11 +876,7 @@ impl VerdaManager {
                     .collect()
             })
             .unwrap_or_default();
-        let fleet = self
-            .inner
-            .fleet_state
-            .list_verda_nodes()
-            .unwrap_or_default();
+        let fleet = self.inner.fleet_state.snapshot_verda_nodes();
         let out: Vec<Value> = instances
             .iter()
             .map(|instance| {
@@ -781,6 +902,9 @@ impl VerdaManager {
     }
 
     pub async fn reconcile(&self) {
+        if self.shutdown_cancelled() {
+            return;
+        }
         let live = match self.inner.client.list_instances().await {
             Ok(v) => v,
             Err(err) => {
@@ -793,31 +917,35 @@ impl VerdaManager {
             .iter()
             .filter_map(|i| i.instance_id_value().map(str::to_string))
             .collect();
-        if let Ok(fleet) = self.inner.fleet_state.list_verda_nodes() {
-            for (node_id, entry) in fleet {
-                let Some(iid) = entry.verda_instance_id.clone() else {
-                    continue;
-                };
-                if !live_ids.contains(&iid) {
-                    tracing::info!(node_id = %node_id, instance_id = %iid, "verda_reconcile_gone");
-                    if let Ok(nid) = NodeId::parse(&node_id) {
-                        self.inner.registry.remove_verda(&nid);
-                    }
-                    let _ = self.inner.fleet_state.remove(&node_id);
-                    continue;
+        let fleet = self.inner.fleet_state.snapshot_verda_nodes();
+        for (node_id, entry) in fleet {
+            let Some(iid) = entry.verda_instance_id.clone() else {
+                continue;
+            };
+            if !live_ids.contains(&iid) {
+                tracing::info!(node_id = %node_id, instance_id = %iid, "verda_reconcile_gone");
+                if let Ok(nid) = NodeId::parse(&node_id) {
+                    self.inner.registry.remove_verda(&nid);
                 }
-                if let Some(inst) = owned
-                    .iter()
-                    .find(|i| i.instance_id_value() == Some(iid.as_str()))
-                {
-                    let status = inst.status.as_deref().unwrap_or("").to_ascii_lowercase();
-                    if TERMINAL.contains(&status.as_str()) || EVICTED.contains(&status.as_str()) {
-                        self.forget_instance(&iid);
-                    }
+                if let Err(err) = self.inner.fleet_state.remove_async(&node_id).await {
+                    tracing::warn!(node_id = %node_id, error = %err, "verda reconcile remove failed");
+                }
+                continue;
+            }
+            if let Some(inst) = owned
+                .iter()
+                .find(|i| i.instance_id_value() == Some(iid.as_str()))
+            {
+                let status = inst.status.as_deref().unwrap_or("").to_ascii_lowercase();
+                if TERMINAL.contains(&status.as_str()) || EVICTED.contains(&status.as_str()) {
+                    self.forget_instance(&iid).await;
                 }
             }
         }
         for inst in &owned {
+            if self.shutdown_cancelled() {
+                return;
+            }
             let status = inst.status.as_deref().unwrap_or("").to_ascii_lowercase();
             if status != "running" {
                 continue;
@@ -830,7 +958,7 @@ impl VerdaManager {
                 let _ = self.adopt(inst).await;
             }
         }
-        if !self.inner.config.verda.auto_scale {
+        if self.shutdown_cancelled() || !self.inner.config.verda.auto_scale {
             return;
         }
         let min_n = self.inner.config.verda.auto_scale_min_instances;
@@ -845,6 +973,9 @@ impl VerdaManager {
             .collect();
         let mut count = in_flight.len() as u32;
         while min_n > 0 && count < min_n {
+            if self.shutdown_cancelled() {
+                return;
+            }
             match self.create_additional().await {
                 Ok(_) => count += 1,
                 Err(err) => {
@@ -853,8 +984,14 @@ impl VerdaManager {
                 }
             }
         }
+        if self.shutdown_cancelled() {
+            return;
+        }
         if self.inner.config.verda.idle_scale_down_enabled {
             self.idle_scale_down(&in_flight, min_n).await;
+        }
+        if self.shutdown_cancelled() {
+            return;
         }
         let remaining: Vec<_> = in_flight
             .iter()
@@ -875,7 +1012,7 @@ impl VerdaManager {
                         .await
                         .is_ok()
                     {
-                        self.forget_instance(id);
+                        self.forget_instance(id).await;
                     }
                 }
             }
@@ -939,7 +1076,7 @@ impl VerdaManager {
                         instance_id = %cand.instance_id,
                         "verda_idle_scale_down"
                     );
-                    self.forget_instance(cand.instance_id.as_str());
+                    self.forget_instance(cand.instance_id.as_str()).await;
                     self.emit("idle");
                 }
                 Err(err) => {
@@ -958,8 +1095,15 @@ impl VerdaManager {
         let interval =
             Duration::from_secs_f64(self.inner.config.verda.poll_interval_seconds.max(1.0));
         loop {
+            if self.shutdown_cancelled() {
+                tracing::info!("verda_reconcile_loop_stopped");
+                return;
+            }
             self.reconcile().await;
-            tokio::time::sleep(interval).await;
+            if self.cancelled_or_sleep(interval).await {
+                tracing::info!("verda_reconcile_loop_stopped");
+                return;
+            }
         }
     }
 }
@@ -967,6 +1111,10 @@ impl VerdaManager {
 impl DemandScale for VerdaManager {
     fn request_scale_up(&self, reason: RoutingError) {
         let reason_code = reason.as_reason_code();
+        if self.shutdown_cancelled() {
+            tracing::info!(reason = reason_code, "verda_demand_scale_up_skipped");
+            return;
+        }
         if !self.inner.config.verda.auto_scale {
             tracing::info!(reason = reason_code, "verda_demand_scale_up_skipped");
             return;
@@ -990,21 +1138,27 @@ impl DemandScale for VerdaManager {
                 return;
             }
         }
-        let mut slot = match self.inner.demand.lock() {
-            Ok(g) => g,
-            Err(_) => return,
-        };
+        let mut slot = self.lock_demand();
+        if self.shutdown_cancelled() {
+            return;
+        }
         if slot.as_ref().is_some_and(|h| !h.is_finished()) {
             tracing::info!(reason = reason_code, "verda_demand_scale_up_coalesced");
             return;
         }
         let inner = self.inner.clone();
+        let shutdown = self.inner.shutdown.clone();
         self.emit("demand");
         *slot = Some(tokio::spawn(async move {
             let mgr = VerdaManager { inner };
+            if shutdown.is_cancelled() {
+                return;
+            }
             tracing::info!(reason = reason_code, "verda_demand_scale_up");
             if let Err(err) = mgr.create_additional().await {
-                tracing::error!(reason = reason_code, error = %err, "verda_demand_ensure_failed");
+                if !shutdown.is_cancelled() {
+                    tracing::error!(reason = reason_code, error = %err, "verda_demand_ensure_failed");
+                }
             }
         }));
     }

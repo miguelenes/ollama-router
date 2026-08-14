@@ -163,7 +163,10 @@ impl TunnelFrontends {
         fleet_state: &FleetState,
         registry: &Registry,
     ) -> Result<(), String> {
-        let data = fleet_state.load().map_err(|err| err.to_string())?;
+        let data = fleet_state
+            .load_async()
+            .await
+            .map_err(|err| err.to_string())?;
         for (node_id, entry) in data {
             if entry.tunnel_backend.as_deref() != Some("zrok") {
                 continue;
@@ -200,15 +203,18 @@ impl TunnelFrontends {
             };
             let url = self.http_url(ollama_port);
             let capacity_url = self.http_url(agent_port);
-            if let Err(err) = fleet_state.persist_enroll(
-                &node_id,
-                ollama_router_core::fleet::EnrollPersist {
-                    url: &url,
-                    capacity_url: &capacity_url,
-                    ollama_share_id: ollama,
-                    agent_share_id: agent,
-                },
-            ) {
+            if let Err(err) = fleet_state
+                .persist_enroll_async(
+                    &node_id,
+                    ollama_router_core::fleet::EnrollPersist {
+                        url: &url,
+                        capacity_url: &capacity_url,
+                        ollama_share_id: ollama,
+                        agent_share_id: agent,
+                    },
+                )
+                .await
+            {
                 tracing::warn!(node_id = %node_id, error = %err, "enroll restore persist failed");
                 continue;
             }

@@ -49,3 +49,11 @@ time = { version = "0.3", default-features = false, features = ["formatting", "s
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Match CI `cargo clippy ... -- -D warnings` so rust-analyzer uses the same set.
+# Do not enable clippy::pedantic here.
+[workspace.lints.clippy]
+all = "deny"
+redundant_clone = "deny"
+large_enum_variant = "deny"
+needless_collect = "deny"

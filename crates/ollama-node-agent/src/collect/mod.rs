@@ -23,6 +23,14 @@ use tokio::time::timeout;
 
 use crate::config::{AgentConfig, GpuPolicy};
 
+/// Live collect failed in a way that must not invent inventory.
+#[derive(Clone, Debug, thiserror::Error)]
+pub enum CollectError {
+    /// `spawn_blocking` panicked or was cancelled.
+    #[error("collect blocking join: {0}")]
+    Join(String),
+}
+
 pub use nvidia::{parse_nvidia_csv, parse_nvidia_fallback_csv, GpuInventory};
 pub use pressure::classify_pressure;
 pub use psi::parse_psi_some_avg10;
@@ -538,11 +546,14 @@ pub fn gpu_from_probes(
 }
 
 /// Full live collect (sysinfo on a blocking thread).
+///
+/// Join/cancel of the blocking task is an error — callers must keep a cached
+/// snapshot or fail the request, never a synthetic empty GPU inventory.
 pub async fn collect_live(
     cfg: &AgentConfig,
     ollama_listen: &str,
     cpu_usage_pct: Option<f64>,
-) -> Snapshot {
+) -> Result<Snapshot, CollectError> {
     let policy = cfg.gpu.policy;
     let skip_gpu = matches!(policy, GpuPolicy::Cpu | GpuPolicy::Metal);
     let (nvidia_rich, nvidia_basic, rocm, version, metal_json, win_names) = tokio::join!(
@@ -641,16 +652,7 @@ pub async fn collect_live(
     };
     tokio::task::spawn_blocking(move || collect_from_parts(&cfg, parts))
         .await
-        .unwrap_or_else(|_| {
-            collect_from_parts(
-                &AgentConfig::default(),
-                CollectParts {
-                    backend: GpuBackend::Unknown,
-                    ollama_listen: "127.0.0.1:11434".into(),
-                    ..CollectParts::default()
-                },
-            )
-        })
+        .map_err(|err| CollectError::Join(err.to_string()))
 }
 
 /// nvidia-smi CSV rows for tests.

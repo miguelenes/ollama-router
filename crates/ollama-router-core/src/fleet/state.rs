@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use fs4::FileExt;
@@ -31,6 +32,9 @@ pub enum FleetStateError {
     /// Exclusive lock could not be taken.
     #[error("fleet state lock failed: {0}")]
     Lock(io::Error),
+    /// `spawn_blocking` task panicked or was cancelled.
+    #[error("fleet state blocking join: {0}")]
+    Join(String),
     /// Filesystem error while writing.
     #[error(transparent)]
     Io(#[from] io::Error),
@@ -118,17 +122,177 @@ pub struct FleetStateEntry {
 }
 
 /// Key-value store per host id with flock-locked atomic writes.
+///
+/// HTTP `/metrics` reads [`Self::snapshot`] (no flock, no JSON). Persist/load
+/// used from async tasks go through [`Self::run_blocking`].
 #[derive(Debug, Clone)]
 pub struct FleetState {
     path: PathBuf,
+    snapshot: Arc<RwLock<BTreeMap<String, FleetStateEntry>>>,
 }
 
 impl FleetState {
-    /// Create a store pointing at `path`.
+    /// Create a store pointing at `path`. Seeds the in-memory snapshot from disk.
     pub fn new(path: impl AsRef<Path>) -> Self {
+        let path = path.as_ref().to_path_buf();
+        let snapshot = read_available(&path).unwrap_or_default();
         Self {
-            path: path.as_ref().to_path_buf(),
+            path,
+            snapshot: Arc::new(RwLock::new(snapshot)),
         }
+    }
+
+    fn publish_snapshot(&self, data: BTreeMap<String, FleetStateEntry>) {
+        *self
+            .snapshot
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = data;
+    }
+
+    /// Last successful persist/load. No flock and no disk I/O.
+    pub fn snapshot(&self) -> BTreeMap<String, FleetStateEntry> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Snapshot lookup (enroll / metrics). No flock.
+    pub fn snapshot_entry(&self, node_id: impl AsRef<str>) -> Option<FleetStateEntry> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(node_id.as_ref())
+            .cloned()
+    }
+
+    /// Verda-owned rows from the snapshot. No flock.
+    pub fn snapshot_verda_nodes(&self) -> BTreeMap<String, FleetStateEntry> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, e)| e.managed_by.as_deref() == Some("verda"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Overlay URL from the snapshot. No flock.
+    pub fn snapshot_hydrate_url(&self, node_id: &NodeId) -> Option<String> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(node_id.as_str())
+            .and_then(hydrate_entry_url)
+    }
+
+    /// Capacity URL from the snapshot. No flock.
+    pub fn snapshot_hydrate_capacity_url(&self, node_id: &NodeId) -> Option<String> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(node_id.as_str())
+            .and_then(|entry| {
+                entry
+                    .capacity_url
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .filter(|url| url_is_safe_overlay(url))
+                    .map(|s| s.trim_end_matches('/').to_string())
+            })
+    }
+
+    /// Run blocking flock/JSON I/O on Tokio's blocking pool.
+    pub async fn run_blocking<T, F>(&self, f: F) -> Result<T, FleetStateError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self) -> Result<T, FleetStateError> + Send + 'static,
+    {
+        let this = self.clone();
+        match tokio::task::spawn_blocking(move || f(this)).await {
+            Ok(result) => result,
+            Err(err) => Err(FleetStateError::Join(err.to_string())),
+        }
+    }
+
+    /// [`Self::load`] on the blocking pool.
+    pub async fn load_async(&self) -> Result<BTreeMap<String, FleetStateEntry>, FleetStateError> {
+        self.run_blocking(|fs| fs.load()).await
+    }
+
+    /// [`Self::persist_url`] on the blocking pool.
+    pub async fn persist_url_async(
+        &self,
+        node_id: impl AsRef<str>,
+        url: &str,
+    ) -> Result<(), FleetStateError> {
+        let node_id = node_id.as_ref().to_string();
+        let url = url.to_string();
+        self.run_blocking(move |fs| fs.persist_url(&node_id, &url))
+            .await
+    }
+
+    /// [`Self::persist_enroll`] on the blocking pool.
+    pub async fn persist_enroll_async(
+        &self,
+        node_id: impl AsRef<str>,
+        persist: EnrollPersist<'_>,
+    ) -> Result<(), FleetStateError> {
+        let node_id = node_id.as_ref().to_string();
+        let url = persist.url.to_string();
+        let capacity_url = persist.capacity_url.to_string();
+        let ollama_share_id = persist.ollama_share_id.to_string();
+        let agent_share_id = persist.agent_share_id.to_string();
+        self.run_blocking(move |fs| {
+            fs.persist_enroll(
+                &node_id,
+                EnrollPersist {
+                    url: &url,
+                    capacity_url: &capacity_url,
+                    ollama_share_id: &ollama_share_id,
+                    agent_share_id: &agent_share_id,
+                },
+            )
+        })
+        .await
+    }
+
+    /// [`Self::persist_verda_node`] on the blocking pool.
+    pub async fn persist_verda_node_async(
+        &self,
+        node_id: impl AsRef<str>,
+        persist: VerdaNodePersist<'_>,
+    ) -> Result<(), FleetStateError> {
+        let node_id = node_id.as_ref().to_string();
+        let url = persist.url.to_string();
+        let instance_id = persist.instance_id.clone();
+        let location = persist.location.to_string();
+        let instance_type = persist.instance_type.to_string();
+        let os_volume_id = persist.os_volume_id.map(str::to_string);
+        let spot_price_per_hour = persist.spot_price_per_hour;
+        let hostname = persist.hostname.map(str::to_string);
+        self.run_blocking(move |fs| {
+            fs.persist_verda_node(
+                &node_id,
+                VerdaNodePersist {
+                    url: &url,
+                    instance_id: &instance_id,
+                    location: &location,
+                    instance_type: &instance_type,
+                    os_volume_id: os_volume_id.as_deref(),
+                    spot_price_per_hour,
+                    hostname: hostname.as_deref(),
+                },
+            )
+        })
+        .await
+    }
+
+    /// [`Self::remove`] on the blocking pool.
+    pub async fn remove_async(&self, node_id: impl AsRef<str>) -> Result<(), FleetStateError> {
+        let node_id = node_id.as_ref().to_string();
+        self.run_blocking(move |fs| fs.remove(&node_id)).await
     }
 
     /// Create parent dirs and an empty `{}` mapping if neither primary nor backup exists.
@@ -145,6 +309,7 @@ impl FleetState {
             return Ok(());
         }
         atomic_write(&self.path, &BTreeMap::new())?;
+        self.publish_snapshot(BTreeMap::new());
         Ok(())
     }
 
@@ -158,21 +323,9 @@ impl FleetState {
 
     /// Read primary state, recover from backup, or fail closed.
     pub fn load(&self) -> Result<BTreeMap<String, FleetStateEntry>, FleetStateError> {
-        let primary_exists = self.path.exists();
-        let backup_exists = self.backup_path().exists();
-        if !primary_exists && !backup_exists {
-            return Ok(BTreeMap::new());
-        }
-        match read_state_file(&self.path) {
-            Ok(data) => Ok(data),
-            Err(_) => match read_state_file(&self.backup_path()) {
-                Ok(data) => Ok(data),
-                Err(_) => Err(FleetStateError::Unreadable {
-                    path: self.path.clone(),
-                    backup: self.backup_path(),
-                }),
-            },
-        }
+        let data = read_available(&self.path)?;
+        self.publish_snapshot(data.clone());
+        Ok(data)
     }
 
     /// Return a routing URL for `node_id`: loopback enroll, RFC1918, or hostname.
@@ -209,6 +362,7 @@ impl FleetState {
         entry.updated_at = Some(now_secs());
         data.insert(node_id.as_ref().to_string(), entry);
         atomic_write(&self.path, &data)?;
+        self.publish_snapshot(data);
         Ok(())
     }
 
@@ -240,6 +394,7 @@ impl FleetState {
         entry.updated_at = Some(now_secs());
         data.insert(node_id.as_ref().to_string(), entry);
         atomic_write(&self.path, &data)?;
+        self.publish_snapshot(data);
         Ok(())
     }
 
@@ -249,6 +404,7 @@ impl FleetState {
         let mut data = self.load()?;
         if data.remove(node_id.as_ref()).is_some() {
             atomic_write(&self.path, &data)?;
+            self.publish_snapshot(data);
         }
         Ok(())
     }
@@ -295,6 +451,7 @@ impl FleetState {
         );
         data.insert(node_id.as_ref().to_string(), entry);
         atomic_write(&self.path, &data)?;
+        self.publish_snapshot(data);
         Ok(())
     }
 
@@ -307,7 +464,8 @@ impl FleetState {
             .collect())
     }
 
-    fn lock_exclusive(&self) -> Result<File, FleetStateError> {
+    /// Blocking same-host exclusive flock. HTTP `/metrics` must use [`Self::snapshot`].
+    pub fn lock_exclusive(&self) -> Result<File, FleetStateError> {
         if let Some(parent) = self.lock_path().parent() {
             fs::create_dir_all(parent)?;
         }
@@ -319,6 +477,25 @@ impl FleetState {
             .open(self.lock_path())?;
         FileExt::lock(&file).map_err(FleetStateError::Lock)?;
         Ok(file)
+    }
+}
+
+fn read_available(path: &Path) -> Result<BTreeMap<String, FleetStateEntry>, FleetStateError> {
+    let backup = append_suffix(path, ".bak");
+    let primary_exists = path.exists();
+    let backup_exists = backup.exists();
+    if !primary_exists && !backup_exists {
+        return Ok(BTreeMap::new());
+    }
+    match read_state_file(path) {
+        Ok(data) => Ok(data),
+        Err(_) => match read_state_file(&backup) {
+            Ok(data) => Ok(data),
+            Err(_) => Err(FleetStateError::Unreadable {
+                path: path.to_path_buf(),
+                backup,
+            }),
+        },
     }
 }
 
@@ -720,6 +897,47 @@ mod tests {
         assert_eq!(
             state.hydrate_url(&id).unwrap().as_deref(),
             Some("http://127.0.0.1:41990")
+        );
+    }
+
+    #[test]
+    fn snapshot_readable_while_exclusive_lock_held() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = FleetState::new(dir.path().join("fleet-state.json"));
+        state.persist_url("n", "http://127.0.0.1:11434").unwrap();
+        let _lock = state.lock_exclusive().unwrap();
+        let snap = state.snapshot();
+        assert_eq!(snap["n"].url.as_deref(), Some("http://127.0.0.1:11434"));
+    }
+
+    #[test]
+    fn failed_load_does_not_clear_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-state.json");
+        let state = FleetState::new(&path);
+        state.persist_url("n", "http://10.0.0.5:11434").unwrap();
+        fs::write(&path, "[1, 2, 3]").unwrap();
+        fs::write(append_suffix(&path, ".bak"), "{ invalid json {{{").unwrap();
+        assert!(matches!(
+            state.load().unwrap_err(),
+            FleetStateError::Unreadable { .. }
+        ));
+        assert_eq!(
+            state.snapshot()["n"].url.as_deref(),
+            Some("http://10.0.0.5:11434")
+        );
+    }
+
+    #[test]
+    fn new_seeds_snapshot_from_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-state.json");
+        let writer = FleetState::new(&path);
+        writer.persist_url("n", "http://10.0.0.5:11434").unwrap();
+        let reader = FleetState::new(&path);
+        assert_eq!(
+            reader.snapshot()["n"].url.as_deref(),
+            Some("http://10.0.0.5:11434")
         );
     }
 }

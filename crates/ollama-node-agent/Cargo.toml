@@ -9,6 +9,15 @@ description = "Node-local Ollama installer, supervisor, and capacity agent (:114
 [lints.rust]
 unsafe_code = "deny"
 
+# Cannot set `lints.workspace = true`: workspace `unsafe_code = "forbid"` cannot
+# be allowed for `windows_scm.rs` (`define_windows_service!` FFI thunk). Keep
+# clippy levels in lockstep with `[workspace.lints.clippy]`.
+[lints.clippy]
+all = "deny"
+redundant_clone = "deny"
+large_enum_variant = "deny"
+needless_collect = "deny"
+
 [dependencies]
 anyhow.workspace = true
 axum.workspace = true
@@ -23,6 +32,7 @@ sysinfo.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio = { workspace = true, features = ["process", "fs", "signal"] }
+tokio-util.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

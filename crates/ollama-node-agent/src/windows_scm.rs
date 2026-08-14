@@ -1,9 +1,12 @@
 //! Windows SCM entry for `serve --windows-service`.
 //!
 //! `define_windows_service!` expands to an `extern "system"` FFI thunk
-//! (`fn(u32, *mut *mut u16)`). That is the only unsafe in this crate; do not
-//! inherit workspace `unsafe_code = "forbid"` (`lints.workspace = true`).
-#![allow(unsafe_code)]
+//! (`fn(u32, *mut *mut u16)`). That is the only unsafe in this crate. Workspace
+//! `unsafe_code` is forbid; this crate overrides to deny so the thunk can exist.
+#![expect(
+    unsafe_code,
+    reason = "define_windows_service! expands to an extern system FFI thunk"
+)]
 
 use std::ffi::OsString;
 use std::path::PathBuf;

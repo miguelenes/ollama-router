@@ -14,6 +14,7 @@ use crate::jobs::{
     Job, JobId, JobKind, JobStatus, JobStore, JobTarget, PullOrchestrator, TargetStatus,
 };
 use crate::routing::{TargetSpec, TARGET_ALL};
+use tokio_util::sync::CancellationToken;
 
 fn nid(id: &str) -> NodeId {
     NodeId::parse(id).expect("node id")
@@ -90,6 +91,41 @@ fn store_strips_detail_and_secret_text() {
         !json.contains("sensitive content"),
         "detail leaked into sqlite: {json}"
     );
+}
+
+#[tokio::test]
+async fn save_async_failure_omits_target_detail() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ops.sqlite3");
+    let store = JobStore::open(&path).expect("open");
+    store.drop_table_for_tests().expect("drop");
+    let secret = "upstream response with sensitive content";
+    let id = JobId::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").expect("id");
+    let mut targets = BTreeMap::new();
+    targets.insert(
+        "node-a:safe-model:latest".into(),
+        JobTarget {
+            node: "node-a".into(),
+            model: "safe-model:latest".into(),
+            status: TargetStatus::Failed,
+            detail: Some(secret.into()),
+        },
+    );
+    let err = store
+        .save_async(&Job {
+            id,
+            kind: JobKind::Pull,
+            status: JobStatus::Failed,
+            created_at: 1.0,
+            finished_at: Some(2.0),
+            models: vec!["safe-model:latest".into()],
+            nodes: vec!["node-a".into()],
+            targets,
+        })
+        .await
+        .expect_err("save should fail");
+    let msg = err.to_string();
+    assert!(!msg.contains(secret), "persist error leaked detail: {msg}");
 }
 
 #[tokio::test]
@@ -187,6 +223,7 @@ async fn restart_dedupes_interrupted_ensure() {
             false,
             false,
         )
+        .await
         .expect("start");
     tokio::time::sleep(Duration::from_millis(50)).await;
     drop(first);
@@ -201,6 +238,7 @@ async fn restart_dedupes_interrupted_ensure() {
             false,
             false,
         )
+        .await
         .expect("dedupe");
     assert_eq!(deduped.id, job.id);
     let finished = second.wait_job(&deduped.id).await;
@@ -250,6 +288,7 @@ async fn hash_all_large_skips_cpu_capacity() {
             false,
             false,
         )
+        .await
         .expect("start");
     let done = orch.wait_job(&job.id).await;
     assert_eq!(done.status, JobStatus::Success);
@@ -293,6 +332,7 @@ async fn star_selects_cpu_for_embed() {
             false,
             false,
         )
+        .await
         .expect("start");
     let done = orch.wait_job(&job.id).await;
     assert_eq!(done.status, JobStatus::Success);
@@ -335,6 +375,7 @@ async fn max_pulls_per_node_serializes_two_models() {
             false,
             false,
         )
+        .await
         .expect("start");
     let done = orch.wait_job(&job.id).await;
     assert_eq!(done.status, JobStatus::Success);
@@ -343,4 +384,222 @@ async fn max_pulls_per_node_serializes_two_models() {
         "pulls overlapped: {:?}",
         started.elapsed()
     );
+}
+
+#[tokio::test]
+async fn already_present_does_not_leak_join_handle() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&["moondream"]));
+    });
+    let pull = server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200).body("{\"status\":\"success\"}\n");
+    });
+
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let job = orch
+        .start_ensure(
+            &["moondream".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let done = orch.wait_job(&job.id).await;
+    assert_eq!(done.status, JobStatus::Success);
+    assert_eq!(
+        done.targets["gpu:moondream"].status,
+        TargetStatus::AlreadyPresent
+    );
+    assert_eq!(pull.calls(), 0);
+    assert_eq!(orch.job_task_count(), 0);
+}
+
+#[tokio::test]
+async fn drop_aborts_running_jobs() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_secs(5))
+            .body("{\"status\":\"success\"}\n");
+    });
+
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    orch.start_ensure(
+        &["moondream".into()],
+        TargetSpec::Nodes(vec![nid("gpu")]),
+        false,
+        false,
+    )
+    .await
+    .expect("start");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    drop(orch);
+}
+
+#[tokio::test]
+async fn cancel_token_marks_undispatched_failed_without_panic() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    let pull = server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_millis(400))
+            .body("{\"status\":\"success\"}\n");
+    });
+
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch =
+        PullOrchestrator::with_shutdown(Arc::new(config), client(), Some(registry), shutdown)
+            .expect("orch");
+    let job = orch
+        .start_ensure(
+            &["moondream".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let done = orch.wait_job(&job.id).await;
+    assert!(!done.status.is_incomplete());
+    assert_eq!(done.targets["gpu:moondream"].status, TargetStatus::Failed);
+    assert_eq!(pull.calls(), 0);
+    assert_eq!(orch.job_task_count(), 0);
+}
+
+#[tokio::test]
+async fn cancel_token_lets_inflight_pull_finish_or_fail_without_panic() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_millis(200))
+            .body("{\"status\":\"success\"}\n");
+    });
+
+    let shutdown = CancellationToken::new();
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        max_pulls_per_node: 1,
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::with_shutdown(
+        Arc::new(config),
+        client(),
+        Some(registry),
+        shutdown.clone(),
+    )
+    .expect("orch");
+    let job = orch
+        .start_ensure(
+            &["moondream".into(), "llama3.2:3b".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.cancel();
+    let done = orch.wait_job(&job.id).await;
+    assert!(!done.status.is_incomplete());
+    for target in done.targets.values() {
+        assert!(
+            !target.status.is_incomplete(),
+            "{} still incomplete",
+            target.status
+        );
+    }
+    assert_eq!(orch.job_task_count(), 0);
+}
+
+#[tokio::test]
+async fn running_job_dedupes_to_existing_id() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_millis(200))
+            .body("{\"status\":\"success\"}\n");
+    });
+
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let first = orch
+        .start_ensure(
+            &["moondream".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let second = orch
+        .start_ensure(
+            &["moondream".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("dedupe");
+    assert_eq!(second.id, first.id);
+    let done = orch.wait_job(&first.id).await;
+    assert_eq!(done.status, JobStatus::Success);
 }

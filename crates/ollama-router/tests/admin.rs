@@ -14,6 +14,7 @@ use ollama_router_core::fleet::{
     routing_url_blocked_reason, FleetState, NodeId, VerdaInstanceId, VerdaNodePersist,
 };
 use serde_json::{json, Value};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 fn nid(id: &str) -> NodeId {
@@ -495,7 +496,7 @@ async fn enroll_loopback_frontend_becomes_healthy() {
     let parsed: Value = serde_json::from_slice(&body).unwrap();
     let url = parsed["url"].as_str().expect("url");
     assert!(url.starts_with("http://127.0.0.1:"), "{url}");
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = tokio::spawn(run_health(state.clone(), CancellationToken::new()));
     let start = tokio::time::Instant::now();
     loop {
         if state.registry.get(&nid("desk")).is_some_and(|n| n.healthy) {

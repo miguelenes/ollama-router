@@ -150,6 +150,7 @@ pub async fn ensure_models(
     let job = match state
         .orchestrator
         .start_ensure(&body.models, spec, false, false)
+        .await
     {
         Ok(job) => job,
         Err(err) => return map_orch_err(err),
@@ -170,7 +171,11 @@ pub async fn delete_models(
         Ok(spec) => spec,
         Err(err) => return map_orch_err(err),
     };
-    let job = match state.orchestrator.start_delete(&body.models, spec, false) {
+    let job = match state
+        .orchestrator
+        .start_delete(&body.models, spec, false)
+        .await
+    {
         Ok(job) => job,
         Err(err) => return map_orch_err(err),
     };
@@ -271,7 +276,7 @@ pub async fn put_node(
         if let Err(err) = state.registry.set_node_url(&id, url) {
             return json_status(StatusCode::BAD_REQUEST, json!({"error": err}));
         }
-        if let Err(err) = state.fleet_state.persist_url(id.as_str(), url) {
+        if let Err(err) = state.fleet_state.persist_url_async(id.as_str(), url).await {
             tracing::warn!(node_id = %id, error = %err, "put_node persist_url failed");
         }
     }
@@ -333,15 +338,11 @@ fn resolve_owned_verda_id(
     requested: &NodeId,
     hostname: Option<&str>,
 ) -> Result<NodeId, (&'static str, &'static str)> {
-    match fleet_state.get_entry(requested.as_str()) {
-        Ok(Some(_)) => return Ok(requested.clone()),
-        Ok(None) => {}
-        Err(_) => return Err(("fleet_state_unreadable", "fleet state unreadable")),
+    if fleet_state.snapshot_entry(requested.as_str()).is_some() {
+        return Ok(requested.clone());
     }
     let host = hostname.map(str::trim).filter(|s| !s.is_empty());
-    let nodes = fleet_state
-        .list_verda_nodes()
-        .map_err(|_| ("fleet_state_unreadable", "fleet state unreadable"))?;
+    let nodes = fleet_state.snapshot_verda_nodes();
     let mut found: Option<String> = None;
     for (id, entry) in nodes {
         let stored = entry
@@ -426,18 +427,7 @@ pub async fn enroll_node(
                     );
                 }
             };
-            let entry = match state.fleet_state.get_entry(id.as_str()) {
-                Ok(entry) => entry,
-                Err(err) => {
-                    tracing::warn!(node_id = %id, error = %err, "enroll fleet-state read failed");
-                    return enroll_reason(
-                        StatusCode::BAD_GATEWAY,
-                        "fleet_state_unreadable",
-                        "fleet state unreadable",
-                    );
-                }
-            };
-            let Some(entry) = entry else {
+            let Some(entry) = state.fleet_state.snapshot_entry(id.as_str()) else {
                 return enroll_reason(
                     StatusCode::NOT_FOUND,
                     "unknown_verda_node",
@@ -532,15 +522,19 @@ pub async fn enroll_node(
     if let Err(err) = state.registry.set_capacity_url(&id, &capacity_url) {
         return json_status(StatusCode::BAD_REQUEST, json!({"error": err}));
     }
-    if let Err(err) = state.fleet_state.persist_enroll(
-        id.as_str(),
-        EnrollPersist {
-            url: &url,
-            capacity_url: &capacity_url,
-            ollama_share_id: body.ollama_share_id.trim(),
-            agent_share_id: body.agent_share_id.trim(),
-        },
-    ) {
+    if let Err(err) = state
+        .fleet_state
+        .persist_enroll_async(
+            id.as_str(),
+            EnrollPersist {
+                url: &url,
+                capacity_url: &capacity_url,
+                ollama_share_id: body.ollama_share_id.trim(),
+                agent_share_id: body.agent_share_id.trim(),
+            },
+        )
+        .await
+    {
         tracing::warn!(node_id = %id, error = %err, "enroll persist failed");
         return enroll_reason(
             StatusCode::BAD_GATEWAY,
@@ -656,7 +650,7 @@ pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Respon
     if let Some(resp) = require_admin(&state, &headers) {
         return resp;
     }
-    match crate::health::reload_permanent_inventory(&state) {
+    match crate::health::reload_permanent_inventory(&state).await {
         Ok(()) => json_status(StatusCode::OK, json!({"ok": true})),
         Err(err) => json_status(StatusCode::BAD_GATEWAY, json!({"error": err.to_string()})),
     }

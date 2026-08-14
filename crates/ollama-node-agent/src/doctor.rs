@@ -107,7 +107,13 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
     let version = ollama_version().await;
     let running = ollama_tags_ok(&format!("http://{ollama_listen}")).await;
     let ollama_loopback_ok = ollama_tags_ok("http://127.0.0.1:11434").await;
-    let snap = crate::collect::collect_live(config, &ollama_listen, None).await;
+    let gpu_backend = match crate::collect::collect_live(config, &ollama_listen, None).await {
+        Ok(snap) => snap.status.gpu_backend.as_str().into(),
+        Err(err) => {
+            notes.push(format!("collect failed: {err}"));
+            "unknown".into()
+        }
+    };
     if cfg!(windows) {
         notes.push(
             "Windows: do not also run the tray app on :11434; NVIDIA services usually need LocalSystem"
@@ -166,7 +172,7 @@ pub async fn run(config: &AgentConfig) -> anyhow::Result<DoctorReport> {
     Ok(DoctorReport {
         os: std::env::consts::OS.into(),
         arch: std::env::consts::ARCH.into(),
-        gpu_backend: snap.status.gpu_backend.as_str().into(),
+        gpu_backend,
         ollama_installed: version.is_some(),
         ollama_running: running,
         ollama_version: version,

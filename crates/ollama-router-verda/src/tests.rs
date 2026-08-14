@@ -19,6 +19,7 @@ use ollama_router_core::routing::RoutingError;
 use crate::client::VerdaClient;
 use crate::manager::{VerdaManager, MANAGED_BY};
 use crate::types::{Instance, StartupScript};
+use tokio_util::sync::CancellationToken;
 
 fn client(server: &MockServer) -> VerdaClient {
     let config = VerdaConfig {
@@ -131,6 +132,14 @@ fn manager_with(
     server: &MockServer,
     tweak: impl FnOnce(&mut RouterConfig),
 ) -> (VerdaManager, Arc<Registry>, Arc<FleetState>) {
+    manager_with_shutdown(server, CancellationToken::new(), tweak)
+}
+
+fn manager_with_shutdown(
+    server: &MockServer,
+    shutdown: CancellationToken,
+    tweak: impl FnOnce(&mut RouterConfig),
+) -> (VerdaManager, Arc<Registry>, Arc<FleetState>) {
     let dir = tempfile::tempdir().expect("tmp");
     let fs = Arc::new(FleetState::new(dir.path().join("state.json")));
     std::mem::forget(dir);
@@ -144,7 +153,7 @@ fn manager_with(
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
     let client = client(server);
-    let mgr = VerdaManager::new(config, client, registry.clone(), fs.clone());
+    let mgr = VerdaManager::with_shutdown(config, client, registry.clone(), fs.clone(), shutdown);
     (mgr, registry, fs)
 }
 
@@ -831,6 +840,56 @@ async fn demand_scale_up_skips_when_auto_scale_false() {
     let (mgr, _, _) = manager(&server, false);
     mgr.request_scale_up(RoutingError::NoHealthy);
     tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(post.calls(), 0);
+}
+
+#[tokio::test]
+async fn cancel_stops_reconcile_from_creating() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .delay(Duration::from_millis(200))
+            .json_body(json!([]));
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({"id": "should-not"}));
+    });
+    let shutdown = CancellationToken::new();
+    let (mgr, _, _) = manager_with_shutdown(&server, shutdown.clone(), |c| {
+        c.verda.auto_scale = true;
+        c.verda.auto_scale_min_instances = 1;
+        c.verda.poll_interval_seconds = 0.05;
+    });
+    let handle = tokio::spawn(mgr.run_reconcile_loop());
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    shutdown.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("reconcile loop should stop after cancel")
+        .expect("join");
+    assert_eq!(post.calls(), 0);
+}
+
+#[tokio::test]
+async fn request_scale_up_after_cancel_does_not_spawn() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({"id": "should-not"}));
+    });
+    let shutdown = CancellationToken::new();
+    let (mgr, _, _) = manager_with_shutdown(&server, shutdown.clone(), |c| {
+        c.verda.auto_scale = true;
+    });
+    shutdown.cancel();
+    mgr.request_scale_up(RoutingError::NoHealthy);
+    tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(post.calls(), 0);
 }
 

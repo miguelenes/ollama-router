@@ -1,3 +1,5 @@
+use std::time::{Duration, Instant};
+
 use ollama_router::http::metrics::Metrics;
 use ollama_router_core::capacity::{CapacityReport, GpuBackend, GpuDetail, Pressure};
 use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig};
@@ -136,6 +138,66 @@ fn refresh_gauges_tunnel_up_when_zrok_enroll() {
     });
     let metrics = Metrics::new().expect("metrics");
     metrics.refresh_gauges(&registry, &fleet_state);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_tunnel_up{node=\"gpu\"} 1"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("share-ollama"),
+        "share ids must not be metric labels: {body}"
+    );
+}
+
+#[test]
+fn refresh_gauges_uses_snapshot_when_lock_held_and_disk_unreadable() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let path = dir.path().join("state.json");
+    let fleet_state = FleetState::new(&path);
+    fleet_state
+        .persist_enroll(
+            "gpu",
+            EnrollPersist {
+                url: "http://127.0.0.1:41990",
+                capacity_url: "http://127.0.0.1:41991",
+                ollama_share_id: "share-ollama",
+                agent_share_id: "share-agent",
+            },
+        )
+        .expect("enroll");
+    std::fs::write(&path, "not-json").expect("corrupt primary");
+    let mut backup = path.as_os_str().to_os_string();
+    backup.push(".bak");
+    std::fs::write(&backup, "not-json").expect("corrupt backup");
+    assert!(
+        fleet_state.load().is_err(),
+        "load must fail so scrape cannot cheat via disk"
+    );
+    let _lock = fleet_state.lock_exclusive().expect("lock");
+    let registry = Registry::new(&RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("gpu"),
+            url: Some("http://127.0.0.1:41990".into()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: Some(8.0),
+                ram_gb: Some(32.0),
+                gpus: Some(1),
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        ..Default::default()
+    });
+    let metrics = Metrics::new().expect("metrics");
+    let start = Instant::now();
+    metrics.refresh_gauges(&registry, &fleet_state);
+    assert!(
+        start.elapsed() < Duration::from_millis(200),
+        "scrape blocked on flock: {:?}",
+        start.elapsed()
+    );
     let body = metrics.encode_text().expect("encode");
     assert!(
         body.contains("ollama_router_tunnel_up{node=\"gpu\"} 1"),

@@ -10,28 +10,82 @@ use ollama_router_core::fleet::{routing_url_blocked_reason, NodeId, NodeSnapshot
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::http::AppState;
 
 const SUPERVISOR_TICK: Duration = Duration::from_millis(200);
 
-/// Loop until the process exits. Does not count as client inflight / idle.
-pub async fn run(state: AppState) {
+#[derive(Default)]
+struct ProbeTasks {
+    tasks: HashMap<NodeId, JoinHandle<()>>,
+}
+
+impl ProbeTasks {
+    fn abort_stale(&mut self, live: &HashSet<NodeId>) {
+        let stale: Vec<NodeId> = self
+            .tasks
+            .keys()
+            .filter(|id| !live.contains(id))
+            .cloned()
+            .collect();
+        for id in stale {
+            if let Some(handle) = self.tasks.remove(&id) {
+                handle.abort();
+            }
+        }
+    }
+
+    fn abort_all(&mut self) {
+        for (_, handle) in self.tasks.drain() {
+            handle.abort();
+        }
+    }
+
+    fn contains(&self, id: &NodeId) -> bool {
+        self.tasks.contains_key(id)
+    }
+
+    fn insert(&mut self, id: NodeId, handle: JoinHandle<()>) {
+        self.tasks.insert(id, handle);
+    }
+}
+
+impl Drop for ProbeTasks {
+    fn drop(&mut self) {
+        self.abort_all();
+    }
+}
+
+/// Loop until `shutdown` is cancelled. Does not count as client inflight / idle.
+pub async fn run(state: AppState, shutdown: CancellationToken) {
     let n = state.registry.health().max_concurrent_probes.max(1) as usize;
     let sem = Arc::new(Semaphore::new(n));
-    let mut tasks: HashMap<NodeId, JoinHandle<()>> = HashMap::new();
+    let mut tasks = ProbeTasks::default();
     let mut rng = seed();
     loop {
-        reconcile_tasks(&state, &sem, &mut tasks, &mut rng);
-        tokio::time::sleep(SUPERVISOR_TICK).await;
+        if shutdown.is_cancelled() {
+            tasks.abort_all();
+            return;
+        }
+        reconcile_tasks(&state, &sem, &mut tasks, &mut rng, &shutdown);
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => {
+                tasks.abort_all();
+                return;
+            }
+            () = tokio::time::sleep(SUPERVISOR_TICK) => {}
+        }
     }
 }
 
 fn reconcile_tasks(
     state: &AppState,
     sem: &Arc<Semaphore>,
-    tasks: &mut HashMap<NodeId, JoinHandle<()>>,
+    tasks: &mut ProbeTasks,
     rng: &mut u64,
+    shutdown: &CancellationToken,
 ) {
     let snap = state.registry.snapshot();
     let live: HashSet<NodeId> = snap
@@ -40,48 +94,61 @@ fn reconcile_tasks(
         .map(|n| n.id.clone())
         .collect();
 
-    let stale: Vec<NodeId> = tasks
-        .keys()
-        .filter(|id| !live.contains(id))
-        .cloned()
-        .collect();
-    for id in stale {
-        if let Some(handle) = tasks.remove(&id) {
-            handle.abort();
-        }
-    }
+    tasks.abort_stale(&live);
 
     for node in snap.into_iter().filter(|n| !n.draining) {
-        if tasks.contains_key(&node.id) {
+        if tasks.contains(&node.id) {
             continue;
         }
         let state = state.clone();
         let sem = sem.clone();
         let id = node.id.clone();
         let jitter_seed = next_u64(rng);
+        let shutdown = shutdown.clone();
         let handle = tokio::spawn(async move {
-            probe_loop(state, sem, id, jitter_seed).await;
+            probe_loop(state, sem, id, jitter_seed, shutdown).await;
         });
         tasks.insert(node.id, handle);
     }
 }
 
-async fn probe_loop(state: AppState, sem: Arc<Semaphore>, id: NodeId, mut rng: u64) {
+async fn probe_loop(
+    state: AppState,
+    sem: Arc<Semaphore>,
+    id: NodeId,
+    mut rng: u64,
+    shutdown: CancellationToken,
+) {
     let mut capacity_tick: u32 = 0;
     loop {
+        if shutdown.is_cancelled() {
+            return;
+        }
         if state.registry.get(&id).is_none_or(|n| n.draining) {
             return;
         }
         if let Some(at) = state.registry.next_probe_at(&id) {
             let wait = at.saturating_duration_since(Instant::now());
             if !wait.is_zero() {
-                tokio::time::sleep(wait).await;
+                tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => return,
+                    () = tokio::time::sleep(wait) => {}
+                }
             }
+        }
+        if shutdown.is_cancelled() {
+            return;
         }
         if state.registry.get(&id).is_none_or(|n| n.draining) {
             return;
         }
-        let Ok(_permit) = sem.acquire().await else {
+        let permit = tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            permit = sem.acquire() => permit,
+        };
+        let Ok(_permit) = permit else {
             return;
         };
         let health = state.registry.health().clone();
@@ -331,13 +398,17 @@ fn jittered_interval(interval: f64, jitter_ratio: f64, rng: &mut u64) -> f64 {
 }
 
 /// Reload fleet.yaml into the live registry (SIGHUP). Keeps inflight streams.
-pub fn reload_permanent_inventory(state: &AppState) -> anyhow::Result<()> {
-    let mut nodes = ollama_router_core::load_fleet_nodes(
-        &state.config.fleet_path,
-        state.config.fleet_missing_is_error,
-    )?;
-    let fleet_state = ollama_router_core::FleetState::new(&state.config.state_path);
-    ollama_router_core::hydrate_node_urls(&mut nodes, &fleet_state)?;
+pub async fn reload_permanent_inventory(state: &AppState) -> anyhow::Result<()> {
+    let fleet_path = state.config.fleet_path.clone();
+    let missing_is_error = state.config.fleet_missing_is_error;
+    let fleet_state = Arc::clone(&state.fleet_state);
+    let nodes = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let mut nodes = ollama_router_core::load_fleet_nodes(&fleet_path, missing_is_error)?;
+        ollama_router_core::hydrate_node_urls(&mut nodes, fleet_state.as_ref())?;
+        Ok(nodes)
+    })
+    .await
+    .map_err(|err| anyhow::anyhow!("fleet reload blocking join: {err}"))??;
     state.registry.apply_permanent_inventory(&nodes);
     tracing::info!(
         nodes = nodes.len(),

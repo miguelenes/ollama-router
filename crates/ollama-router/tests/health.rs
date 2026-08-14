@@ -13,10 +13,19 @@ use ollama_router_core::config::{
     Capacity, HealthConfig, ModelTier, NodeConfig, PolicyConfig, RouterConfig,
 };
 use ollama_router_core::fleet::NodeId;
+use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
 fn nid(id: &str) -> NodeId {
     NodeId::parse(id).expect("node id")
+}
+
+fn spawn_health(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_health(state, CancellationToken::new()))
+}
+
+fn spawn_warm(state: AppState) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(run_warm(state, CancellationToken::new()))
 }
 
 fn node(id: &str, url: Option<&str>, vram: f64, gpus: u32) -> NodeConfig {
@@ -70,7 +79,7 @@ async fn no_url_marks_unhealthy() {
         nodes: vec![node("no-url", None, 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(2), || {
         state
             .registry
@@ -87,7 +96,7 @@ async fn public_url_blocked_without_http() {
         nodes: vec![node("public", Some("http://8.8.8.8:11434"), 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(2), || {
         state
             .registry
@@ -104,7 +113,7 @@ async fn public_share_hostname_blocked_without_http() {
         nodes: vec![node("public", Some("https://abc.share.zrok.io"), 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(2), || {
         state
             .registry
@@ -126,7 +135,7 @@ async fn fail_streak_benches_node() {
         nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(3), || {
         state
             .registry
@@ -163,7 +172,7 @@ async fn ps_and_capacity_soft_fail_keep_healthy() {
     config.health.capacity_probe_port =
         url::Url::parse(&server.base_url()).unwrap().port().unwrap();
     let state = AppState::from_config(config).expect("state");
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(3), || {
         state.registry.get(&nid("gpu")).is_some_and(|n| n.healthy)
     })
@@ -194,7 +203,7 @@ async fn tags_cache_does_not_fan_out() {
         nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(3), || {
         state.registry.get(&nid("gpu")).is_some_and(|n| n.healthy)
     })
@@ -226,7 +235,7 @@ async fn remove_permanent_aborts_probe_task() {
         nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
         ..RouterConfig::default()
     });
-    let handle = tokio::spawn(run_health(state.clone()));
+    let handle = spawn_health(state.clone());
     wait_until(Duration::from_secs(3), || tags.calls() >= 1).await;
     state.registry.apply_permanent_inventory(&[]);
     wait_until(Duration::from_secs(1), || {
@@ -273,8 +282,8 @@ async fn warm_occupancy_does_not_set_idle() {
     let state = AppState::from_config(config).expect("state");
     state.registry.set_healthy(&nid("gpu"));
     state.registry.update_models(&nid("gpu"), ["llama3.2:3b"]);
-    let health = tokio::spawn(run_health(state.clone()));
-    let warm = tokio::spawn(run_warm(state.clone()));
+    let health = spawn_health(state.clone());
+    let warm = spawn_warm(state.clone());
     wait_until(Duration::from_secs(3), || generate.calls() >= 1).await;
     assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
     wait_until(Duration::from_secs(1), || {
@@ -311,9 +320,35 @@ async fn warm_skips_cpu_for_gpu_class_tier() {
     let state = AppState::from_config(config).expect("state");
     state.registry.set_healthy(&nid("cpu"));
     state.registry.update_models(&nid("cpu"), ["llama3.1:8b"]);
-    let warm = tokio::spawn(run_warm(state.clone()));
+    let warm = spawn_warm(state.clone());
     tokio::time::sleep(Duration::from_millis(400)).await;
     assert_eq!(generate.calls(), 0);
     assert!(state.registry.last_client_request_at(&nid("cpu")).is_none());
     warm.abort();
+}
+
+#[tokio::test]
+async fn cancel_stops_health_supervisor() {
+    let server = MockServer::start();
+    let tags = server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    let state = state_from(RouterConfig {
+        nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
+        ..RouterConfig::default()
+    });
+    let token = CancellationToken::new();
+    let handle = tokio::spawn(run_health(state.clone(), token.clone()));
+    wait_until(Duration::from_secs(3), || tags.calls() >= 1).await;
+    token.cancel();
+    tokio::time::timeout(Duration::from_secs(2), handle)
+        .await
+        .expect("health supervisor should stop after cancel")
+        .expect("join");
+    let hits = tags.calls();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    assert_eq!(tags.calls(), hits);
 }

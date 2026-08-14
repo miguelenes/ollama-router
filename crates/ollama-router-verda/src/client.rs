@@ -24,13 +24,22 @@ pub enum VerdaError {
     Message(String),
     #[error("verda auth: {0}")]
     Auth(String),
+    /// HTTP error from Verda. Status + method + path only — never a response body.
+    #[error("Verda API error (status={status} on {method} {path})")]
+    Http {
+        status: u16,
+        method: String,
+        path: String,
+    },
 }
 
 impl VerdaError {
     pub fn status(code: u16, method: &str, path: &str) -> Self {
-        Self::Message(format!(
-            "Verda API error (status={code} on {method} {path})"
-        ))
+        Self::Http {
+            status: code,
+            method: method.to_string(),
+            path: path.to_string(),
+        }
     }
 }
 
@@ -198,6 +207,7 @@ impl VerdaClient {
                 Ok(resp) => resp,
                 Err(err) => {
                     if attempt >= 3 {
+                        let err = err.without_url();
                         return Err(VerdaError::Message(format!(
                             "Verda request failed after retries: {err}"
                         )));
@@ -227,9 +237,7 @@ impl VerdaClient {
                     .and_then(|s| s.parse::<f64>().ok())
                     .unwrap_or(5.0);
                 if attempt >= 3 {
-                    return Err(VerdaError::Message(format!(
-                        "Verda rate limited (status=429, retry_after={retry_after})"
-                    )));
+                    return Err(VerdaError::status(429, method.as_str(), path));
                 }
                 attempt += 1;
                 tokio::time::sleep(Duration::from_secs_f64(
@@ -421,11 +429,9 @@ impl VerdaClient {
             .await
         {
             Ok(resp) => Ok(matches!(resp.status().as_u16(), 200 | 202 | 204)),
-            Err(VerdaError::Message(msg))
-                if msg.contains("status=404") || msg.contains("status=204") =>
-            {
-                Ok(false)
-            }
+            Err(VerdaError::Http {
+                status: 404 | 204, ..
+            }) => Ok(false),
             Err(err) => Err(err),
         }
     }
@@ -476,5 +482,29 @@ fn parse_startup_script_create(text: String, name: &str) -> Result<StartupScript
             name: Some(name.to_string()),
             ..StartupScript::default()
         })
+    }
+}
+
+#[cfg(test)]
+mod error_tests {
+    use super::VerdaError;
+
+    #[test]
+    fn status_is_http_variant_without_body() {
+        let err = VerdaError::status(503, "POST", "/v1/instances");
+        match &err {
+            VerdaError::Http {
+                status,
+                method,
+                path,
+            } => {
+                assert_eq!(*status, 503);
+                assert_eq!(method, "POST");
+                assert_eq!(path, "/v1/instances");
+            }
+            other => panic!("expected Http, got {other}"),
+        }
+        let msg = err.to_string();
+        assert_eq!(msg, "Verda API error (status=503 on POST /v1/instances)");
     }
 }

@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -15,6 +16,10 @@ use ollama_router_core::jobs::{Job, JobStatus, PullOrchestrator};
 use ollama_router_core::load_config;
 use ollama_router_core::routing::TargetSpec;
 use ollama_router_verda::{VerdaClient, VerdaManager};
+use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
+
+const SUPERVISOR_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
 
 fn init_tracing() {
     tracing_subscriber::fmt()
@@ -74,10 +79,12 @@ async fn run_ensure(
             std::process::exit(2);
         }
         orch.start_ensure_targets(targets)
+            .await
             .map_err(|err| anyhow::anyhow!("{err}"))?
     } else {
         let spec = spec_from_flags(all_nodes, nodes.as_deref())?;
         orch.start_ensure(&models, spec, false, false)
+            .await
             .map_err(|err| anyhow::anyhow!("{err}"))?
     };
     if !wait {
@@ -110,6 +117,7 @@ async fn run_delete(
     let spec = spec_from_flags(all_nodes, nodes.as_deref())?;
     let job = orch
         .start_delete(&models, spec, false)
+        .await
         .map_err(|err| anyhow::anyhow!("{err}"))?;
     if !wait {
         print_job(&job);
@@ -126,8 +134,10 @@ async fn run_delete(
 
 async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Result<()> {
     init_tracing();
+    let shutdown = CancellationToken::new();
     let loaded = load_config(config.as_deref()).context("load config")?;
-    let mut state = AppState::from_config(loaded).context("build app state")?;
+    let mut state =
+        AppState::from_config_with_shutdown(loaded, shutdown.clone()).context("build app state")?;
     if let Err(error) = state
         .tunnels
         .restore_fleet(&state.fleet_state, &state.registry)
@@ -140,13 +150,15 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
         recovered = recovered.len(),
         "recovered incomplete model jobs"
     );
-    wire_verda(&mut state).context("verda")?;
+    wire_verda(&mut state, shutdown.clone()).context("verda")?;
     let app = make_app(state.clone());
-    tokio::spawn(run_health(state.clone()));
+    let mut supervisor = Supervisor::new();
+    supervisor.spawn(run_health(state.clone(), shutdown.clone()));
     if state.config.policy.model_warm_enabled {
-        tokio::spawn(run_warm(state.clone()));
+        supervisor.spawn(run_warm(state.clone(), shutdown.clone()));
     }
-    spawn_sighup_reloader(state.clone());
+    #[cfg(unix)]
+    supervisor.spawn(run_sighup_reloader(state.clone(), shutdown.clone()));
     let started_at = Instant::now();
     let destroy_on_shutdown = state.config.verda.destroy_on_shutdown;
     let shutdown_grace =
@@ -155,24 +167,39 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     if let Some(mgr) = state.verda.clone() {
         if state.config.verda.ensure_on_startup && !state.config.verda.auto_scale {
             let startup = mgr.clone();
-            tokio::spawn(async move {
-                if let Err(error) = startup.ensure(true).await {
-                    tracing::error!(%error, "verda_ensure_on_startup_failed");
+            let token = shutdown.clone();
+            supervisor.spawn(async move {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => {}
+                    result = startup.ensure(true) => {
+                        if let Err(error) = result {
+                            tracing::error!(%error, "verda_ensure_on_startup_failed");
+                        }
+                    }
                 }
             });
         }
-        tokio::spawn(mgr.run_reconcile_loop());
+        supervisor.spawn(mgr.run_reconcile_loop());
     }
     let addr = format!("{host}:{port}");
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .with_context(|| format!("bind {addr}"))?;
     tracing::info!(listen.addr = %addr, "ollama-router started");
+    let serve_shutdown = shutdown.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            serve_shutdown.cancel();
+        })
         .await
         .context("server")?;
+    tracing::info!("supervisor_shutdown");
+    shutdown.cancel();
+    supervisor.join_or_abort(SUPERVISOR_JOIN_TIMEOUT).await;
     if let Some(mgr) = verda_shutdown {
+        mgr.abort_demand().await;
         let uptime = started_at.elapsed();
         if should_destroy_on_shutdown(destroy_on_shutdown, uptime, shutdown_grace) {
             tracing::info!(
@@ -191,16 +218,17 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     Ok(())
 }
 
-fn wire_verda(state: &mut AppState) -> anyhow::Result<()> {
+fn wire_verda(state: &mut AppState, shutdown: CancellationToken) -> anyhow::Result<()> {
     if !state.config.verda.enabled {
         return Ok(());
     }
     let client = VerdaClient::new(state.config.verda.clone()).context("verda client")?;
-    let mgr = VerdaManager::new(
+    let mgr = VerdaManager::with_shutdown(
         state.config.clone(),
         client,
         state.registry.clone(),
         state.fleet_state.clone(),
+        shutdown,
     );
     mgr.set_events(state.metrics.clone());
     state.demand = Arc::new(mgr.clone()) as Arc<dyn DemandScale>;
@@ -262,25 +290,72 @@ async fn run_reload(config: Option<PathBuf>, host: String, port: u16) -> anyhow:
     Ok(())
 }
 
-fn spawn_sighup_reloader(state: AppState) {
-    #[cfg(unix)]
-    tokio::spawn(async move {
-        let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
-        {
-            Ok(signal) => signal,
-            Err(error) => {
-                tracing::error!(%error, "failed to register SIGHUP handler");
-                return;
-            }
-        };
-        while hangup.recv().await.is_some() {
-            if let Err(error) = reload_permanent_inventory(&state) {
-                tracing::error!(%error, "SIGHUP fleet reload failed");
+#[cfg(unix)]
+async fn run_sighup_reloader(state: AppState, shutdown: CancellationToken) {
+    let mut hangup = match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()) {
+        Ok(signal) => signal,
+        Err(error) => {
+            tracing::error!(%error, "failed to register SIGHUP handler");
+            return;
+        }
+    };
+    loop {
+        tokio::select! {
+            biased;
+            () = shutdown.cancelled() => return,
+            recv = hangup.recv() => {
+                let Some(()) = recv else {
+                    return;
+                };
+                if let Err(error) = reload_permanent_inventory(&state).await {
+                    tracing::error!(%error, "SIGHUP fleet reload failed");
+                }
             }
         }
-    });
-    #[cfg(not(unix))]
-    let _ = state;
+    }
+}
+
+struct Supervisor {
+    tasks: JoinSet<()>,
+}
+
+impl Supervisor {
+    fn new() -> Self {
+        Self {
+            tasks: JoinSet::new(),
+        }
+    }
+
+    fn spawn<F>(&mut self, fut: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let _abort = self.tasks.spawn(fut);
+    }
+
+    async fn join_or_abort(mut self, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match tokio::time::timeout_at(deadline, self.tasks.join_next()).await {
+                Ok(Some(Ok(()))) => {}
+                Ok(Some(Err(err))) => {
+                    if err.is_panic() {
+                        tracing::error!("supervisor_task_panic");
+                    }
+                }
+                Ok(None) => return,
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_seconds = timeout.as_secs_f64(),
+                        "supervisor_join_timeout"
+                    );
+                    self.tasks.abort_all();
+                    while self.tasks.join_next().await.is_some() {}
+                    return;
+                }
+            }
+        }
+    }
 }
 
 #[tokio::main]

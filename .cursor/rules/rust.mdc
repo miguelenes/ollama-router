@@ -7,6 +7,7 @@ alwaysApply: true
 
 - Edition **2021**. rustc pin **1.97**. Committed `Cargo.lock`.
 - `cargo fmt --all`. Local gate: `task check`. CI: `cargo clippy --workspace --all-targets -- -D warnings`.
+- Workspace `[workspace.lints.clippy] all = "deny"` matches that CI flag for rust-analyzer. Also deny `redundant_clone`, `large_enum_variant`, `needless_collect`. Do not enable `clippy::pedantic`. Use `#[expect(clippy::…, reason = "…")]` rather than `#[allow]`.
 - Libraries: `thiserror`. Binary only: `anyhow`. No `unwrap`/`expect` in non-test lib code.
 - TLS: reqwest `rustls-tls`. Never `native-tls` or `openssl` / `openssl-sys` (`deny.toml` bans them).
 - Logs: `tracing` JSON. Never `println!` in services.

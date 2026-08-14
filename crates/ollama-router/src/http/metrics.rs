@@ -492,7 +492,7 @@ impl Metrics {
         self.tunnel_up.reset();
 
         let snap = fleet.snapshot();
-        let state_map = fleet_state.load().unwrap_or_default();
+        let state_map = fleet_state.snapshot();
         let mut verda_n: i64 = 0;
         for node in &snap {
             let id = node.id.as_str();
@@ -593,12 +593,10 @@ impl Metrics {
         self.aggregated_models
             .set(fleet.aggregated_tags().len() as i64);
 
-        let price_sum = fleet_state
-            .list_verda_nodes()
-            .ok()
-            .into_iter()
-            .flatten()
-            .filter_map(|(_, entry)| entry.verda_spot_price_per_hour)
+        let price_sum = state_map
+            .values()
+            .filter(|entry| entry.managed_by.as_deref() == Some("verda"))
+            .filter_map(|entry| entry.verda_spot_price_per_hour)
             .sum::<f64>();
         self.verda_spot_price.set(price_sum);
     }

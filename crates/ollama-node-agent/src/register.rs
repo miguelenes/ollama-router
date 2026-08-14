@@ -5,13 +5,19 @@
 //! reachability only. Share unique-names are sent — never zrok enable tokens,
 //! never Ollama request bodies.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
+use sysinfo::System;
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 
 use crate::config::AgentConfig;
 use crate::http::AppState;
 use crate::setup::{ConvergeState, SetupPaths};
+
+type TokenLookup = Arc<dyn Fn() -> Option<String> + Send + Sync>;
 
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct EnrollHeartbeat {
@@ -98,48 +104,62 @@ pub fn enroll_heartbeat(
     })
 }
 
-pub fn spawn_if_configured(state: AppState) {
-    spawn_if_configured_with(state, SetupPaths::for_os());
+pub fn spawn_if_configured(state: AppState, shutdown: CancellationToken) -> Option<JoinHandle<()>> {
+    spawn_if_configured_with(state, SetupPaths::for_os(), shutdown, None, None)
 }
 
-fn spawn_if_configured_with(app: AppState, paths: SetupPaths) {
+fn env_token_lookup(token_env: String) -> TokenLookup {
+    Arc::new(move || {
+        std::env::var(&token_env)
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    })
+}
+
+fn spawn_if_configured_with(
+    app: AppState,
+    paths: SetupPaths,
+    shutdown: CancellationToken,
+    token_lookup: Option<TokenLookup>,
+    interval: Option<Duration>,
+) -> Option<JoinHandle<()>> {
     let converge = ConvergeState::load(&paths.state);
-    let Some(url) = resolve_register_url(&app.config, &converge) else {
-        return;
-    };
-    let interval = Duration::from_secs(app.config.register.interval_seconds.max(5));
-    let token_env = resolve_token_env(&app.config, &converge);
+    let url = resolve_register_url(&app.config, &converge)?;
+    let interval = interval
+        .unwrap_or_else(|| Duration::from_secs(app.config.register.interval_seconds.max(5)));
+    let token_lookup =
+        token_lookup.unwrap_or_else(|| env_token_lookup(resolve_token_env(&app.config, &converge)));
     let endpoint = enroll_endpoint(&url);
-    tokio::spawn(async move {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .use_rustls_tls()
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => {
+            tracing::warn!("register skipped: http client");
+            return None;
+        }
+    };
+    let hostname = System::host_name().unwrap_or_default();
+    let agent_version = env!("CARGO_PKG_VERSION");
+    Some(tokio::spawn(async move {
         let mut tick = tokio::time::interval(interval);
         loop {
-            tick.tick().await;
-            let token = std::env::var(&token_env)
-                .ok()
-                .filter(|s| !s.trim().is_empty());
-            let Some(token) = token else {
+            tokio::select! {
+                biased;
+                () = shutdown.cancelled() => return,
+                _ = tick.tick() => {}
+            }
+            let Some(token) = token_lookup() else {
                 tracing::warn!("register skipped: token env unset");
                 continue;
             };
             let latest = ConvergeState::load(&paths.state);
-            let cpu = app.cpu_usage_pct.read().ok().and_then(|slot| *slot);
-            let snap = crate::collect::collect_live(&app.config, &app.ollama_listen, cpu).await;
-            let Some(body) = enroll_heartbeat(
-                &app.config,
-                &latest,
-                &snap.status.hostname,
-                &snap.status.agent_version,
-            ) else {
+            let Some(body) = enroll_heartbeat(&app.config, &latest, &hostname, agent_version)
+            else {
                 tracing::warn!("register skipped: share ids missing");
                 continue;
-            };
-            let client = match reqwest::Client::builder()
-                .timeout(Duration::from_secs(5))
-                .use_rustls_tls()
-                .build()
-            {
-                Ok(c) => c,
-                Err(_) => continue,
             };
             let res = client
                 .post(&endpoint)
@@ -159,7 +179,7 @@ fn spawn_if_configured_with(app: AppState, paths: SetupPaths) {
                 }
             }
         }
-    });
+    }))
 }
 
 #[cfg(test)]
@@ -267,5 +287,124 @@ mod http_tests {
         assert!(resp.status().is_success());
         mock.assert();
         assert_eq!(mock.calls(), 1);
+    }
+
+    fn test_app(config: AgentConfig) -> AppState {
+        AppState {
+            config: Arc::new(config),
+            ollama_listen: "127.0.0.1:11434".into(),
+            metrics: Arc::new(crate::metrics::AgentMetrics::new().expect("metrics")),
+            last: Arc::new(tokio::sync::RwLock::new(None)),
+            cpu_usage_pct: Arc::new(std::sync::RwLock::new(None)),
+            force_collect: None,
+        }
+    }
+
+    fn slot_token_lookup(slot: Arc<std::sync::Mutex<Option<String>>>) -> TokenLookup {
+        Arc::new(move || {
+            slot.lock()
+                .ok()
+                .and_then(|guard| guard.clone())
+                .filter(|s| !s.trim().is_empty())
+        })
+    }
+
+    #[tokio::test]
+    async fn enroll_loop_skips_without_token_then_reuses_client() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/router/v1/nodes/enroll")
+                .header("authorization", "Bearer secret");
+            then.status(200).json_body(serde_json::json!({"ok": true}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::setup::SetupPaths::under_root(dir.path());
+        let converge = ConvergeState {
+            schema: STATE_SCHEMA,
+            ollama_share_token: Some("share-ollama".into()),
+            agent_share_token: Some("share-agent".into()),
+            enroll_url: Some(server.base_url()),
+            ..ConvergeState::default()
+        };
+        converge.store(&paths.state).unwrap();
+        let mut config = AgentConfig::default();
+        config.register.url = Some(server.base_url());
+        config.register.node_id = Some("nuc".into());
+        config.register.origin = "fleet".into();
+        let token_slot = Arc::new(std::sync::Mutex::new(None));
+        let shutdown = CancellationToken::new();
+        let handle = spawn_if_configured_with(
+            test_app(config),
+            paths,
+            shutdown.clone(),
+            Some(slot_token_lookup(Arc::clone(&token_slot))),
+            Some(Duration::from_millis(50)),
+        )
+        .expect("enroll spawned");
+
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert_eq!(mock.calls(), 0, "missing token continues without POST");
+
+        *token_slot.lock().unwrap() = Some("secret".into());
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            mock.calls() >= 1,
+            "heartbeat after token appears, calls={}",
+            mock.calls()
+        );
+        let first = mock.calls();
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            mock.calls() > first,
+            "same rustls client reused on later ticks, first={first} later={}",
+            mock.calls()
+        );
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("enroll joined")
+            .ok();
+    }
+
+    #[tokio::test]
+    async fn enroll_loop_skips_when_share_ids_missing() {
+        let server = MockServer::start();
+        let mock = server.mock(|when, then| {
+            when.method(POST).path("/router/v1/nodes/enroll");
+            then.status(200).json_body(serde_json::json!({"ok": true}));
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let paths = crate::setup::SetupPaths::under_root(dir.path());
+        ConvergeState {
+            schema: STATE_SCHEMA,
+            enroll_url: Some(server.base_url()),
+            ..ConvergeState::default()
+        }
+        .store(&paths.state)
+        .unwrap();
+        let mut config = AgentConfig::default();
+        config.register.url = Some(server.base_url());
+        config.register.node_id = Some("nuc".into());
+        let token_slot = Arc::new(std::sync::Mutex::new(Some("secret".into())));
+        let shutdown = CancellationToken::new();
+        let handle = spawn_if_configured_with(
+            test_app(config),
+            paths,
+            shutdown.clone(),
+            Some(slot_token_lookup(token_slot)),
+            Some(Duration::from_millis(40)),
+        )
+        .expect("enroll spawned");
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(mock.calls(), 0, "cheap skip when share ids missing");
+
+        shutdown.cancel();
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("enroll joined")
+            .ok();
     }
 }

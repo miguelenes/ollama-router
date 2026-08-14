@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{params, Connection, OptionalExtension};
@@ -20,6 +20,8 @@ pub enum StoreError {
     Open(String),
     #[error("job store sqlite: {0}")]
     Sqlite(String),
+    #[error("job store blocking join: {0}")]
+    Join(String),
 }
 
 impl From<rusqlite::Error> for StoreError {
@@ -28,8 +30,14 @@ impl From<rusqlite::Error> for StoreError {
     }
 }
 
-/// WAL-backed operation records. `Mutex<Connection>` + short locks.
+/// WAL-backed operation records. `Mutex<Connection>` is only held inside
+/// blocking sections (tests and `spawn_blocking`).
+#[derive(Clone)]
 pub struct JobStore {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     path: PathBuf,
     conn: Mutex<Connection>,
 }
@@ -49,22 +57,42 @@ impl JobStore {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         migrate(&conn)?;
         Ok(Self {
-            path,
-            conn: Mutex::new(conn),
+            inner: Arc::new(Inner {
+                path,
+                conn: Mutex::new(conn),
+            }),
         })
     }
 
     /// Filesystem path (tests).
     pub fn path(&self) -> &Path {
-        &self.path
+        &self.inner.path
+    }
+
+    fn lock_conn(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.inner
+            .conn
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    async fn run_blocking<T, F>(&self, f: F) -> Result<T, StoreError>
+    where
+        T: Send + 'static,
+        F: FnOnce(Self) -> Result<T, StoreError> + Send + 'static,
+    {
+        let store = self.clone();
+        match tokio::task::spawn_blocking(move || f(store)).await {
+            Ok(result) => result,
+            Err(err) => Err(StoreError::Join(err.to_string())),
+        }
     }
 
     /// Load every well-formed row. Malformed rows are skipped.
+    ///
+    /// Blocking rusqlite. HTTP/job tasks must use [`Self::load_async`].
     pub fn load(&self) -> Result<BTreeMap<JobId, Job>, StoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self.lock_conn();
         let mut stmt = conn.prepare(
             "SELECT id, kind, status, created_at, finished_at, models_json, nodes_json, targets_json
              FROM model_operations
@@ -92,7 +120,14 @@ impl JobStore {
         Ok(jobs)
     }
 
+    /// [`Self::load`] on the blocking pool.
+    pub async fn load_async(&self) -> Result<BTreeMap<JobId, Job>, StoreError> {
+        self.run_blocking(|store| store.load()).await
+    }
+
     /// Upsert one snapshot with `detail` stripped.
+    ///
+    /// Blocking rusqlite. HTTP/job tasks must use [`Self::save_async`].
     pub fn save(&self, job: &Job) -> Result<(), StoreError> {
         let targets: BTreeMap<String, JobTarget> = job
             .targets
@@ -102,10 +137,7 @@ impl JobStore {
         let models_json = serde_json::to_string(&job.models).unwrap_or_else(|_| "[]".into());
         let nodes_json = serde_json::to_string(&job.nodes).unwrap_or_else(|_| "[]".into());
         let targets_json = serde_json::to_string(&targets).unwrap_or_else(|_| "{}".into());
-        let conn = self
-            .conn
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self.lock_conn();
         conn.execute(
             "INSERT INTO model_operations (
                 id, kind, status, created_at, finished_at, models_json, nodes_json, targets_json
@@ -132,16 +164,35 @@ impl JobStore {
         Ok(())
     }
 
+    /// [`Self::save`] on the blocking pool. Clones `job` only for the worker.
+    pub async fn save_async(&self, job: &Job) -> Result<(), StoreError> {
+        let job = job.clone();
+        self.run_blocking(move |store| store.save(&job)).await
+    }
+
     /// Remove a pruned terminal operation.
+    ///
+    /// Blocking rusqlite. HTTP/job tasks must use [`Self::delete_async`].
     pub fn delete(&self, id: &JobId) -> Result<(), StoreError> {
-        let conn = self
-            .conn
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let conn = self.lock_conn();
         conn.execute(
             "DELETE FROM model_operations WHERE id = ?1",
             params![id.to_string()],
         )?;
+        Ok(())
+    }
+
+    /// [`Self::delete`] on the blocking pool.
+    pub async fn delete_async(&self, id: &JobId) -> Result<(), StoreError> {
+        let id = *id;
+        self.run_blocking(move |store| store.delete(&id)).await
+    }
+
+    /// Drop the operations table so a subsequent `save` fails (tests).
+    #[cfg(test)]
+    pub fn drop_table_for_tests(&self) -> Result<(), StoreError> {
+        let conn = self.lock_conn();
+        conn.execute_batch("DROP TABLE IF EXISTS model_operations")?;
         Ok(())
     }
 }

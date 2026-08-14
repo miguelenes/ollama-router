@@ -7,7 +7,8 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use serde::Deserialize;
 use tokio::sync::{watch, Semaphore};
-use tokio::task::JoinHandle;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio_util::sync::CancellationToken;
 
 use crate::config::RouterConfig;
 use crate::fleet::ids::NodeId;
@@ -43,6 +44,7 @@ struct Inner {
     store: Option<JobStore>,
     state: Mutex<State>,
     observer: Mutex<Option<Arc<dyn JobObserver>>>,
+    shutdown: CancellationToken,
 }
 
 impl Drop for Inner {
@@ -69,6 +71,16 @@ impl PullOrchestrator {
         config: Arc<RouterConfig>,
         client: reqwest::Client,
         registry: Option<Arc<Registry>>,
+    ) -> Result<Self, OrchestratorError> {
+        Self::with_shutdown(config, client, registry, CancellationToken::new())
+    }
+
+    /// Same as [`Self::new`], sharing the process shutdown token.
+    pub fn with_shutdown(
+        config: Arc<RouterConfig>,
+        client: reqwest::Client,
+        registry: Option<Arc<Registry>>,
+        shutdown: CancellationToken,
     ) -> Result<Self, OrchestratorError> {
         let store = match config.job_store_path.as_deref() {
             Some(path) if !path.trim().is_empty() => Some(JobStore::open(path)?),
@@ -110,9 +122,10 @@ impl PullOrchestrator {
                     node_slots: HashMap::new(),
                 }),
                 observer: Mutex::new(None),
+                shutdown,
             }),
         };
-        orch.prune(0);
+        orch.prune_blocking(0);
         Ok(orch)
     }
 
@@ -157,7 +170,7 @@ impl PullOrchestrator {
     }
 
     /// Register + spawn a pull. Duplicate in-flight work coalesces.
-    pub fn start_ensure(
+    pub async fn start_ensure(
         &self,
         models: &[String],
         spec: TargetSpec,
@@ -172,10 +185,11 @@ impl PullOrchestrator {
         let ineligible = self.capacity_ineligible(&models, &targets);
         let ram_blocked = self.ram_pressure_ineligible(&models, &targets, avoid_ram_pressure);
         self.register_and_spawn(JobKind::Pull, models, targets, ineligible, ram_blocked)
+            .await
     }
 
     /// Ensure with an already-resolved per-model node map (CLI tier fan-out).
-    pub fn start_ensure_targets(
+    pub async fn start_ensure_targets(
         &self,
         targets: BTreeMap<String, Vec<NodeId>>,
     ) -> Result<Job, OrchestratorError> {
@@ -187,10 +201,11 @@ impl PullOrchestrator {
         let ineligible = self.capacity_ineligible(&models, &targets);
         let ram_blocked = self.ram_pressure_ineligible(&models, &targets, false);
         self.register_and_spawn(JobKind::Pull, models, targets, ineligible, ram_blocked)
+            .await
     }
 
     /// Register + spawn a delete.
-    pub fn start_delete(
+    pub async fn start_delete(
         &self,
         models: &[String],
         spec: TargetSpec,
@@ -208,6 +223,7 @@ impl PullOrchestrator {
             HashSet::new(),
             HashSet::new(),
         )
+        .await
     }
 
     /// Block until the job is terminal.
@@ -267,7 +283,9 @@ impl ModelOrchestrator for PullOrchestrator {
     fn ensure(&self, model: &str) -> JobFuture<'_> {
         let model = model.to_string();
         Box::pin(async move {
-            let job = self.start_ensure(&[model], TargetSpec::Placement, false, false)?;
+            let job = self
+                .start_ensure(&[model], TargetSpec::Placement, false, false)
+                .await?;
             Ok(outcome(&self.wait_job(&job.id).await))
         })
     }
@@ -275,7 +293,9 @@ impl ModelOrchestrator for PullOrchestrator {
     fn delete(&self, model: &str) -> JobFuture<'_> {
         let model = model.to_string();
         Box::pin(async move {
-            let job = self.start_delete(&[model], TargetSpec::Placement, false)?;
+            let job = self
+                .start_delete(&[model], TargetSpec::Placement, false)
+                .await?;
             Ok(outcome(&self.wait_job(&job.id).await))
         })
     }
@@ -422,7 +442,7 @@ impl PullOrchestrator {
         }
     }
 
-    fn register_and_spawn(
+    async fn register_and_spawn(
         &self,
         kind: JobKind,
         models: Vec<String>,
@@ -442,7 +462,7 @@ impl PullOrchestrator {
                 }
             }
         }
-        self.prune(1);
+        self.prune(1).await;
         let job = new_job(kind, models, &targets);
         let id = job.id;
         {
@@ -459,7 +479,7 @@ impl PullOrchestrator {
             state.jobs.insert(id, job.clone());
             state.inflight.insert(key, id);
         }
-        self.persist(&job);
+        self.persist(&job).await;
         self.spawn_run(id, ineligible, ram_blocked);
         Ok(job)
     }
@@ -471,10 +491,16 @@ impl PullOrchestrator {
         ram_blocked: HashSet<(String, String)>,
     ) {
         let orch = self.clone();
+        let mut state = self.lock();
         let handle = tokio::spawn(async move {
             orch.run_job(id, ineligible, ram_blocked).await;
         });
-        self.lock().tasks.insert(id, handle);
+        state.tasks.insert(id, handle);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn job_task_count(&self) -> usize {
+        self.lock().tasks.len()
     }
 
     async fn run_job(
@@ -485,7 +511,10 @@ impl PullOrchestrator {
     ) {
         let job = match self.get_job(&id) {
             Some(job) => job,
-            None => return,
+            None => {
+                self.lock().tasks.remove(&id);
+                return;
+            }
         };
         let pairs: Vec<(String, String)> = job
             .targets
@@ -504,7 +533,8 @@ impl PullOrchestrator {
                     model,
                     TargetStatus::SkippedCapacity,
                     Some("node capacity below the model class requirement".into()),
-                );
+                )
+                .await;
             }
         }
         let job = self.get_job(&id).unwrap_or(job);
@@ -519,11 +549,13 @@ impl PullOrchestrator {
                     model,
                     TargetStatus::SkippedRamPressure,
                     Some("node RAM pressure exceeds the placement policy".into()),
-                );
+                )
+                .await;
             }
         }
 
-        let mut futs = Vec::new();
+        let mut set = JoinSet::new();
+        let mut keys: HashMap<tokio::task::Id, (String, String)> = HashMap::new();
         let job = self.get_job(&id).unwrap_or_else(|| job.clone());
         for (node_id, model) in pairs {
             if ineligible.contains(&(node_id.clone(), model.clone()))
@@ -534,41 +566,73 @@ impl PullOrchestrator {
             if !target_incomplete(&job, &node_id, &model) {
                 continue;
             }
+            if self.inner.shutdown.is_cancelled() {
+                self.set_target(
+                    &id,
+                    &node_id,
+                    &model,
+                    TargetStatus::Failed,
+                    Some("shutdown".into()),
+                )
+                .await;
+                continue;
+            }
             let orch = self.clone();
-            futs.push(async move {
+            let n = node_id.clone();
+            let m = model.clone();
+            let abort = set.spawn(async move {
                 match kind {
-                    JobKind::Pull => orch.ensure_one(id, node_id, model).await,
-                    JobKind::Delete => orch.delete_one(id, node_id, model).await,
+                    JobKind::Pull => orch.ensure_one(id, n, m).await,
+                    JobKind::Delete => orch.delete_one(id, n, m).await,
                 }
             });
+            keys.insert(abort.id(), (node_id, model));
         }
-        futures_util::future::join_all(futs).await;
+        while let Some(joined) = set.join_next_with_id().await {
+            match joined {
+                Ok((tid, ())) => {
+                    keys.remove(&tid);
+                }
+                Err(err) => {
+                    if let Some((node, model)) = keys.remove(&err.id()) {
+                        tracing::warn!(
+                            job_id = %id,
+                            node = %node,
+                            model = %model,
+                            error = %err,
+                            "job target join failed"
+                        );
+                    } else {
+                        tracing::warn!(job_id = %id, error = %err, "job target join failed");
+                    }
+                }
+            }
+        }
 
-        {
+        let snap = {
             let mut state = self.lock();
-            if let Some(job) = state.jobs.get_mut(&id) {
+            let snap = state.jobs.get_mut(&id).map(|job| {
                 job.status = job.summarize_status();
                 job.finished_at = Some(unix_now());
-                let snap = job.clone();
-                drop(state);
-                self.persist(&snap);
-                self.notify(&snap);
-                self.observe_terminal(&snap);
+                job.clone()
+            });
+            let key = snap
+                .as_ref()
+                .map(|j| dedupe_key(j.kind, &j.models, &pairs_from_job(j)));
+            if let Some(key) = key {
+                if state.inflight.get(&key) == Some(&id) {
+                    state.inflight.remove(&key);
+                }
             }
+            state.tasks.remove(&id);
+            state.recovery_ids.remove(&id);
+            snap
+        };
+        if let Some(snap) = snap {
+            self.persist(&snap).await;
+            self.notify(&snap);
+            self.observe_terminal(&snap);
         }
-
-        let mut state = self.lock();
-        let key = state
-            .jobs
-            .get(&id)
-            .map(|j| dedupe_key(j.kind, &j.models, &pairs_from_job(j)));
-        if let Some(key) = key {
-            if state.inflight.get(&key) == Some(&id) {
-                state.inflight.remove(&key);
-            }
-        }
-        state.tasks.remove(&id);
-        state.recovery_ids.remove(&id);
     }
 
     async fn ensure_one(&self, job_id: JobId, node_id: String, model: String) {
@@ -579,12 +643,14 @@ impl PullOrchestrator {
                 &model,
                 TargetStatus::SkippedUnhealthy,
                 Some("node unhealthy at dispatch time".into()),
-            );
+            )
+            .await;
             return;
         }
         let (url, err) = self.resolve_url(&node_id);
         if let Some(err) = err {
-            self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, Some(err));
+            self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, Some(err))
+                .await;
             return;
         }
         let Some(url) = url else {
@@ -594,7 +660,8 @@ impl PullOrchestrator {
                 &model,
                 TargetStatus::Failed,
                 Some("unknown node".into()),
-            );
+            )
+            .await;
             return;
         };
 
@@ -607,7 +674,8 @@ impl PullOrchestrator {
                     &model,
                     TargetStatus::Failed,
                     Some(detail),
-                );
+                )
+                .await;
                 return;
             }
         };
@@ -619,7 +687,8 @@ impl PullOrchestrator {
                 &model,
                 TargetStatus::AlreadyPresent,
                 None,
-            );
+            )
+            .await;
             self.refresh_registry(&node_id, present);
             return;
         }
@@ -634,11 +703,13 @@ impl PullOrchestrator {
                     &model,
                     TargetStatus::Failed,
                     Some("pull slot closed".into()),
-                );
+                )
+                .await;
                 return;
             }
         };
-        self.set_target(&job_id, &node_id, &model, TargetStatus::Running, None);
+        self.set_target(&job_id, &node_id, &model, TargetStatus::Running, None)
+            .await;
         tracing::info!(node = %node_id, model = %model, "pull_start");
         let (ok, detail) = self.pull(&url, &model).await;
         self.set_target(
@@ -651,7 +722,8 @@ impl PullOrchestrator {
                 TargetStatus::Failed
             },
             detail,
-        );
+        )
+        .await;
         tracing::info!(node = %node_id, model = %model, ok, "pull_finish");
         if ok {
             let mut next = present;
@@ -668,12 +740,14 @@ impl PullOrchestrator {
                 &model,
                 TargetStatus::SkippedUnhealthy,
                 Some("node unhealthy at dispatch time".into()),
-            );
+            )
+            .await;
             return;
         }
         let (url, err) = self.resolve_url(&node_id);
         if let Some(err) = err {
-            self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, Some(err));
+            self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, Some(err))
+                .await;
             return;
         }
         let Some(url) = url else {
@@ -683,7 +757,8 @@ impl PullOrchestrator {
                 &model,
                 TargetStatus::Failed,
                 Some("unknown node".into()),
-            );
+            )
+            .await;
             return;
         };
         let present = match self.probe_tags(&url).await {
@@ -695,27 +770,31 @@ impl PullOrchestrator {
                     &model,
                     TargetStatus::Failed,
                     Some(detail),
-                );
+                )
+                .await;
                 return;
             }
         };
         let normalized = normalize_model(&model);
         if !present.contains(&normalized) {
-            self.set_target(&job_id, &node_id, &model, TargetStatus::AlreadyAbsent, None);
+            self.set_target(&job_id, &node_id, &model, TargetStatus::AlreadyAbsent, None)
+                .await;
             self.refresh_registry(&node_id, present);
             return;
         }
         tracing::info!(node = %node_id, model = %model, "delete_start");
         let (ok, detail) = self.delete_model(&url, &model).await;
         if ok {
-            self.set_target(&job_id, &node_id, &model, TargetStatus::Deleted, detail);
+            self.set_target(&job_id, &node_id, &model, TargetStatus::Deleted, detail)
+                .await;
             tracing::info!(node = %node_id, model = %model, ok = true, "delete_finish");
             let mut next = present;
             next.remove(&normalized);
             self.refresh_registry(&node_id, next);
             return;
         }
-        self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, detail);
+        self.set_target(&job_id, &node_id, &model, TargetStatus::Failed, detail)
+            .await;
         tracing::info!(node = %node_id, model = %model, ok = false, "delete_finish");
     }
 
@@ -896,7 +975,7 @@ impl PullOrchestrator {
         }
     }
 
-    fn set_target(
+    async fn set_target(
         &self,
         job_id: &JobId,
         node_id: &str,
@@ -916,15 +995,16 @@ impl PullOrchestrator {
             }
             job.clone()
         };
-        self.persist(&snap);
+        self.persist(&snap).await;
         self.notify(&snap);
     }
 
-    fn persist(&self, job: &Job) {
-        if let Some(store) = &self.inner.store {
-            if let Err(err) = store.save(job) {
-                tracing::warn!(job_id = %job.id, error = %err, "job persist failed");
-            }
+    async fn persist(&self, job: &Job) {
+        let Some(store) = self.inner.store.clone() else {
+            return;
+        };
+        if let Err(err) = store.save_async(job).await {
+            tracing::warn!(job_id = %job.id, error = %err, "job persist failed");
         }
     }
 
@@ -950,52 +1030,89 @@ impl PullOrchestrator {
         }
     }
 
-    fn prune(&self, room_for: usize) {
+    fn prune_blocking(&self, room_for: usize) {
+        let remove = self.prune_ids(room_for);
+        self.prune_apply(&remove);
+        self.prune_delete_sync(&remove);
+    }
+
+    async fn prune(&self, room_for: usize) {
+        let remove = self.prune_ids(room_for);
+        if remove.is_empty() {
+            return;
+        }
+        self.prune_apply(&remove);
+        let Some(store) = self.inner.store.clone() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || {
+            for id in &remove {
+                if let Err(err) = store.delete(id) {
+                    tracing::warn!(job_id = %id, error = %err, "job prune delete failed");
+                }
+            }
+        })
+        .await
+        {
+            Ok(()) => {}
+            Err(err) => tracing::warn!(error = %err, "job prune delete join failed"),
+        }
+    }
+
+    fn prune_ids(&self, room_for: usize) -> Vec<JobId> {
         let now = unix_now();
         let ttl = f64::from(self.inner.config.jobs_retention_seconds);
         let max = self.inner.config.jobs_max_retained as usize;
         let mut remove = Vec::new();
-        {
-            let state = self.lock();
-            let done: Vec<&Job> = state
-                .jobs
-                .values()
-                .filter(|j| j.status != JobStatus::Running)
-                .collect();
-            for job in &done {
-                let age_from = job.finished_at.unwrap_or(job.created_at);
-                if now - age_from > ttl {
-                    remove.push(job.id);
-                }
-            }
-            let remaining = state.jobs.len().saturating_sub(remove.len());
-            let excess = remaining.saturating_add(room_for).saturating_sub(max);
-            if excess > 0 {
-                let mut removable: Vec<&Job> = done
-                    .into_iter()
-                    .filter(|j| !remove.contains(&j.id))
-                    .collect();
-                removable.sort_by(|a, b| {
-                    let ta = a.finished_at.unwrap_or(a.created_at);
-                    let tb = b.finished_at.unwrap_or(b.created_at);
-                    ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
-                });
-                for job in removable.into_iter().take(excess) {
-                    remove.push(job.id);
-                }
+        let state = self.lock();
+        let done: Vec<&Job> = state
+            .jobs
+            .values()
+            .filter(|j| j.status != JobStatus::Running)
+            .collect();
+        for job in &done {
+            let age_from = job.finished_at.unwrap_or(job.created_at);
+            if now - age_from > ttl {
+                remove.push(job.id);
             }
         }
+        let remaining = state.jobs.len().saturating_sub(remove.len());
+        let excess = remaining.saturating_add(room_for).saturating_sub(max);
+        if excess > 0 {
+            let mut removable: Vec<&Job> = done
+                .into_iter()
+                .filter(|j| !remove.contains(&j.id))
+                .collect();
+            removable.sort_by(|a, b| {
+                let ta = a.finished_at.unwrap_or(a.created_at);
+                let tb = b.finished_at.unwrap_or(b.created_at);
+                ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            for job in removable.into_iter().take(excess) {
+                remove.push(job.id);
+            }
+        }
+        remove
+    }
+
+    fn prune_apply(&self, remove: &[JobId]) {
         if remove.is_empty() {
             return;
         }
         let mut state = self.lock();
         for id in remove {
-            state.jobs.remove(&id);
-            state.waiters.remove(&id);
-            if let Some(store) = &self.inner.store {
-                if let Err(err) = store.delete(&id) {
-                    tracing::warn!(job_id = %id, error = %err, "job prune delete failed");
-                }
+            state.jobs.remove(id);
+            state.waiters.remove(id);
+        }
+    }
+
+    fn prune_delete_sync(&self, remove: &[JobId]) {
+        let Some(store) = &self.inner.store else {
+            return;
+        };
+        for id in remove {
+            if let Err(err) = store.delete(id) {
+                tracing::warn!(job_id = %id, error = %err, "job prune delete failed");
             }
         }
     }
