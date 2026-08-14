@@ -115,6 +115,16 @@ const KNOBS: &[Knob] = &[
         kind: KnobKind::Float,
     },
     Knob {
+        env: "VERDA_ORPHAN_RECLAIM_ENABLED",
+        path: &["verda", "orphan_reclaim_enabled"],
+        kind: KnobKind::Bool,
+    },
+    Knob {
+        env: "VERDA_ORPHAN_RECLAIM_GRACE_SECONDS",
+        path: &["verda", "orphan_reclaim_grace_seconds"],
+        kind: KnobKind::Float,
+    },
+    Knob {
         env: "VERDA_ENSURE_ON_STARTUP",
         path: &["verda", "ensure_on_startup"],
         kind: KnobKind::Bool,

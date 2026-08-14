@@ -30,19 +30,32 @@ fn de_opt_stringish<'de, D: Deserializer<'de>>(
     })
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
-    #[expect(dead_code, reason = "OAuth token JSON field; unused after parse")]
     pub token_type: Option<String>,
     #[serde(default)]
     pub refresh_token: Option<String>,
     #[serde(default)]
     pub expires_in: Option<u64>,
     #[serde(default)]
-    #[expect(dead_code, reason = "OAuth token JSON field; unused after parse")]
     pub scope: Option<String>,
+}
+
+impl std::fmt::Debug for TokenResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TokenResponse")
+            .field("access_token", &"REDACTED")
+            .field("token_type", &self.token_type)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "REDACTED"),
+            )
+            .field("expires_in", &self.expires_in)
+            .field("scope", &self.scope)
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -143,7 +156,7 @@ pub struct Image {
     pub name: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 pub struct SshKey {
     #[serde(default)]
     pub id: Option<String>,
@@ -155,6 +168,18 @@ pub struct SshKey {
     pub fingerprint: Option<String>,
     #[serde(default)]
     pub key: Option<String>,
+}
+
+impl std::fmt::Debug for SshKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshKey")
+            .field("id", &self.id)
+            .field("ssh_key_id", &self.ssh_key_id)
+            .field("name", &self.name)
+            .field("fingerprint", &self.fingerprint)
+            .field("key", &self.key.as_ref().map(|_| "REDACTED"))
+            .finish()
+    }
 }
 
 impl SshKey {
@@ -239,5 +264,38 @@ pub struct StartupScript {
 impl StartupScript {
     pub fn script_key(&self) -> Option<&str> {
         self.id.as_deref().or(self.script_id.as_deref())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_response_debug_redacts_tokens() {
+        let token = TokenResponse {
+            access_token: "tok-1".into(),
+            refresh_token: Some("ref-1".into()),
+            expires_in: Some(3600),
+            ..TokenResponse::default()
+        };
+        let dbg = format!("{token:?}");
+        assert!(!dbg.contains("tok-1"), "{dbg}");
+        assert!(!dbg.contains("ref-1"), "{dbg}");
+        assert!(dbg.contains("REDACTED"), "{dbg}");
+    }
+
+    #[test]
+    fn ssh_key_debug_redacts_key_material() {
+        let key = SshKey {
+            id: Some("key-1".into()),
+            name: Some("ollama-router".into()),
+            key: Some("ssh-ed25519 AAAA-secret".into()),
+            ..SshKey::default()
+        };
+        let dbg = format!("{key:?}");
+        assert!(!dbg.contains("AAAA-secret"), "{dbg}");
+        assert!(dbg.contains("REDACTED"), "{dbg}");
+        assert!(dbg.contains("key-1"), "{dbg}");
     }
 }

@@ -4,6 +4,7 @@
 //! `delete_permanently`. Demand scale-up is fire-and-forget from the proxy;
 //! this module owns the trait and idle-candidate selection.
 
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use crate::fleet::{NodeId, NodeOrigin, NodeSnapshot, VerdaInstanceId};
@@ -83,6 +84,13 @@ impl IdleNodeView {
     fn activity_anchor(&self) -> Instant {
         self.last_client_request_at.unwrap_or(self.registered_at)
     }
+
+    fn idle_eligible(&self, now: Instant, policy: IdlePolicy) -> bool {
+        self.origin == NodeOrigin::Verda
+            && self.inflight == 0
+            && now.saturating_duration_since(self.registered_at) >= policy.grace_after_create
+            && now.saturating_duration_since(self.activity_anchor()) >= policy.idle_timeout
+    }
 }
 
 /// Owned Verda spots that may be destroyed, longest-idle first.
@@ -99,12 +107,7 @@ pub fn idle_scale_down_candidates(
     }
     let mut idle: Vec<(&IdleNodeView, Instant)> = in_flight
         .iter()
-        .filter(|node| node.origin == NodeOrigin::Verda)
-        .filter(|node| node.inflight == 0)
-        .filter(|node| {
-            now.saturating_duration_since(node.registered_at) >= policy.grace_after_create
-        })
-        .filter(|node| now.saturating_duration_since(node.activity_anchor()) >= policy.idle_timeout)
+        .filter(|node| node.idle_eligible(now, policy))
         .map(|node| (node, node.activity_anchor()))
         .collect();
     idle.sort_by_key(|(_, anchor)| *anchor);
@@ -118,6 +121,64 @@ pub fn idle_scale_down_candidates(
             instance_id: node.instance_id.clone(),
         })
         .collect()
+}
+
+/// Verda spots to consider when trimming above `auto_scale_max_instances`.
+///
+/// Lowest activity (`last_client_request_at` else `registered_at`) first, then
+/// lowest inflight. Never includes fleet.yaml (`Permanent`) hosts. The caller
+/// drain-and-verifies and must not go below `auto_scale_min_instances`.
+pub fn excess_scale_down_order(in_flight: &[IdleNodeView]) -> Vec<IdleCandidate> {
+    let mut ranked: Vec<&IdleNodeView> = in_flight
+        .iter()
+        .filter(|node| node.origin == NodeOrigin::Verda)
+        .collect();
+    ranked.sort_by(|a, b| {
+        a.activity_anchor()
+            .cmp(&b.activity_anchor())
+            .then(a.inflight.cmp(&b.inflight))
+            .then(a.node_id.as_str().cmp(b.node_id.as_str()))
+    });
+    ranked
+        .into_iter()
+        .map(|node| IdleCandidate {
+            node_id: node.node_id.clone(),
+            instance_id: node.instance_id.clone(),
+        })
+        .collect()
+}
+
+/// Owned Verda instance ids that are billed but missing from FleetState and the
+/// live registry, after `grace` has elapsed since `first_seen`.
+///
+/// Callers must pass only `is_owned` instance ids. Never include fleet.yaml
+/// hosts. Destroy is the caller's job (`delete_permanently`).
+pub fn orphan_reclaim_candidates(
+    owned: &[VerdaInstanceId],
+    fleet_instance_ids: &HashSet<String>,
+    registry_verda_instance_ids: &HashSet<String>,
+    first_seen: &HashMap<String, Instant>,
+    now: Instant,
+    grace: Duration,
+) -> Vec<VerdaInstanceId> {
+    let mut out = Vec::new();
+    for id in owned {
+        let key = id.as_str();
+        if fleet_instance_ids.contains(key) {
+            continue;
+        }
+        if registry_verda_instance_ids.contains(key) {
+            continue;
+        }
+        let Some(seen) = first_seen.get(key) else {
+            continue;
+        };
+        if now.saturating_duration_since(*seen) < grace {
+            continue;
+        }
+        out.push(id.clone());
+    }
+    out
 }
 
 /// Crash-loop guard for `destroy_on_shutdown`.
@@ -231,5 +292,64 @@ mod tests {
             Duration::from_secs(10_000),
             grace
         ));
+    }
+
+    fn iid(id: &str) -> VerdaInstanceId {
+        VerdaInstanceId::parse(id).unwrap()
+    }
+
+    #[test]
+    fn orphan_reclaim_skips_fleetstate_registry_and_grace() {
+        let t0 = Instant::now();
+        let now = t0 + Duration::from_secs(2_000);
+        let owned = [iid("orphan"), iid("in-fleet"), iid("in-reg"), iid("fresh")];
+        let fleet = HashSet::from(["in-fleet".to_string()]);
+        let registry = HashSet::from(["in-reg".to_string()]);
+        let first_seen = HashMap::from([
+            ("orphan".to_string(), t0),
+            ("in-fleet".to_string(), t0),
+            ("in-reg".to_string(), t0),
+            ("fresh".to_string(), now),
+        ]);
+        let out = orphan_reclaim_candidates(
+            &owned,
+            &fleet,
+            &registry,
+            &first_seen,
+            now,
+            Duration::from_secs(1_800),
+        );
+        assert_eq!(out, vec![iid("orphan")]);
+    }
+
+    #[test]
+    fn excess_order_lowest_activity_then_inflight_never_permanent() {
+        let t0 = Instant::now();
+        let t1 = t0 + Duration::from_secs(10);
+        let t2 = t0 + Duration::from_secs(20);
+        let nodes = [
+            view("verda-busy", NodeOrigin::Verda, 1, t0, Some(t2)),
+            view("local", NodeOrigin::Permanent, 0, t0, None),
+            view("verda-old", NodeOrigin::Verda, 0, t0, Some(t0)),
+            view("verda-mid", NodeOrigin::Verda, 0, t0, Some(t1)),
+        ];
+        let out = excess_scale_down_order(&nodes);
+        let ids: Vec<&str> = out.iter().map(|c| c.node_id.as_str()).collect();
+        assert_eq!(ids, ["verda-old", "verda-mid", "verda-busy"]);
+    }
+
+    #[test]
+    fn orphan_reclaim_never_returns_without_first_seen() {
+        let now = Instant::now();
+        let owned = [iid("ghost")];
+        let out = orphan_reclaim_candidates(
+            &owned,
+            &HashSet::new(),
+            &HashSet::new(),
+            &HashMap::new(),
+            now,
+            Duration::from_secs(0),
+        );
+        assert!(out.is_empty());
     }
 }

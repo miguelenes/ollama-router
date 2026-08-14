@@ -721,6 +721,8 @@ pub struct VerdaConfig {
     pub idle_scale_down_enabled: bool,
     pub idle_timeout_seconds: f64,
     pub idle_grace_after_create_seconds: f64,
+    pub orphan_reclaim_enabled: bool,
+    pub orphan_reclaim_grace_seconds: f64,
     pub ensure_on_startup: bool,
     pub destroy_on_shutdown: bool,
     pub router_id_env: String,
@@ -777,6 +779,8 @@ impl Default for VerdaConfig {
             idle_scale_down_enabled: true,
             idle_timeout_seconds: 900.0,
             idle_grace_after_create_seconds: 300.0,
+            orphan_reclaim_enabled: true,
+            orphan_reclaim_grace_seconds: 1800.0,
             ensure_on_startup: false,
             destroy_on_shutdown: true,
             router_id_env: "OLLAMA_ROUTER_ID".to_string(),
@@ -894,8 +898,16 @@ impl VerdaConfig {
         if self.idle_timeout_seconds < 0.0
             || self.idle_grace_after_create_seconds < 0.0
             || self.create_backoff_base_seconds < 0.0
+            || self.orphan_reclaim_grace_seconds < 0.0
         {
             return Err(ConfigError::invalid("verda idle timings must be >= 0"));
+        }
+        if self.orphan_reclaim_enabled
+            && self.orphan_reclaim_grace_seconds < self.create_timeout_seconds
+        {
+            return Err(ConfigError::invalid(
+                "verda.orphan_reclaim_grace_seconds must be >= create_timeout_seconds",
+            ));
         }
         if self.auto_scale_max_instances > 0
             && self.auto_scale_min_instances > self.auto_scale_max_instances
@@ -1188,6 +1200,16 @@ mod tests {
         assert!(is_env_name("VERDA_CLIENT_SECRET"));
         assert!(!is_env_name("literal-secret-value"));
         assert!(!is_env_name("tskey-auth-literal"));
+    }
+
+    #[test]
+    fn orphan_reclaim_grace_must_cover_create_timeout_when_enabled() {
+        let mut verda = VerdaConfig::default();
+        verda.validate().unwrap();
+        verda.orphan_reclaim_grace_seconds = verda.create_timeout_seconds - 1.0;
+        assert!(verda.validate().is_err());
+        verda.orphan_reclaim_enabled = false;
+        verda.validate().unwrap();
     }
 
     #[test]

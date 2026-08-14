@@ -13,8 +13,9 @@ pub use capacity::{
     GpuDetail, MergeOutcome, Pressure, PressureEnvelope, BYTES_PER_GIB,
 };
 pub use cloud::{
-    idle_scale_down_candidates, should_destroy_on_shutdown, DemandScale, FleetEvents,
-    IdleCandidate, IdleNodeView, IdlePolicy, NoopDemandScale, NoopFleetEvents,
+    excess_scale_down_order, idle_scale_down_candidates, orphan_reclaim_candidates,
+    should_destroy_on_shutdown, DemandScale, FleetEvents, IdleCandidate, IdleNodeView, IdlePolicy,
+    NoopDemandScale, NoopFleetEvents,
 };
 pub use config::{
     http_url_for_bind, hydrate_node_urls, load_config, load_config_from, parse_yaml,
@@ -22,9 +23,9 @@ pub use config::{
 };
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
-    url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist, FleetState, FleetStateError,
-    GpuSnapshot, NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId,
-    VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist,
+    FleetState, FleetStateError, GpuSnapshot, NodeId, NodeOrigin, NodeSnapshot, PressureLevel,
+    Registry, RouterId, VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use jobs::{
     Job, JobId, JobKind, JobObserver, JobOutcome, JobStatus, JobStore, JobTarget,

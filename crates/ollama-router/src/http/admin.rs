@@ -9,9 +9,10 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 
 use ollama_router_core::fleet::{
-    share_id_looks_public, url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist,
+    share_id_looks_public, url_host_is_public_ip, url_host_is_public_share, EnrollPersist,
     FleetState, NodeId, NodeOrigin,
 };
 use ollama_router_core::jobs::{Job, OrchestratorError};
@@ -52,11 +53,10 @@ impl ModelOpRequest {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
+    let ha = Sha256::digest(a);
+    let hb = Sha256::digest(b);
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
+    for (x, y) in ha.iter().zip(hb.iter()) {
         diff |= x ^ y;
     }
     diff == 0
@@ -389,10 +389,10 @@ pub async fn put_node(
     };
     if let Some(url) = body.url.as_deref() {
         let trimmed = url.trim();
-        if !trimmed.is_empty() && url_host_is_public_ipv4(trimmed) {
+        if !trimmed.is_empty() && url_host_is_public_ip(trimmed) {
             return json_status(
                 StatusCode::BAD_REQUEST,
-                json!({"error": "refusing public IPv4 routing URL"}),
+                json!({"error": "refusing public IP routing URL"}),
             );
         }
         if !trimmed.is_empty()
@@ -896,4 +896,19 @@ pub async fn verda_destroy(State(state): State<AppState>, headers: HeaderMap) ->
         },
         body,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::constant_time_eq;
+
+    #[test]
+    fn constant_time_eq_matches_equal_and_rejects_mismatch() {
+        assert!(constant_time_eq(b"Bearer abc", b"Bearer abc"));
+        assert!(!constant_time_eq(
+            b"Bearer short",
+            b"Bearer a-much-longer-token"
+        ));
+        assert!(!constant_time_eq(b"Bearer abc", b"Bearer abd"));
+    }
 }

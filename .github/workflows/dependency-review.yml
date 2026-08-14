@@ -20,7 +20,18 @@ jobs:
         with:
           persist-credentials: false
 
+      # Dependency graph / this action need a public repo or GitHub Advanced
+      # Security on a private repo. Keep the job green when those are absent
+      # (same pattern as docker attestations). Re-enable automatically when
+      # the repository is public, or set DEPENDENCY_REVIEW_ENABLED=true after
+      # enabling Advanced Security.
+      # https://docs.github.com/en/code-security/supply-chain-security/understanding-your-software-supply-chain/about-dependency-review
+      - name: Skip without GitHub Advanced Security
+        if: ${{ vars.DEPENDENCY_REVIEW_ENABLED != 'true' && github.event.repository.private }}
+        run: echo "Dependency review needs GitHub Advanced Security; skipped on this private repository."
+
       - name: Dependency review
+        if: ${{ vars.DEPENDENCY_REVIEW_ENABLED == 'true' || !github.event.repository.private }}
         uses: actions/dependency-review-action@v5
         with:
           fail-on-severity: high

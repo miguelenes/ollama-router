@@ -29,6 +29,8 @@
 #   auto_scale: true
 #   auto_scale_min_instances: 0
 #   auto_scale_max_instances: 2
+#   orphan_reclaim_enabled: true
+#   orphan_reclaim_grace_seconds: 1800
 #   ssh_key_name: ollama-router
 #   startup_script_name: ollama-router-agent-init
 #   # Reachable enroll URL for Verda spots (not 0.0.0.0). Tokens stay in env:

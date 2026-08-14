@@ -90,8 +90,11 @@ the bearer is never written into `config.yaml`.
 
 ## `public_url_blocked`
 
-Still applies to globally routable IPv4 `:11434`. Hostname public tunnels
+Applies to globally routable IPv4 and IPv6 (including IPv4-mapped /
+IPv4-compatible v6 such as `[::ffff:8.8.8.8]`), CGNAT (`100.64/10`), and
+unspecified addresses (`0.0.0.0`, `::`). Hostname public tunnels
 (`*.zrok.io` plus `tunnel.public_share_suffixes`) are the same reason code.
+Loopback, RFC1918, link-local, and unique-local (`fc00::/7`) stay probeable.
 No public-proxy fallback.
 
 ## Verda

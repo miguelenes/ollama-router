@@ -1,5 +1,6 @@
-//! Routing URL reachability: loopback and RFC1918 are ok; public IPv4,
-//! CGNAT (`100.64/10`), and public-share hostnames are blocked.
+//! Routing URL reachability: loopback, RFC1918, link-local, and ULA are ok;
+//! globally-routable IPs, CGNAT (`100.64/10`), unspecified (`0.0.0.0` / `::`),
+//! and public-share hostnames are blocked.
 //!
 //! `100.64.0.0/10` is shared CGNAT, not an overlay we route on. Do not
 //! convert those addresses into Ollama URLs.
@@ -8,76 +9,138 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 const DEFAULT_PUBLIC_SHARE_SUFFIX: &str = ".zrok.io";
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum HostClass {
+    Loopback,
+    Private,
+    LinkLocal,
+    UniqueLocal,
+    Hostname,
+    BlockedPublic,
+}
+
 fn url_host(url: &str) -> Option<String> {
     let parsed = url::Url::parse(url.trim()).ok()?;
     parsed.host_str().map(str::to_string)
 }
 
+fn strip_brackets(host: &str) -> &str {
+    host.trim().trim_matches(['[', ']'])
+}
+
+fn parse_ip(host: &str) -> Option<IpAddr> {
+    let host = strip_brackets(host);
+    host.parse::<IpAddr>()
+        .ok()
+        .or_else(|| host.parse::<Ipv4Addr>().ok().map(IpAddr::V4))
+        .or_else(|| host.parse::<Ipv6Addr>().ok().map(IpAddr::V6))
+}
+
+/// Unmap IPv4-mapped and IPv4-compatible v6 **after** treating `::1` as loopback.
+///
+/// `Ipv6Addr::to_ipv4()` would turn `::1` into `0.0.0.1`, which is not loopback.
+fn canonical_ip(addr: IpAddr) -> IpAddr {
+    match addr {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                return IpAddr::V6(v6);
+            }
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
+            if let Some(v4) = v6.to_ipv4() {
+                return IpAddr::V4(v4);
+            }
+            IpAddr::V6(v6)
+        }
+    }
+}
+
+fn classify_ip(addr: IpAddr) -> HostClass {
+    match canonical_ip(addr) {
+        IpAddr::V4(v4) => {
+            if v4.is_loopback() {
+                HostClass::Loopback
+            } else if v4.is_private() {
+                HostClass::Private
+            } else if v4.is_link_local() {
+                HostClass::LinkLocal
+            } else {
+                HostClass::BlockedPublic
+            }
+        }
+        IpAddr::V6(v6) => {
+            if v6.is_loopback() {
+                HostClass::Loopback
+            } else if v6.is_unique_local() {
+                HostClass::UniqueLocal
+            } else if v6.is_unicast_link_local() {
+                HostClass::LinkLocal
+            } else {
+                HostClass::BlockedPublic
+            }
+        }
+    }
+}
+
+fn classify_host(host: &str) -> HostClass {
+    let host = strip_brackets(host);
+    if host.eq_ignore_ascii_case("localhost") {
+        return HostClass::Loopback;
+    }
+    match parse_ip(host) {
+        Some(addr) => classify_ip(addr),
+        None => HostClass::Hostname,
+    }
+}
+
+fn classify_url_host(url: &str) -> Option<HostClass> {
+    url_host(url).map(|host| classify_host(&host))
+}
+
 /// True when `url`'s host is loopback (`127.0.0.1`, `::1`, `localhost`).
 pub fn url_host_is_loopback(url: &str) -> bool {
-    let Some(host) = url_host(url) else {
-        return false;
-    };
-    host_is_loopback(&host)
+    classify_url_host(url) == Some(HostClass::Loopback)
 }
 
 fn host_is_loopback(host: &str) -> bool {
-    let host = host.trim().trim_matches(['[', ']']);
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    if let Ok(IpAddr::V4(addr)) = host.parse::<IpAddr>() {
-        return addr.is_loopback();
-    }
-    if let Ok(addr) = host.parse::<Ipv4Addr>() {
-        return addr.is_loopback();
-    }
-    if let Ok(addr) = host.parse::<Ipv6Addr>() {
-        return addr.is_loopback();
-    }
-    false
+    classify_host(host) == HostClass::Loopback
 }
 
-/// True when `url`'s host is RFC1918 private IPv4.
+/// True when `url`'s host is RFC1918 private IPv4 (including IPv4-mapped v6).
 pub fn url_host_is_rfc1918(url: &str) -> bool {
-    let Some(host) = url_host(url) else {
-        return false;
-    };
-    host.parse::<Ipv4Addr>().is_ok_and(|addr| addr.is_private())
+    classify_url_host(url) == Some(HostClass::Private)
 }
 
 /// True when `url`'s host is any IP address (v4 or v6).
 pub fn url_host_is_ip(url: &str) -> bool {
     url_host(url)
-        .map(|host| host.parse::<IpAddr>().is_ok())
+        .map(|host| parse_ip(&host).is_some())
         .unwrap_or(false)
 }
 
+/// True when `url`'s host is a blocked public IP: globally routable v4/v6,
+/// CGNAT (`100.64/10`), unspecified (`0.0.0.0` / `::`), multicast, or
+/// documentation ranges. Loopback, RFC1918, link-local, ULA, and hostnames
+/// return false.
+pub fn url_host_is_public_ip(url: &str) -> bool {
+    classify_url_host(url) == Some(HostClass::BlockedPublic)
+}
+
+/// Alias of [`url_host_is_public_ip`] (historical name; IPv6 is included).
+pub fn url_host_is_public_ipv4(url: &str) -> bool {
+    url_host_is_public_ip(url)
+}
+
+#[cfg(test)]
 fn ipv4_is_cgnat(addr: Ipv4Addr) -> bool {
     let octets = addr.octets();
     octets[0] == 100 && (octets[1] & 0xC0) == 0x40
 }
 
-/// True when `url`'s host is globally-routable IPv4 **or** CGNAT (`100.64/10`).
-///
-/// Hostnames, loopback, and RFC1918 return false so `127.0.0.1` httpmock,
-/// `mock-cpu` compose, and LAN `10.x` stay probeable. `http://8.8.8.8:11434`
-/// and `http://100.64.0.1:11434` are `public_url_blocked`.
-pub fn url_host_is_public_ipv4(url: &str) -> bool {
-    let Some(host) = url_host(url) else {
-        return false;
-    };
-    let Ok(addr) = host.parse::<Ipv4Addr>() else {
-        return false;
-    };
-    if ipv4_is_cgnat(addr) {
-        return true;
-    }
-    ipv4_is_global(addr)
-}
-
-/// Python `IPv4Address.is_global` minus CGNAT (handled separately as blocked).
-fn ipv4_is_global(addr: Ipv4Addr) -> bool {
+#[cfg(test)]
+fn ipv4_is_global_for_proptest(addr: Ipv4Addr) -> bool {
     if addr.is_unspecified()
         || addr.is_loopback()
         || addr.is_private()
@@ -87,16 +150,13 @@ fn ipv4_is_global(addr: Ipv4Addr) -> bool {
     {
         return false;
     }
-    // 240.0.0.0/4 reserved
     if addr.octets()[0] >= 240 {
         return false;
     }
-    // IETF protocol assignments 192.0.0.0/24 except 192.0.0.9/10
     let oct = addr.octets();
     if oct[0] == 192 && oct[1] == 0 && oct[2] == 0 {
         return oct[3] == 9 || oct[3] == 10;
     }
-    // Documentation 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24
     if oct[0] == 192 && oct[1] == 0 && oct[2] == 2 {
         return false;
     }
@@ -106,7 +166,6 @@ fn ipv4_is_global(addr: Ipv4Addr) -> bool {
     if oct[0] == 203 && oct[1] == 0 && oct[2] == 113 {
         return false;
     }
-    // Benchmarking 198.18.0.0/15
     if oct[0] == 198 && (oct[1] == 18 || oct[1] == 19) {
         return false;
     }
@@ -144,7 +203,7 @@ fn host_matches_suffix(host: &str, suffix: &str) -> bool {
 }
 
 fn host_is_public_share(host: &str, extra_suffixes: &[String]) -> bool {
-    let host = host.trim().trim_matches(['[', ']']);
+    let host = strip_brackets(host);
     if host.is_empty() || host_is_loopback(host) {
         return false;
     }
@@ -167,24 +226,25 @@ pub fn share_id_looks_public(share_id: &str, extra_suffixes: &[String]) -> bool 
         return false;
     }
     if trimmed.contains("://") {
-        return url_host_is_public_share(trimmed, extra_suffixes)
-            || url_host_is_public_ipv4(trimmed);
+        return url_host_is_public_share(trimmed, extra_suffixes) || url_host_is_public_ip(trimmed);
     }
-    host_is_public_share(trimmed, extra_suffixes)
+    classify_host(trimmed) == HostClass::BlockedPublic
+        || host_is_public_share(trimmed, extra_suffixes)
 }
 
 /// Allowlisted health/admin reason when a routing URL must not be probed.
 pub fn routing_url_blocked_reason(url: &str, extra_suffixes: &[String]) -> Option<&'static str> {
-    if url_host_is_public_ipv4(url) || url_host_is_public_share(url, extra_suffixes) {
+    if url_host_is_public_ip(url) || url_host_is_public_share(url, extra_suffixes) {
         Some("public_url_blocked")
     } else {
         None
     }
 }
 
-/// Loopback, RFC1918, or a hostname that is not a public-share frontend.
+/// Loopback, RFC1918, link-local, ULA, or a hostname that is not a public-share frontend.
 ///
-/// Public IPv4 (including CGNAT) and `*.zrok.io` (plus extras) are not overlay URLs.
+/// Public IPs (including CGNAT and unspecified) and `*.zrok.io` (plus extras)
+/// are not overlay URLs.
 pub fn url_is_safe_overlay(url: &str) -> bool {
     url_is_safe_overlay_with_suffixes(url, &[])
 }
@@ -195,7 +255,7 @@ pub fn url_is_safe_overlay_with_suffixes(url: &str, extra_suffixes: &[String]) -
     if trimmed.is_empty() {
         return false;
     }
-    if url_host_is_public_ipv4(trimmed) {
+    if url_host_is_public_ip(trimmed) {
         return false;
     }
     if url_host_is_public_share(trimmed, extra_suffixes) {
@@ -210,17 +270,53 @@ mod tests {
 
     #[test]
     fn public_ipv4_blocks_global_and_cgnat_not_private() {
+        assert!(url_host_is_public_ip("http://8.8.8.8:11434"));
+        assert!(url_host_is_public_ip("http://1.1.1.1:11434"));
+        assert!(url_host_is_public_ip("http://100.64.0.1:11434"));
+        assert!(url_host_is_public_ip("http://100.127.255.255:11434"));
+        assert!(!url_host_is_public_ip("http://127.0.0.1:11434"));
+        assert!(!url_host_is_public_ip("http://10.0.0.5:11434"));
+        assert!(!url_host_is_public_ip("http://192.168.1.10:11434"));
+        assert!(!url_host_is_public_ip("http://mock-cpu:11434"));
+        assert!(!url_host_is_public_ip("http://host.docker.internal:11434"));
         assert!(url_host_is_public_ipv4("http://8.8.8.8:11434"));
-        assert!(url_host_is_public_ipv4("http://1.1.1.1:11434"));
-        assert!(url_host_is_public_ipv4("http://100.64.0.1:11434"));
-        assert!(url_host_is_public_ipv4("http://100.127.255.255:11434"));
-        assert!(!url_host_is_public_ipv4("http://127.0.0.1:11434"));
-        assert!(!url_host_is_public_ipv4("http://10.0.0.5:11434"));
-        assert!(!url_host_is_public_ipv4("http://192.168.1.10:11434"));
-        assert!(!url_host_is_public_ipv4("http://mock-cpu:11434"));
-        assert!(!url_host_is_public_ipv4(
-            "http://host.docker.internal:11434"
+    }
+
+    #[test]
+    fn public_ipv6_and_mapped_are_blocked() {
+        assert!(url_host_is_public_ip("http://[2606:4700:4700::1111]:11434"));
+        assert!(url_host_is_public_ip("http://[::ffff:8.8.8.8]:11434"));
+        assert!(url_host_is_public_ip("http://[::ffff:100.64.0.1]:11434"));
+        assert!(url_host_is_public_ip("http://[::8.8.8.8]:11434"));
+        assert!(url_is_safe_overlay("http://[::1]:11434"));
+        assert!(url_is_safe_overlay("http://[::ffff:127.0.0.1]:11434"));
+        assert!(url_is_safe_overlay("http://[::ffff:10.0.0.5]:11434"));
+        assert!(url_is_safe_overlay("http://[fd12:3456::1]:11434"));
+        assert!(url_is_safe_overlay("http://[fe80::1]:11434"));
+        assert!(!url_is_safe_overlay("http://[2606:4700:4700::1111]:11434"));
+        assert!(url_host_is_loopback("http://[::1]:11434"));
+        assert!(url_host_is_loopback("http://[::ffff:127.0.0.1]:11434"));
+        assert!(url_host_is_rfc1918("http://[::ffff:10.0.0.5]:11434"));
+        assert!(share_id_looks_public(
+            "http://[2606:4700:4700::1111]:11434",
+            &[]
         ));
+    }
+
+    #[test]
+    fn unspecified_addresses_are_blocked() {
+        assert!(url_host_is_public_ip("http://0.0.0.0:11434"));
+        assert!(url_host_is_public_ip("http://[::]:11434"));
+        assert!(!url_is_safe_overlay("http://0.0.0.0:11434"));
+        assert!(!url_is_safe_overlay("http://[::]:11434"));
+        assert_eq!(
+            routing_url_blocked_reason("http://0.0.0.0:11434", &[]),
+            Some("public_url_blocked")
+        );
+        assert_eq!(
+            routing_url_blocked_reason("http://[::]:11434", &[]),
+            Some("public_url_blocked")
+        );
     }
 
     #[test]
@@ -234,6 +330,7 @@ mod tests {
         assert!(!url_host_is_rfc1918("http://100.64.0.1:11434"));
         assert!(url_is_safe_overlay("http://127.0.0.1:41990"));
         assert!(url_is_safe_overlay("http://10.0.0.5:11434"));
+        assert!(url_is_safe_overlay("http://169.254.1.1:11434"));
         assert!(url_is_safe_overlay("http://mock-cpu:11434"));
         assert!(!url_is_safe_overlay("http://100.64.0.1:11434"));
         assert!(!url_is_safe_overlay("http://8.8.8.8:11434"));
@@ -244,6 +341,8 @@ mod tests {
     fn url_host_is_ip_classifies_addresses() {
         assert!(url_host_is_ip("http://8.8.8.8:11434"));
         assert!(url_host_is_ip("http://127.0.0.1:11434"));
+        assert!(url_host_is_ip("http://[::1]:11434"));
+        assert!(url_host_is_ip("http://[2606:4700:4700::1111]:11434"));
         assert!(!url_host_is_ip("http://host.docker.internal:11434"));
     }
 
@@ -290,6 +389,10 @@ mod tests {
             Some("public_url_blocked")
         );
         assert_eq!(
+            routing_url_blocked_reason("http://[2606:4700:4700::1111]:11434", &extras),
+            Some("public_url_blocked")
+        );
+        assert_eq!(
             routing_url_blocked_reason("http://127.0.0.1:11434", &extras),
             None
         );
@@ -297,5 +400,57 @@ mod tests {
             routing_url_blocked_reason("http://10.0.0.5:11434", &extras),
             None
         );
+        assert_eq!(
+            routing_url_blocked_reason("http://[::1]:11434", &extras),
+            None
+        );
+    }
+
+    #[test]
+    fn documentation_ipv6_is_blocked() {
+        assert!(url_host_is_public_ip("http://[2001:db8::1]:11434"));
+        assert!(!url_is_safe_overlay("http://[2001:db8::1]:11434"));
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn v4_allowlist_is_loopback_private_or_link_local(octets in any::<[u8; 4]>()) {
+            let addr = Ipv4Addr::from(octets);
+            let url = format!("http://{addr}:11434");
+            let allowed = addr.is_loopback() || addr.is_private() || addr.is_link_local();
+            if allowed {
+                prop_assert!(!url_host_is_public_ip(&url), "{url}");
+                prop_assert!(url_is_safe_overlay(&url), "{url}");
+            } else {
+                prop_assert!(url_host_is_public_ip(&url), "{url}");
+                prop_assert!(!url_is_safe_overlay(&url), "{url}");
+            }
+            if ipv4_is_global_for_proptest(addr) || ipv4_is_cgnat(addr) {
+                prop_assert!(url_host_is_public_ip(&url), "{url}");
+            }
+        }
+
+        #[test]
+        fn v6_allowlist_after_canonical_unmap(segments in any::<[u16; 8]>()) {
+            let addr = Ipv6Addr::from(segments);
+            let url = format!("http://[{addr}]:11434");
+            match classify_ip(IpAddr::V6(addr)) {
+                HostClass::Loopback | HostClass::Private | HostClass::LinkLocal | HostClass::UniqueLocal => {
+                    prop_assert!(!url_host_is_public_ip(&url), "{url}");
+                    prop_assert!(url_is_safe_overlay(&url), "{url}");
+                }
+                HostClass::BlockedPublic => {
+                    prop_assert!(url_host_is_public_ip(&url), "{url}");
+                    prop_assert!(!url_is_safe_overlay(&url), "{url}");
+                }
+                HostClass::Hostname => prop_assert!(false, "IP classified as hostname: {url}"),
+            }
+        }
     }
 }

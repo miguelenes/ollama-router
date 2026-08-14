@@ -18,5 +18,6 @@ pub use state::{
 };
 pub use url_policy::{
     routing_url_blocked_reason, share_id_looks_public, url_host_is_ip, url_host_is_loopback,
-    url_host_is_public_ipv4, url_host_is_public_share, url_host_is_rfc1918, url_is_safe_overlay,
+    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, url_host_is_rfc1918,
+    url_is_safe_overlay,
 };

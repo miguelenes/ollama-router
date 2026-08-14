@@ -18,6 +18,26 @@ pub struct StartupScriptParams<'a> {
     pub tar_arm64: &'a str,
 }
 
+impl std::fmt::Debug for StartupScriptParams<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StartupScriptParams")
+            .field("enroll_url", &self.enroll_url)
+            .field(
+                "zrok_enable_token",
+                &self.zrok_enable_token.map(|_| "REDACTED"),
+            )
+            .field("zrok_api_endpoint", &self.zrok_api_endpoint)
+            .field("enroll_token", &self.enroll_token.map(|_| "REDACTED"))
+            .field("enroll_token_env", &self.enroll_token_env)
+            .field("package_url", &self.package_url)
+            .field("deb_amd64", &self.deb_amd64)
+            .field("deb_arm64", &self.deb_arm64)
+            .field("tar_amd64", &self.tar_amd64)
+            .field("tar_arm64", &self.tar_arm64)
+            .finish()
+    }
+}
+
 pub fn github_asset_url(repo: &str, version: &str, filename: &str) -> String {
     let ver = version.trim().trim_start_matches('v');
     format!("https://github.com/{repo}/releases/download/v{ver}/{filename}")
@@ -168,6 +188,14 @@ mod tests {
         assert!(script.contains("ZROK_API_ENDPOINT=http://127.0.0.1:18080"));
         assert!(script.contains("api_endpoint:"));
         assert!(!script.contains("echo \"$ZROK_API"));
+    }
+
+    #[test]
+    fn startup_params_debug_redacts_tokens() {
+        let dbg = format!("{:?}", sample());
+        assert!(!dbg.contains("enable-secret"), "{dbg}");
+        assert!(!dbg.contains("admin-secret"), "{dbg}");
+        assert!(dbg.contains("REDACTED"), "{dbg}");
     }
 
     #[test]

@@ -386,8 +386,13 @@ async fn forward_once(
     } else {
         (None, None)
     };
-    if client_forward {
-        state.registry.inflight_inc(&node.id);
+    if client_forward && !state.registry.inflight_inc(&node.id) {
+        state.registry.release_vram(&node.id, vram_id);
+        state.registry.release_ram(&node.id, ram_id);
+        return Err(ForwardError::Retryable {
+            reason: "draining",
+            message: "node is draining".into(),
+        });
     }
     let guard = InflightGuard {
         registry: Arc::clone(&state.registry),

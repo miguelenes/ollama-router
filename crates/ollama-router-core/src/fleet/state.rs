@@ -65,7 +65,7 @@ pub struct EnrollPersist<'a> {
 /// Fields written by [`FleetState::persist_verda_node`].
 #[derive(Clone, Debug)]
 pub struct VerdaNodePersist<'a> {
-    /// Ollama base URL (overlay/loopback preferred; public IPv4 will not clobber).
+    /// Ollama base URL (overlay/loopback preferred; public IPs will not clobber).
     pub url: &'a str,
     /// Cloud instance id.
     pub instance_id: &'a VerdaInstanceId,

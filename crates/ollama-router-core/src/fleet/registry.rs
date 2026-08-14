@@ -598,15 +598,15 @@ impl Registry {
 
     /// Set the Ollama routing URL after enroll.
     ///
-    /// Refuses public IPv4 and public-share hostnames. Does not count as inflight.
+    /// Refuses public IPs and public-share hostnames. Does not count as inflight.
     /// Marks the node unhealthy so health re-probes.
     pub fn set_node_url(&self, id: &NodeId, url: &str) -> Result<(), String> {
         let trimmed = url.trim().trim_end_matches('/');
         if trimmed.is_empty() {
             return Err("empty url".into());
         }
-        if crate::fleet::url_policy::url_host_is_public_ipv4(trimmed) {
-            return Err("refusing public IPv4 routing URL".into());
+        if crate::fleet::url_policy::url_host_is_public_ip(trimmed) {
+            return Err("refusing public IP routing URL".into());
         }
         if crate::fleet::url_policy::url_host_is_public_share(trimmed, &self.public_share_suffixes)
         {
@@ -629,8 +629,8 @@ impl Registry {
         if trimmed.is_empty() {
             return Err("empty capacity_url".into());
         }
-        if crate::fleet::url_policy::url_host_is_public_ipv4(trimmed) {
-            return Err("refusing public IPv4 capacity URL".into());
+        if crate::fleet::url_policy::url_host_is_public_ip(trimmed) {
+            return Err("refusing public IP capacity URL".into());
         }
         if crate::fleet::url_policy::url_host_is_public_share(trimmed, &self.public_share_suffixes)
         {
@@ -814,12 +814,20 @@ impl Registry {
     }
 
     /// Admit a client generate/chat/embed forward. Writes `last_client_request_at`.
-    pub fn inflight_inc(&self, id: &NodeId) {
+    ///
+    /// Returns `false` when the node is missing or a draining Verda node (caller
+    /// should retry another node before first byte). Permanent draining still
+    /// admits inflight so in-flight inventory removes can drain to zero.
+    pub fn inflight_inc(&self, id: &NodeId) -> bool {
         let Some(node) = self.node(id) else {
-            return;
+            return false;
         };
+        if node.origin == NodeOrigin::Verda && node.draining.load(Ordering::Acquire) {
+            return false;
+        }
         saturating_fetch_add(&node.inflight);
         node.last_client_ms.store(now_ms(), Ordering::Relaxed);
+        true
     }
 
     /// Release one inflight slot. Draining permanent nodes with zero inflight are dropped.
@@ -1118,6 +1126,19 @@ impl Registry {
         }
     }
 
+    /// Mark a Verda node draining so ranking stops selecting it. No-op for
+    /// permanent hosts (`begin_remove_permanent` owns that path).
+    pub fn set_draining(&self, id: &NodeId, draining: bool) -> bool {
+        let Some(node) = self.node(id) else {
+            return false;
+        };
+        if node.origin != NodeOrigin::Verda {
+            return false;
+        }
+        node.draining.store(draining, Ordering::Release);
+        true
+    }
+
     /// Drop permanent nodes that are draining with zero inflight.
     ///
     /// Completion paths already remove the decremented node in O(1). The health
@@ -1300,6 +1321,27 @@ mod tests {
     }
 
     #[test]
+    fn inflight_inc_refuses_draining_verda_but_admits_permanent() {
+        let config = RouterConfig {
+            nodes: vec![node("desk", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.upsert_verda(node("spot", 24.0, 1));
+        let spot = nid("spot");
+        let desk = nid("desk");
+        assert!(registry.set_draining(&spot, true));
+        assert!(!registry.set_draining(&desk, true));
+        assert!(!registry.inflight_inc(&spot));
+        assert_eq!(registry.inflight(&spot), 0);
+        assert!(registry.inflight_inc(&desk));
+        assert_eq!(registry.inflight(&desk), 1);
+        assert!(registry.set_draining(&spot, false));
+        assert!(registry.inflight_inc(&spot));
+        assert_eq!(registry.inflight(&spot), 1);
+    }
+
+    #[test]
     fn apply_permanent_inventory_adds_and_updates_without_resetting_inflight() {
         let config = RouterConfig {
             nodes: vec![node("a", 8.0, 1)],
@@ -1434,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn set_node_url_refuses_public_ipv4() {
+    fn set_node_url_refuses_public_ip() {
         let config = RouterConfig {
             nodes: vec![node("a", 8.0, 1)],
             ..Default::default()
@@ -1444,7 +1486,7 @@ mod tests {
         let err = registry
             .set_node_url(&id, "http://8.8.8.8:11434")
             .expect_err("public");
-        assert!(err.contains("public IPv4"));
+        assert!(err.contains("public IP"));
         assert_eq!(
             registry.get(&id).unwrap().url.as_deref(),
             Some("http://a:11434")
@@ -1452,7 +1494,19 @@ mod tests {
         let err = registry
             .set_node_url(&id, "http://100.64.0.9:11434")
             .expect_err("cgnat");
-        assert!(err.contains("public IPv4"));
+        assert!(err.contains("public IP"));
+        let err = registry
+            .set_node_url(&id, "http://[2606:4700:4700::1111]:11434")
+            .expect_err("public v6");
+        assert!(err.contains("public IP"));
+        let err = registry
+            .set_node_url(&id, "http://[::ffff:8.8.8.8]:11434")
+            .expect_err("mapped");
+        assert!(err.contains("public IP"));
+        let err = registry
+            .set_node_url(&id, "http://0.0.0.0:11434")
+            .expect_err("unspecified");
+        assert!(err.contains("public IP"));
         registry
             .set_node_url(&id, "http://10.0.0.9:11434")
             .expect("rfc1918");
@@ -1461,6 +1515,9 @@ mod tests {
             Some("http://10.0.0.9:11434")
         );
         assert!(!registry.get(&id).unwrap().healthy);
+        registry
+            .set_node_url(&id, "http://[::1]:11434")
+            .expect("v6 loopback");
     }
 
     #[test]

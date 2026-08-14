@@ -130,6 +130,8 @@ verda:
   idle_scale_down_enabled: true
   idle_timeout_seconds: 900
   idle_grace_after_create_seconds: 300
+  orphan_reclaim_enabled: true
+  orphan_reclaim_grace_seconds: 1800
   ensure_on_startup: false
   destroy_on_shutdown: true
   router_id_env: OLLAMA_ROUTER_ID
