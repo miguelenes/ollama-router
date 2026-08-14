@@ -1708,7 +1708,7 @@
       ],
       "title": "public_url_blocked",
       "type": "timeseries",
-      "description": "Public :11434 is never healthy (Tailscale-only cloud URLs). Also incremented from the health loop."
+      "description": "Public :11434 is never healthy (tunnel/loopback or RFC1918 cloud URLs). Also incremented from the health loop."
     },
     {
       "collapsed": false,

@@ -2,13 +2,12 @@
 
 use std::net::IpAddr;
 use std::path::Path;
-use std::time::Duration;
 
 use tokio::process::Command;
 
 use super::{
-    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
-    SUPERVISOR_LAUNCHD,
+    install_self_binary, tunnel, write_bytes_idempotent, write_token_file, ConvergeState,
+    SetupContext, SUPERVISOR_LAUNCHD,
 };
 use crate::collect::{ollama_tags_ok, ollama_version};
 
@@ -45,15 +44,31 @@ pub async fn converge(
     write_bytes_idempotent(&plist_path, agent_plist().as_bytes())?;
     state.unit_written = true;
     state.supervisor = Some(SUPERVISOR_LAUNCHD.into());
+    let tunnel_plist_path = ctx
+        .paths
+        .unit_dir
+        .join("com.ollama.node-agent.tunnel.plist");
+    if ctx.config.tunnel.enable {
+        write_bytes_idempotent(&tunnel_plist_path, tunnel::tunnel_plist().as_bytes())?;
+        state.tunnel_unit_written = true;
+    }
     tracing::info!(
         agent_ip = %agent_ip,
         port = ctx.config.port,
         "LaunchDaemon bind comes from config.yaml / OLLAMA_NODE_AGENT_*"
     );
 
+    if ctx.dry_commands && ctx.config.tunnel.enable {
+        tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, true).await?;
+    }
+
     if !ctx.dry_commands {
         let _ = Command::new("launchctl")
             .args(["bootout", "system/com.ollama.node-agent"])
+            .status()
+            .await;
+        let _ = Command::new("launchctl")
+            .args(["bootout", "system/com.ollama.node-agent.tunnel"])
             .status()
             .await;
         install_self_binary(&ctx.paths.bin_dir.join("ollama-node-agent"))?;
@@ -65,12 +80,32 @@ pub async fn converge(
                 "ollama not listening on {ollama_bind}; start Ollama.app or `brew services` then re-run setup"
             );
         }
+        if ctx.config.tunnel.enable {
+            if running {
+                tunnel::wait_ollama_loopback_tags().await?;
+            }
+            tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, false)
+                .await?;
+        }
         let status = Command::new("launchctl")
             .args(["bootstrap", "system", plist_path.to_str().unwrap_or("")])
             .status()
             .await?;
         if !status.success() {
             tracing::warn!("launchctl bootstrap failed; LaunchDaemon may need root");
+        }
+        if ctx.config.tunnel.enable {
+            let status = Command::new("launchctl")
+                .args([
+                    "bootstrap",
+                    "system",
+                    tunnel_plist_path.to_str().unwrap_or(""),
+                ])
+                .status()
+                .await?;
+            if !status.success() {
+                tracing::warn!("launchctl bootstrap tunnel failed; LaunchDaemon may need root");
+            }
         }
     }
 
@@ -144,5 +179,9 @@ mod tests {
         assert!(p.contains("<key>KeepAlive</key>"));
         assert!(p.contains("<key>RunAtLoad</key>"));
         assert!(!p.contains("OLLAMA_NODE_AGENT_HOST"));
+        let t = crate::setup::tunnel_plist();
+        assert!(t.contains("com.ollama.node-agent.tunnel"));
+        assert!(t.contains("tunnel"));
+        assert!(t.contains("HOME"));
     }
 }

@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Verda spot lifecycle and fleet-sum cost. Never destroy fleet.yaml hosts; Verda teardown is delete_permanently (failed destroy retains FleetState ownership). Idle timer is last_client_request_at from inflight_inc on generate/chat/embed only (health, /api/ps, capacity, admin, warm-keeper do not count). Capacity miss is 503 + Retry-After + async create_additional (not ensure). Cloud Ollama URLs are Tailscale-only; public :11434 is public_url_blocked and never healthy. auto_scale min/max instance knobs are config, not Prometheus series — do not invent gauges. Per-node price/location/instance type are not exported. No model-name labels. Router /metrics only; do not add a production :11436 scrape.",
+  "description": "Verda spot lifecycle and fleet-sum cost. Never destroy fleet.yaml hosts; Verda teardown is delete_permanently (failed destroy retains FleetState ownership). Idle timer is last_client_request_at from inflight_inc on generate/chat/embed only (health, /api/ps, capacity, admin, warm-keeper do not count). Capacity miss is 503 + Retry-After + async create_additional (not ensure). Cloud Ollama URLs are tunnel/loopback or RFC1918; public :11434 is public_url_blocked and never healthy. auto_scale min/max instance knobs are config, not Prometheus series — do not invent gauges. Per-node price/location/instance type are not exported. No model-name labels. Router /metrics only; do not add a production :11436 scrape.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -364,7 +364,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "no_healthy_nodes, no_nodes_configured, all_nodes_saturated, and insufficient_capacity trigger coalesced async create_additional (not ensure); the client gets 503 + Retry-After. public_url_blocked is a Tailscale-only invariant: public :11434 is never healthy and does not demand scale-up. Idle activity is generate/chat/embed inflight_inc only.",
+      "description": "no_healthy_nodes, no_nodes_configured, all_nodes_saturated, and insufficient_capacity trigger coalesced async create_additional (not ensure); the client gets 503 + Retry-After. public_url_blocked is a tunnel/loopback invariant: public :11434 is never healthy and does not demand scale-up. Idle activity is generate/chat/embed inflight_inc only.",
       "fieldConfig": {
         "defaults": {
           "color": {

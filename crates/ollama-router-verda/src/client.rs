@@ -10,7 +10,9 @@ use tokio::sync::Mutex;
 
 use ollama_router_core::config::{OsEnv, VerdaConfig};
 
-use crate::types::{Image, Instance, InstanceAvailability, InstanceType, SshKey, TokenResponse};
+use crate::types::{
+    Image, Instance, InstanceAvailability, InstanceType, SshKey, StartupScript, TokenResponse,
+};
 
 const TOKEN_PATH: &str = "/v1/oauth2/token";
 const TOKEN_LEEWAY: Duration = Duration::from_secs(30);
@@ -320,6 +322,34 @@ impl VerdaClient {
             .map_err(|err| VerdaError::Message(format!("json: {err}")))
     }
 
+    pub async fn list_startup_scripts(&self) -> Result<Vec<StartupScript>, VerdaError> {
+        self.get_list("/v1/scripts")
+            .await?
+            .into_iter()
+            .map(|v| serde_json::from_value(v).map_err(|e| VerdaError::Message(e.to_string())))
+            .collect()
+    }
+
+    pub async fn create_startup_script(
+        &self,
+        name: &str,
+        script: &str,
+    ) -> Result<StartupScript, VerdaError> {
+        let resp = self
+            .request(
+                reqwest::Method::POST,
+                "/v1/scripts",
+                Some(serde_json::json!({"name": name, "script": script})),
+                Some(Duration::from_secs(60)),
+            )
+            .await?;
+        let text = resp
+            .text()
+            .await
+            .map_err(|err| VerdaError::Message(format!("body: {err}")))?;
+        parse_startup_script_create(text, name)
+    }
+
     pub async fn list_instances(&self) -> Result<Vec<Instance>, VerdaError> {
         self.get_list("/v1/instances")
             .await?
@@ -421,5 +451,30 @@ fn as_list(data: Value) -> Vec<Value> {
             Vec::new()
         }
         _ => Vec::new(),
+    }
+}
+
+fn parse_startup_script_create(text: String, name: &str) -> Result<StartupScript, VerdaError> {
+    let trimmed = text.trim();
+    if trimmed.starts_with('{') {
+        serde_json::from_str(trimmed).map_err(|e| VerdaError::Message(e.to_string()))
+    } else if trimmed.starts_with('[') {
+        let items: Vec<StartupScript> =
+            serde_json::from_str(trimmed).map_err(|e| VerdaError::Message(e.to_string()))?;
+        items.into_iter().next().ok_or_else(|| {
+            VerdaError::Message("Verda create startup script returned an empty list".into())
+        })
+    } else {
+        let id = trimmed.trim_matches('"').to_string();
+        if id.is_empty() {
+            return Err(VerdaError::Message(
+                "Verda create startup script returned no id".into(),
+            ));
+        }
+        Ok(StartupScript {
+            id: Some(id),
+            name: Some(name.to_string()),
+            ..StartupScript::default()
+        })
     }
 }

@@ -74,12 +74,12 @@ pub async fn ensure_ssh_key_id(
     client: &VerdaClient,
     config: &VerdaConfig,
     key_file: Option<&str>,
-) -> Result<String, VerdaError> {
+) -> Result<Option<String>, VerdaError> {
     let keys = client.list_ssh_keys().await?;
     if let Some(want) = config.ssh_key_id.as_deref() {
         if keys.iter().any(|k| k.key_id() == Some(want)) {
             tracing::info!(ssh_key_id = want, "verda_ssh_key_configured");
-            return Ok(want.to_string());
+            return Ok(Some(want.to_string()));
         }
         tracing::warn!(ssh_key_id = want, "verda_ssh_key_id_missing");
     }
@@ -89,16 +89,19 @@ pub async fn ensure_ssh_key_id(
     {
         if let Some(id) = found.key_id() {
             tracing::info!(name = %config.ssh_key_name, "verda_ssh_key_by_name");
-            return Ok(id.to_string());
+            return Ok(Some(id.to_string()));
         }
     }
-    let key_text = read_public_key_text(config, key_file)?;
+    let Ok(key_text) = read_public_key_text(config, key_file) else {
+        tracing::info!("verda_create_omitting_ssh_key_ids");
+        return Ok(None);
+    };
     if let Some(local_fp) = fingerprint_public_key(&key_text) {
         for key in &keys {
             if normalize_fingerprint(key.fingerprint.as_deref()) == Some(local_fp.clone()) {
                 if let Some(id) = key.key_id() {
                     tracing::info!("verda_ssh_key_by_fingerprint");
-                    return Ok(id.to_string());
+                    return Ok(Some(id.to_string()));
                 }
             }
         }
@@ -106,9 +109,12 @@ pub async fn ensure_ssh_key_id(
     let created = client
         .create_ssh_key(&config.ssh_key_name, &key_text)
         .await?;
-    created.key_id().map(str::to_string).ok_or_else(|| {
-        VerdaError::Message("Verda accepted the SSH key upload but returned no id".into())
-    })
+    created
+        .key_id()
+        .map(|id| Some(id.to_string()))
+        .ok_or_else(|| {
+            VerdaError::Message("Verda accepted the SSH key upload but returned no id".into())
+        })
 }
 
 pub fn companion_private_key(path: &Path) -> PathBuf {

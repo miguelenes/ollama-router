@@ -1,5 +1,12 @@
 # Default agent config (component pkg). This package does not install Ollama;
-# run `sudo ollama-node-agent setup` to brew-or-fail Ollama. pkg upgrades
-# replace this yaml (pkgbuild has no conffile/NeverOverwrite).
-listen: tailscale
+# run `sudo ollama-node-agent setup` to brew-or-fail Ollama and start the zrok
+# sidecar. pkg upgrades replace this yaml (pkgbuild has no conffile/NeverOverwrite).
+# Enable: ZROK_API_ENDPOINT + ZROK_ENABLE_TOKEN, then sudo -E ollama-node-agent setup.
+# Not a VPN. Do not put tokens in this file.
+listen: loopback
 port: 11436
+ollama:
+  listen: loopback
+tunnel:
+  enable: true
+  zrok_bin: zrok

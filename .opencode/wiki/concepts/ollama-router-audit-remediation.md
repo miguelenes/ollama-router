@@ -5,7 +5,7 @@ sourceRefs:
   - crates/ollama-router-core
   - crates/ollama-router/src/proxy
   - crates/ollama-router-verda
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-14
 ---
 
 # Ollama router audit remediation
@@ -29,8 +29,9 @@ Preserve these five remediations in the Rust rewrite:
 5. **Restart-safe model operations.** Pull/delete metadata and dedupe state
    persist in SQLite; incomplete work reconciles from live `/api/tags` on startup.
 
-These preserve env-first fleet config, Tailscale-only Verda routing, and
-router-owned idle teardown. Related: [[concepts/ollama-router-product]],
+These preserve env-first fleet config, tunnel/loopback-only Verda routing
+(self-hosted zrok private share), and router-owned idle teardown. Related:
+[[concepts/ollama-router-product]],
 [[concepts/ollama-router-idle-scale-down]],
 [[concepts/ollama-router-durable-model-operations]],
 [[concepts/ollama-router-phase-3-retry-and-memory-safety]].

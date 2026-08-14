@@ -41,6 +41,8 @@ strip "$root/usr/local/bin/ollama-node-agent"
 chmod 755 "$root/usr/local/bin/ollama-node-agent"
 
 cp "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"
+cp "$SCRIPT_DIR/com.ollama.node-agent.tunnel.plist" \
+  "$root/Library/LaunchDaemons/com.ollama.node-agent.tunnel.plist"
 if ! cmp -s "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"; then
   echo "staged plist drifted from $CANONICAL_PLIST" >&2
   exit 1

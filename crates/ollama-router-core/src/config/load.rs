@@ -6,7 +6,7 @@ use serde_yaml::Value;
 
 use crate::fleet::file::{fleet_path_from_env, load_fleet_nodes};
 use crate::fleet::state::{FleetState, DEFAULT_STATE_PATH};
-use crate::fleet::tailscale::{url_host_is_ip, url_host_is_tailscale};
+use crate::fleet::url_policy::url_host_is_public_ipv4;
 
 use super::env_source::{EnvSource, OsEnv};
 use super::error::ConfigError;
@@ -81,15 +81,27 @@ pub fn load_config_from(
     Ok(config)
 }
 
-/// Apply FleetState Tailscale URLs onto permanent nodes (public IPv4 replaced).
+/// Apply FleetState routing URLs onto permanent nodes (public IPv4 replaced).
+///
+/// zrok enroll loopback URLs hydrate when fleet.yaml has a public IPv4 (including
+/// CGNAT). Loopback, RFC1918, and LAN hostnames stay as written.
 pub fn hydrate_node_urls(nodes: &mut [NodeConfig], state: &FleetState) -> Result<(), ConfigError> {
     for node in nodes {
         let persisted = state.hydrate_url(&node.id)?;
         if let Some(persisted) = persisted {
             match node.url.as_deref() {
                 None => node.url = Some(persisted),
-                Some(existing) if !url_host_is_tailscale(existing) && url_host_is_ip(existing) => {
+                Some(existing) if url_host_is_public_ipv4(existing) => {
                     node.url = Some(persisted);
+                }
+                Some(_) => {}
+            }
+        }
+        if let Some(cap) = state.hydrate_capacity_url(&node.id)? {
+            match node.capacity_url.as_deref() {
+                None => node.capacity_url = Some(cap),
+                Some(existing) if url_host_is_public_ipv4(existing) => {
+                    node.capacity_url = Some(cap);
                 }
                 Some(_) => {}
             }
@@ -363,6 +375,24 @@ ready_requires_embedding_model: true
     }
 
     #[test]
+    fn env_zrok_tunnel_knobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert(
+            "OLLAMA_ROUTER_ZROK_API_ENDPOINT".into(),
+            "http://127.0.0.1:18080".into(),
+        );
+        env.insert(
+            "OLLAMA_ROUTER_ZROK_ENABLE_TOKEN_ENV".into(),
+            "MY_ZROK_TOKEN".into(),
+        );
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(config.tunnel.api_endpoint(), Some("http://127.0.0.1:18080"));
+        assert_eq!(config.tunnel.enable_token_env, "MY_ZROK_TOKEN");
+        assert_eq!(config.tunnel.access_bind, "127.0.0.1");
+    }
+
+    #[test]
     fn verda_vram_bounds_rejected() {
         assert!(parse_yaml("verda:\n  max_vram_gb: -1\n").is_err());
         assert!(parse_yaml("verda:\n  min_vram_gb: 48\n  max_vram_gb: 24\n").is_err());
@@ -387,10 +417,9 @@ ready_requires_embedding_model: true
     }
 
     #[test]
-    fn ssh_password_literal_rejected() {
-        let err =
-            parse_yaml("provision_defaults:\n  ts_authkey_env: tskey-auth-literal\n").unwrap_err();
-        assert!(err.to_string().contains("ts_authkey_env"));
+    fn env_name_literal_rejected() {
+        let err = parse_yaml("verda:\n  client_id_env: not-a-valid-env\n").unwrap_err();
+        assert!(err.to_string().contains("client_id_env"));
     }
 
     #[test]
@@ -405,17 +434,26 @@ ready_requires_embedding_model: true
         assert_eq!(tunables.verda.min_vram_gb, 8.0);
         assert_eq!(tunables.verda.max_vram_gb, Some(80.0));
         assert_eq!(tunables.verda.ssh_key_name, "ollama-router");
+        assert_eq!(tunables.tunnel.zrok_bin, "zrok");
+        assert!(tunables
+            .tunnel
+            .public_share_suffixes
+            .iter()
+            .any(|s| s.contains("zrok.io")));
+        assert!(tunables.tunnel.api_endpoint.trim().is_empty());
+        assert_eq!(tunables.tunnel.enable_token_env, "ZROK_ENABLE_TOKEN");
+        assert_eq!(tunables.tunnel.access_bind, "127.0.0.1");
     }
 
     #[test]
     fn overlay_deep_merge_keeps_nested_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let overlay = dir.path().join("overlay.yaml");
-        fs::write(&overlay, "provision_defaults:\n  auto: false\n").unwrap();
+        fs::write(&overlay, "verda:\n  enabled: true\n").unwrap();
         let env = env_with_state(&dir);
         let config = load_config_from(Some(&overlay), &env).unwrap();
-        assert!(!config.provision_defaults.auto);
-        assert!(config.provision_defaults.ts_ephemeral);
+        assert!(config.verda.enabled);
+        assert_eq!(config.verda.min_vram_gb, 8.0);
     }
 
     #[test]
@@ -455,7 +493,7 @@ ready_requires_embedding_model: true
         let config = load_config_from(Some(&missing), &env_with_state(&dir)).unwrap();
         assert!(config.nodes.is_empty());
         assert_eq!(config.policy.default_max_inflight, None);
-        assert!(config.provision_defaults.ts_ephemeral);
+        assert!(!config.verda.enabled);
         assert!(config.fleet_missing_is_error);
         let created = dir.path().join("fleet-state.json");
         assert!(
@@ -477,7 +515,7 @@ ready_requires_embedding_model: true
     }
 
     #[test]
-    fn hydrate_public_ipv4_replaced_tailscale_and_hostname_kept() {
+    fn hydrate_public_ipv4_replaced_overlay_and_hostname_kept() {
         let dir = tempfile::tempdir().unwrap();
         let mut env = env_with_fleet(
             &dir,
@@ -485,24 +523,24 @@ ready_requires_embedding_model: true
         );
         let state = FleetState::new(env.get(ENV_STATE).unwrap());
         state
-            .persist_url("host-01", "http://100.64.0.1:11434", Some("100.64.0.1"))
+            .persist_url("host-01", "http://127.0.0.1:41990")
             .unwrap();
 
         let config = load_config_from(None, &env).unwrap();
         assert_eq!(
             config.nodes[0].url.as_deref(),
-            Some("http://100.64.0.1:11434")
+            Some("http://127.0.0.1:41990")
         );
 
         let fleet = write_fleet(
             &dir,
-            "version: 1\nnodes:\n  - id: host-01\n    url: http://100.64.0.9:11434\n",
+            "version: 1\nnodes:\n  - id: host-01\n    url: http://10.0.0.9:11434\n",
         );
         env.insert("OLLAMA_ROUTER_FLEET".into(), fleet.display().to_string());
         let config = load_config_from(None, &env).unwrap();
         assert_eq!(
             config.nodes[0].url.as_deref(),
-            Some("http://100.64.0.9:11434")
+            Some("http://10.0.0.9:11434")
         );
 
         let fleet = write_fleet(
@@ -514,6 +552,36 @@ ready_requires_embedding_model: true
         assert_eq!(
             config.nodes[0].url.as_deref(),
             Some("http://host.docker.internal:11434")
+        );
+    }
+
+    #[test]
+    fn hydrate_zrok_loopback_onto_public_ipv4_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = env_with_fleet(
+            &dir,
+            "version: 1\nnodes:\n  - id: host-01\n    url: http://8.8.8.8:11434\n",
+        );
+        let state = FleetState::new(env.get(ENV_STATE).unwrap());
+        state
+            .persist_enroll(
+                "host-01",
+                crate::fleet::state::EnrollPersist {
+                    url: "http://127.0.0.1:41990",
+                    capacity_url: "http://127.0.0.1:41991",
+                    ollama_share_id: "share-ollama",
+                    agent_share_id: "share-agent",
+                },
+            )
+            .unwrap();
+        let config = load_config_from(None, &env).unwrap();
+        assert_eq!(
+            config.nodes[0].url.as_deref(),
+            Some("http://127.0.0.1:41990")
+        );
+        assert_eq!(
+            config.nodes[0].capacity_url.as_deref(),
+            Some("http://127.0.0.1:41991")
         );
     }
 

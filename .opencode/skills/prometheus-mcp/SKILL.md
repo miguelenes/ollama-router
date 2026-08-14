@@ -36,6 +36,7 @@ Useful prefixes / series:
 
 - `ollama_router_requests_total`, `ollama_router_request_duration_seconds`, `ollama_router_inflight`
 - `ollama_router_node_healthy`, `ollama_router_node_vram_*`, `ollama_router_node_pressure`, `ollama_router_node_info`
+- `ollama_router_tunnel_up` (`{node}` only)
 - `ollama_router_route_reason_total`, `ollama_router_verda_*`, `ollama_router_job_*`
 - `ollama_router_aggregated_models`, `ollama_router_node_models`, `ollama_router_discovery_total`
 

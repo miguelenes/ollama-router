@@ -45,5 +45,5 @@ Repo JSON under `deploy/observability/grafana/dashboards/` is GitOps source of t
 
 - Pull full dashboard JSON with `get_dashboard_by_uid` when a summary/property suffices.
 - Scrape or chart node-agent `:11436` (router scrape only).
-- Log prompts, bodies, Verda tokens, Tailscale keys, or admin bearer (sensitivity allowlist only).
+- Log prompts, bodies, Verda tokens, zrok share tokens, or admin bearer (sensitivity allowlist only).
 - Invent panel queries — read existing panels or live metrics first.

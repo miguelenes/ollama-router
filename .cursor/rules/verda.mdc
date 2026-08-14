@@ -1,5 +1,5 @@
 ---
-description: Verda OAuth2, cheapest NVIDIA spot in 8–80 GiB, Tailscale SSH handoff
+description: Verda OAuth2, cheapest NVIDIA spot in 8–80 GiB, startup-script + zrok private share (never SSH)
 globs: "**/verda/**"
 alwaysApply: false
 ---
@@ -14,9 +14,12 @@ alwaysApply: false
   optional `max_spot_price_per_hour`.
 - Rank: cheapest spot, then smallest VRAM, then fewest GPUs, then location preference.
   Never default to huge SKUs.
-- Provision: public SSH bootstrap → ordinary **OpenSSH over Tailscale** (not Tailscale SSH).
-  Register an Ollama URL only after OpenSSH + `/api/tags` succeed on the tailnet.
-  Public `:11434` is never a routing URL.
+- Provision: Verda **startup script** (user-data) installs the node-agent and
+  starts a self-hosted zrok **private** share sidecar. The router may upload an
+  SSH key for Verda's API but must **never SSH**. Register an Ollama URL only
+  after enroll + `/api/tags` succeed through the tunnel. On the instance,
+  Ollama and the agent bind loopback. Public `:11434` and hostname public
+  tunnels (`*.zrok.io` etc.) are never routing URLs.
 - Destroy with `delete_permanently` (spot billing stops only on delete).
 - httpmock in tests. **No live Verda.**
 
@@ -30,4 +33,5 @@ struct InstanceType { /* … */ }
 struct InstanceType { /* needed fields only */ }
 ```
 
-See `.opencode/wiki/concepts/ollama-cloud-vram-guardrails.md`. Skill: `verda-spot-fleet`.
+See `.opencode/wiki/concepts/ollama-cloud-vram-guardrails.md` and
+`.opencode/wiki/concepts/ollama-router-node-tunnel.md`. Skill: `verda-spot-fleet`.

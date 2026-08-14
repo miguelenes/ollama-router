@@ -3,16 +3,24 @@
 
 pub const SERVICE_NAME: &str = "ollama-node-agent";
 pub const SERVICE_DISPLAY_NAME: &str = "Ollama Node Agent";
+pub const TUNNEL_SERVICE_NAME: &str = "ollama-node-agent-tunnel";
+pub const TUNNEL_SERVICE_DISPLAY_NAME: &str = "Ollama Node Agent Tunnel";
 pub const WINDOWS_BIN: &str = r"C:\Program Files\ollama-node-agent\ollama-node-agent.exe";
 pub const WINDOWS_CONFIG: &str = r"C:\ProgramData\ollama-node-agent\config.yaml";
 pub const WINDOWS_SERVICE_ARGS: &str =
     r#"serve --windows-service --config "C:\ProgramData\ollama-node-agent\config.yaml""#;
+pub const WINDOWS_TUNNEL_SERVICE_ARGS: &str =
+    r#"tunnel --windows-service --config "C:\ProgramData\ollama-node-agent\config.yaml""#;
 pub const UPGRADE_CODE: &str = "9F3A2C10-8B7E-4D61-A5C4-1E8F0B2D6A73";
 pub const FIREWALL_RULE_11434: &str = "ollama-node-agent-11434";
 pub const FIREWALL_RULE_11436: &str = "ollama-node-agent-11436";
 
 pub fn service_bin_path(exe: &std::path::Path) -> String {
     format!("\"{}\" {}", exe.display(), WINDOWS_SERVICE_ARGS)
+}
+
+pub fn tunnel_service_bin_path(exe: &std::path::Path) -> String {
+    format!("\"{}\" {}", exe.display(), WINDOWS_TUNNEL_SERVICE_ARGS)
 }
 
 #[cfg(test)]
@@ -49,6 +57,11 @@ mod tests {
         assert_eq!(on_disk, crate::setup::agent_unit_text());
         assert!(on_disk.contains("NoNewPrivileges=true"));
         assert!(on_disk.contains("ExecStart=/usr/local/bin/ollama-node-agent"));
+        let tunnel_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("packaging/linux/ollama-node-agent-tunnel.service");
+        let tunnel_on_disk = std::fs::read_to_string(tunnel_path).expect("tunnel unit");
+        assert_eq!(tunnel_on_disk, crate::setup::tunnel_unit_text());
+        assert!(tunnel_on_disk.contains("ExecStart=/usr/local/bin/ollama-node-agent tunnel"));
     }
 
     #[test]
@@ -85,6 +98,11 @@ mod tests {
         assert!(on_disk.contains("<key>KeepAlive</key>"));
         assert!(on_disk.contains("<key>RunAtLoad</key>"));
         assert!(on_disk.contains("/usr/local/bin/ollama-node-agent"));
+        let tunnel_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("packaging/macos/com.ollama.node-agent.tunnel.plist");
+        let tunnel_on_disk = std::fs::read_to_string(tunnel_path).expect("tunnel plist");
+        assert_eq!(tunnel_on_disk, crate::setup::tunnel_plist());
+        assert!(tunnel_on_disk.contains("com.ollama.node-agent.tunnel"));
     }
 
     #[test]
@@ -107,9 +125,14 @@ mod tests {
         assert!(path.contains(WINDOWS_CONFIG));
         assert!(path.starts_with('"'));
         assert_eq!(SERVICE_NAME, "ollama-node-agent");
+        assert_eq!(TUNNEL_SERVICE_NAME, "ollama-node-agent-tunnel");
         assert_eq!(
             path,
             format!("\"{}\" {}", WINDOWS_BIN, WINDOWS_SERVICE_ARGS)
+        );
+        assert_eq!(
+            tunnel_service_bin_path(exe),
+            format!("\"{}\" {}", WINDOWS_BIN, WINDOWS_TUNNEL_SERVICE_ARGS)
         );
     }
 }

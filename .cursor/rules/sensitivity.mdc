@@ -1,5 +1,5 @@
 ---
-description: Never log bodies, prompts, tokens, Tailscale keys, or SSH keys
+description: Never log bodies, prompts, tokens, zrok share tokens, or SSH keys
 alwaysApply: true
 ---
 
@@ -8,8 +8,8 @@ alwaysApply: true
 Treat proxied Ollama traffic and cloud credentials as secrets.
 
 **Never log or persist:** request/response bodies, prompts, embeddings, `/api/chat`
-messages, Verda access/refresh tokens or client secrets, Tailscale auth keys,
-SSH private keys, `OLLAMA_ROUTER_ADMIN_TOKEN`, capacity bearer tokens.
+messages, Verda access/refresh tokens or client secrets,
+SSH private keys, zrok share tokens, `OLLAMA_ROUTER_ADMIN_TOKEN`, capacity bearer tokens.
 
 **Allowlist:** node id, model name, request class, status code, latency, reason
 codes (`no_healthy`, `saturated`, `public_url_blocked`), instance type, location,

@@ -18,9 +18,10 @@ use windows_service::service::{
 use windows_service::service_control_handler::{self, ServiceControlHandlerResult};
 use windows_service::service_dispatcher;
 
-use crate::service_identity::SERVICE_NAME;
+use crate::service_identity::{SERVICE_NAME, TUNNEL_SERVICE_NAME};
 
 windows_service::define_windows_service!(ffi_service_main, service_main);
+windows_service::define_windows_service!(ffi_tunnel_main, tunnel_service_main);
 
 #[derive(Debug)]
 pub struct ServeOpts {
@@ -30,6 +31,7 @@ pub struct ServeOpts {
 }
 
 static SERVE_OPTS: OnceLock<ServeOpts> = OnceLock::new();
+static TUNNEL_CONFIG: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 const SERVICE_TYPE: ServiceType = ServiceType::OWN_PROCESS;
 
@@ -41,6 +43,16 @@ pub fn run(opts: ServeOpts) -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("Windows service options already set"))?;
     service_dispatcher::start(SERVICE_NAME, ffi_service_main)
         .map_err(|error| anyhow::anyhow!("service dispatcher: {error}"))
+}
+
+/// Block on the SCM dispatcher for the zrok sidecar service.
+pub fn run_tunnel(config: Option<PathBuf>) -> anyhow::Result<()> {
+    crate::init_tracing();
+    TUNNEL_CONFIG
+        .set(config)
+        .map_err(|_| anyhow::anyhow!("Windows tunnel options already set"))?;
+    service_dispatcher::start(TUNNEL_SERVICE_NAME, ffi_tunnel_main)
+        .map_err(|error| anyhow::anyhow!("tunnel service dispatcher: {error}"))
 }
 
 fn service_main(_args: Vec<OsString>) {
@@ -103,4 +115,68 @@ fn run_service() -> anyhow::Result<()> {
         process_id: None,
     });
     serve_result
+}
+
+fn tunnel_service_main(_args: Vec<OsString>) {
+    if let Err(error) = run_tunnel_service() {
+        tracing::error!(%error, "Windows tunnel service failed");
+    }
+}
+
+fn run_tunnel_service() -> anyhow::Result<()> {
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let event_handler = move |control_event| -> ServiceControlHandlerResult {
+        match control_event {
+            ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
+                let _ = shutdown_tx.send(true);
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    };
+    let status_handle = service_control_handler::register(TUNNEL_SERVICE_NAME, event_handler)
+        .map_err(|error| anyhow::anyhow!("register tunnel service control handler: {error}"))?;
+
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: SERVICE_TYPE,
+            current_state: ServiceState::Running,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .map_err(|error| anyhow::anyhow!("set tunnel running status: {error}"))?;
+
+    let config = TUNNEL_CONFIG
+        .get()
+        .context("Windows tunnel options missing")?;
+    let cfg = crate::config::AgentConfig::load(config.as_deref()).context("load config")?;
+    let paths = crate::setup::SetupPaths::for_os();
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("tokio runtime")?;
+    let result = rt.block_on(async move {
+        tokio::select! {
+            result = crate::setup::tunnel::run_supervisor(cfg, paths) => result,
+            () = async {
+                let _ = shutdown_rx.wait_for(|stop| *stop).await;
+            } => Ok(()),
+        }
+    });
+
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type: SERVICE_TYPE,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    });
+    result
 }

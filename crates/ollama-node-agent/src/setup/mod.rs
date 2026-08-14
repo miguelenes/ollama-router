@@ -5,6 +5,7 @@ mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
 mod state;
+pub mod tunnel;
 #[cfg(windows)]
 mod windows;
 
@@ -12,12 +13,13 @@ use std::path::{Path, PathBuf};
 
 use crate::config::AgentConfig;
 use crate::listen::{format_host_port, resolve_bind, AddrSource, HostAddrs};
-use crate::redact::redact_authkey;
+use crate::redact::redact_secret;
 
 pub use state::{
-    ConvergeState, STATE_SCHEMA, SUPERVISOR_LAUNCHD, SUPERVISOR_MANUAL, SUPERVISOR_SCM,
-    SUPERVISOR_SYSTEMD,
+    apply_enroll_flags, ConvergeState, STATE_SCHEMA, SUPERVISOR_LAUNCHD, SUPERVISOR_MANUAL,
+    SUPERVISOR_SCM, SUPERVISOR_SYSTEMD,
 };
+pub use tunnel::{tunnel_plist, tunnel_unit_text, TUNNEL_PLIST_LABEL, TUNNEL_UNIT_NAME};
 
 /// Systemd unit text. Same bytes `setup` writes and the Linux tarball/.deb ship.
 pub fn agent_unit_text() -> &'static str {
@@ -83,7 +85,7 @@ impl SetupPaths {
 pub struct SetupContext<'a> {
     pub config: &'a AgentConfig,
     pub paths: &'a SetupPaths,
-    pub ts_authkey: Option<&'a str>,
+    pub enable_token: Option<&'a str>,
     pub dry_commands: bool,
 }
 
@@ -96,8 +98,8 @@ pub async fn run(ctx: SetupContext<'_>) -> anyhow::Result<ConvergeState> {
     let ollama_ip = resolve_bind(&ctx.config.ollama.listen, addrs, token_set)?;
     let ollama_bind = format_host_port(ollama_ip, 11434);
     tracing::info!(ollama_bind = %ollama_bind, agent_ip = %agent_ip, "setup bind");
-    if let Some(key) = ctx.ts_authkey {
-        tracing::info!(ts_authkey = %redact_authkey(Some(key)), "setup tailscale key present");
+    if let Some(key) = ctx.enable_token {
+        tracing::info!(enable_token = %redact_secret(Some(key)), "setup zrok enable token present");
     }
 
     #[cfg(target_os = "linux")]

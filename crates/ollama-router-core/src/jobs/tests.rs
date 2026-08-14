@@ -32,8 +32,6 @@ fn node(id: &str, url: &str, vram: f64, gpus: u32) -> NodeConfig {
             cpu_cores: Some(8),
         },
         max_inflight: None,
-        ssh: None,
-        provision: None,
     }
 }
 

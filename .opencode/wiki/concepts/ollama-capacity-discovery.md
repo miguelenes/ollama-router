@@ -6,7 +6,7 @@ sourceRefs:
   - crates/ollama-capacity-types
   - crates/ollama-router-core/src/capacity
   - crates/ollama-router-core/src/fleet
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-14
 ---
 
 # Ollama node agent
@@ -22,9 +22,13 @@ Privilege split:
 - `ollama-node-agent doctor` — no side effects
 - `ollama-node-agent uninstall` — best-effort unit/plist/task removal
 
-The agent never talks to Verda and never owns cloud idle teardown. Tailscale
-join is setup-only when `tailscale.enable` and an auth key are present; the
-serve process must not hold `TS_AUTHKEY` / `VERDA_*`.
+The agent never talks to Verda and never owns cloud idle teardown. On tunneled
+hosts, `setup` starts a zrok sidecar by spawning the zrok binary (no Go SDK,
+no TUN); Ollama and the agent bind **loopback**. `setup` and `doctor` print a
+**find this node** block (share token **id** + enroll status); the router
+learns the share via enroll (FleetState only, never `fleet.yaml`). `serve` must not hold `VERDA_*` or control-plane admin secrets.
+See [[concepts/ollama-router-node-tunnel]]. `fleet.yaml` LAN URLs stay direct
+HTTP on `:11434` / `:11436`.
 
 Shared JSON types live in `crates/ollama-capacity-types`. The router owns only
 the HTTP client and merge policy in `crates/ollama-router-core/src/capacity/`.
@@ -68,27 +72,35 @@ last discovered capacity is retained, `capacity_error` is populated, and routing
 degrades to static / `ps_lower_bound` values.
 
 Default probe URL: `http://{ollama-url-host}:11436/...`. Override per node with
-fleet.yaml `capacity_url`.
+fleet.yaml `capacity_url`. On tunneled hosts the router reaches `:11434` and
+`:11436` through the private share, not a public or LAN bind.
 
 `GET /v1/status` is how a later router slice can learn `gpu_backend`
 (`cpu|cuda|rocm|metal|unknown`) without guessing labels. Metal reports
 `gpu_backend=metal` and optional `metal_recommended_gb`; it does **not** fake
 CUDA VRAM (`vram_gb=0` on Apple unless a real discrete inventory exists).
 
-Remote provision (later): upload the agent binary and run `setup`. Do not keep
-embedding Ubuntu Ollama install logic in `provision-ollama-gpu.sh` once that
-handoff exists.
+Remote / Verda hosts: a **startup script** installs `ollama-node-agent` and
+runs `setup`. The router must not SSH.
+LAN hosts: operator-installed agent, direct HTTP in `fleet.yaml`. Do not keep
+embedding Ubuntu Ollama install logic in the router; Verda bootstrap is a
+startup script on the instance.
 
 ## Packages
 
 Release workflow [`.github/workflows/release-agent.yml`](../../../.github/workflows/release-agent.yml)
 (not `ci.yml`) builds OS-native daemon artifacts. Local: `task agent:release`
-(plus `agent:release:linux` / `:deb` / `:macos` / `:windows`). Linux local
+(plus `agent:release:linux` / `:deb` / `:macos` / `:windows`). From Linux,
+`task agent:release:github` dispatches that workflow and downloads artifacts
+into `dist/agent/` (`gh auth login` with repo + workflow scopes, or `GH_TOKEN`;
+push the branch/tag first; Darwin/Windows packages). Linux local
 recipes run in Docker `rust:1.97-slim-bookworm` (musl static-pie tarball via
 `RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes`; gnu `.deb`
 is bookworm glibc). GHA compiles on native
 `ubuntu-latest` / `ubuntu-24.04-arm` and packages in the same job; the `.deb`
 job uses a `rust:1.97-slim-bookworm` container. GHA never installs Task.
+`SHA256SUMS.txt` is an Actions artifact on every run, including
+`workflow_dispatch`; GitHub Release assets are `v*` tags only.
 
 | Artifact | Role |
 | --- | --- |
@@ -114,7 +126,7 @@ user tray). Unsigned Windows artifacts may hit SmartScreen. Local
 `x86_64-pc-windows-msvc` (do not ship mingw labeled as the GHA exe).
 macOS `.pkg` is agent+LaunchDaemon only (`setup` brew-or-fails Ollama). After
 `uninstall`, `sudo pkgutil --forget com.ollama.node-agent`. Unsigned pkgs are
-OK on a tailnet; Gatekeeper blocks Safari quarantine. Local
+OK on a private LAN or private share; Gatekeeper blocks Safari quarantine. Local
 `task agent:release:macos` skips unless Darwin (GHA `macos-14` builds both
 `aarch64-apple-darwin` and `x86_64-apple-darwin`). pkg upgrades replace the
 packaged `config.yaml`.

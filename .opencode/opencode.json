@@ -1,6 +1,44 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "lsp": true,
+  "lsp": {
+    "rust": {
+      "command": ["/home/menes/.cargo/bin/rust-analyzer"],
+      "extensions": [".rs"]
+    },
+    "bash": {
+      "command": ["npx", "-y", "bash-language-server", "start"],
+      "extensions": [".sh", ".bash", ".zsh", ".ksh"]
+    },
+    "yaml-ls": {
+      "command": ["npx", "-y", "yaml-language-server", "--stdio"],
+      "extensions": [".yaml", ".yml"]
+    },
+    "dockerfile": {
+      "command": ["npx", "-y", "dockerfile-language-server-nodejs", "--stdio"],
+      "extensions": [".dockerfile", "Dockerfile"]
+    },
+    "typescript": {
+      "command": ["npx", "-y", "typescript-language-server", "--stdio"],
+      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"]
+    },
+    "json": {
+      "command": [
+        "npx",
+        "-y",
+        "--package=vscode-langservers-extracted",
+        "vscode-json-language-server",
+        "--stdio"
+      ],
+      "extensions": [".json", ".jsonc"]
+    },
+    "taplo": {
+      "command": ["/home/menes/.cargo/bin/taplo", "lsp", "stdio"],
+      "extensions": [".toml"]
+    },
+    "clangd": {
+      "disabled": true
+    }
+  },
   "instructions": [
     ".cursor/rules/finish-check.mdc",
     ".cursor/rules/project-mcps.mdc",

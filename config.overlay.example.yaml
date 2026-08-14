@@ -30,9 +30,24 @@
 #   auto_scale_min_instances: 0
 #   auto_scale_max_instances: 2
 #   ssh_key_name: ollama-router
+#   startup_script_name: ollama-router-agent-init
+#   # Reachable enroll URL for Verda spots (not 0.0.0.0). Tokens stay in env:
+#   # ZROK_ENABLE_TOKEN, OLLAMA_ROUTER_ADMIN_TOKEN (names below).
+#   enroll_url: http://router.example:11435
+#   zrok_enable_token_env: ZROK_ENABLE_TOKEN
+#   enroll_token_env: OLLAMA_ROUTER_ADMIN_TOKEN
+#   # Optional: pin a .deb/tarball instead of the GitHub release for this version.
+#   # agent_package_url: https://example.invalid/ollama-node-agent_0.1.0_amd64.deb
 #   # Inclusive VRAM window; 80 GB excludes H200-class cards.
 #   min_vram_gb: 8
 #   max_vram_gb: 80
 #   # Optional fallback for demand-scale logs/metrics. FleetState
 #   # verda_spot_price_per_hour wins when persisted.
 #   demand_scale_price_per_hour: 0.30
+
+# Self-hosted zrok controller the router `access private` frontends talk to.
+# Enable token stays in the env named below — never a YAML literal.
+# tunnel:
+#   api_endpoint: http://127.0.0.1:18080
+#   enable_token_env: ZROK_ENABLE_TOKEN
+#   access_bind: "127.0.0.1"

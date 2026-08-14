@@ -34,10 +34,11 @@ if ! cmp -s "$CANONICAL_UNIT" "$stage/ollama-node-agent.service"; then
 fi
 
 cp "$SCRIPT_DIR/README.portable.md" "$stage/README.md"
+cp "$SCRIPT_DIR/ollama-node-agent-tunnel.service" "$stage/ollama-node-agent-tunnel.service"
 mkdir -p "$stage/contrib/openrc"
 cp "$SCRIPT_DIR/openrc/ollama-node-agent" "$stage/contrib/openrc/ollama-node-agent"
 chmod 755 "$stage/contrib/openrc/ollama-node-agent"
 
 tar -C "$stage" -czf "$OUTDIR/ollama-node-agent-linux-${ARCH}.tar.gz" \
-  ollama-node-agent ollama-node-agent.service README.md contrib
+  ollama-node-agent ollama-node-agent.service ollama-node-agent-tunnel.service README.md contrib
 echo "wrote $OUTDIR/ollama-node-agent-linux-${ARCH}.tar.gz"

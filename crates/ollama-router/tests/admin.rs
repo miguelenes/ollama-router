@@ -1,12 +1,18 @@
 //! Admin bearer + ensure 202 / GET job / wait timeout.
 
+use std::time::Duration;
+
 use axum::body::Body;
 use axum::http::{header, Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use httpmock::prelude::*;
+use ollama_router::health::run as run_health;
 use ollama_router::http::{make_app, AppState};
-use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig};
-use ollama_router_core::fleet::NodeId;
+use ollama_router::tunnel::TunnelFrontends;
+use ollama_router_core::config::{Capacity, HealthConfig, NodeConfig, RouterConfig};
+use ollama_router_core::fleet::{
+    routing_url_blocked_reason, FleetState, NodeId, VerdaInstanceId, VerdaNodePersist,
+};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -27,8 +33,6 @@ fn node(id: &str, url: &str, vram: f64) -> NodeConfig {
             cpu_cores: Some(8),
         },
         max_inflight: None,
-        ssh: None,
-        provision: None,
     }
 }
 
@@ -166,41 +170,6 @@ async fn admin_wait_timeout_stays_202() {
 }
 
 #[tokio::test]
-async fn provision_forbidden_without_token() {
-    let mut state = state_with_token(RouterConfig::default(), None);
-    state.provisioner = None;
-    let (status, _) = send(
-        state,
-        json_req(
-            Method::POST,
-            "/router/v1/nodes/provision",
-            json!({}),
-            Some("secret"),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::FORBIDDEN);
-}
-
-#[tokio::test]
-async fn provision_empty_set_ok_with_token() {
-    let state = state_with_token(RouterConfig::default(), Some("secret"));
-    let (status, body) = send(
-        state,
-        json_req(
-            Method::POST,
-            "/router/v1/nodes/provision",
-            json!({"dry_run": true}),
-            Some("secret"),
-        ),
-    )
-    .await;
-    assert_eq!(status, StatusCode::OK);
-    let parsed: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["results"], json!([]));
-}
-
-#[tokio::test]
 async fn verda_routes_503_when_disabled() {
     let state = state_with_token(RouterConfig::default(), Some("secret"));
     for path in [
@@ -269,6 +238,22 @@ async fn new_admin_routes_forbidden_without_token() {
     let (status, _) = send(
         state,
         json_req(Method::POST, "/router/v1/reload", json!({}), Some("secret")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = send(
+        state_with_token(RouterConfig::default(), None),
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "n1",
+                "origin": "adopt",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
@@ -406,4 +391,346 @@ async fn no_thunder_or_runpod_admin_paths() {
         );
         assert_ne!(status, StatusCode::OK, "{path}");
     }
+}
+
+fn enroll_state(config: RouterConfig, token: Option<&str>) -> AppState {
+    let mut state = state_with_token(config, token);
+    state.tunnels = TunnelFrontends::loopback();
+    state
+}
+
+#[tokio::test]
+async fn enroll_adopt_persists_loopback_and_leaves_fleet_yaml() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fleet = dir.path().join("fleet.yaml");
+    let yaml = "version: 1\nnodes:\n  - id: local\n    url: http://127.0.0.1:11434\n";
+    std::fs::write(&fleet, yaml).expect("write fleet");
+    let original = std::fs::read(&fleet).expect("read");
+    let config = RouterConfig {
+        nodes: vec![node("local", "http://127.0.0.1:11434", 8.0)],
+        fleet_path: fleet.clone(),
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "desk",
+                "origin": "adopt",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent",
+                "agent_version": "0.1.0",
+                "hostname": "desk"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let url = parsed["url"].as_str().expect("url");
+    let capacity_url = parsed["capacity_url"].as_str().expect("capacity_url");
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    assert!(
+        capacity_url.starts_with("http://127.0.0.1:"),
+        "{capacity_url}"
+    );
+    assert_ne!(url, capacity_url);
+    assert_eq!(parsed["tunnel_backend"], "zrok");
+    assert_eq!(std::fs::read(&fleet).expect("reread"), original);
+
+    let stored = FleetState::new(dir.path().join("fleet-state.json"));
+    let entry = stored.get_entry("desk").unwrap().unwrap();
+    assert_eq!(entry.url.as_deref(), Some(url));
+    assert_eq!(entry.capacity_url.as_deref(), Some(capacity_url));
+    assert_eq!(entry.tunnel_backend.as_deref(), Some("zrok"));
+    assert_eq!(entry.ollama_share_id.as_deref(), Some("share-ollama"));
+    assert_eq!(entry.agent_share_id.as_deref(), Some("share-agent"));
+    assert_ne!(entry.managed_by.as_deref(), Some("verda"));
+    assert!(
+        routing_url_blocked_reason(url, &[]).is_none(),
+        "enrolled loopback must be a routing URL: {url}"
+    );
+}
+
+#[tokio::test]
+async fn enroll_loopback_frontend_becomes_healthy() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    config.health = HealthConfig {
+        interval_seconds: 0.05,
+        probe_timeout_seconds: 0.4,
+        fail_streak_threshold: 2,
+        success_threshold: 1,
+        backoff_max_seconds: 1.0,
+        probe_jitter_ratio: 0.0,
+        ps_probe_enabled: false,
+        capacity_probe_enabled: false,
+        ..HealthConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "desk",
+                "origin": "adopt",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let url = parsed["url"].as_str().expect("url");
+    assert!(url.starts_with("http://127.0.0.1:"), "{url}");
+    let handle = tokio::spawn(run_health(state.clone()));
+    let start = tokio::time::Instant::now();
+    loop {
+        if state.registry.get(&nid("desk")).is_some_and(|n| n.healthy) {
+            break;
+        }
+        if start.elapsed() > Duration::from_secs(3) {
+            panic!("enrolled loopback URL did not become healthy");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    handle.abort();
+}
+
+#[tokio::test]
+async fn enroll_rejects_public_share_hostname() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "desk",
+                "origin": "adopt",
+                "ollama_share_id": "https://abc.share.zrok.io",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["reason"], "public_url_blocked");
+}
+
+#[tokio::test]
+async fn enroll_verda_updates_existing_row_not_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("fleet-state.json");
+    let fs = FleetState::new(&state_path);
+    let instance = VerdaInstanceId::parse("i-1").unwrap();
+    fs.persist_verda_node(
+        "verda-i-1",
+        VerdaNodePersist {
+            url: "",
+            instance_id: &instance,
+            location: "HEL1",
+            instance_type: "gpu",
+            os_volume_id: None,
+            spot_price_per_hour: None,
+            hostname: None,
+        },
+    )
+    .unwrap();
+    let config = RouterConfig {
+        state_path: state_path.clone(),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "verda-i-1",
+                "origin": "verda",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let loaded = fs.load().unwrap();
+    assert_eq!(loaded.len(), 1);
+    let entry = &loaded["verda-i-1"];
+    assert_eq!(entry.managed_by.as_deref(), Some("verda"));
+    assert_eq!(entry.verda_instance_id.as_deref(), Some("i-1"));
+    assert_eq!(entry.tunnel_backend.as_deref(), Some("zrok"));
+    assert!(entry
+        .url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("http://127.0.0.1:")));
+}
+
+#[tokio::test]
+async fn enroll_verda_unknown_is_404() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "verda-missing",
+                "origin": "verda",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["reason"], "unknown_verda_node");
+}
+
+#[tokio::test]
+async fn enroll_verda_matches_guest_hostname() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("fleet-state.json");
+    let fs = FleetState::new(&state_path);
+    let instance = VerdaInstanceId::parse("i-host").unwrap();
+    fs.persist_verda_node(
+        "verda-i-host",
+        VerdaNodePersist {
+            url: "",
+            instance_id: &instance,
+            location: "HEL1",
+            instance_type: "gpu",
+            os_volume_id: None,
+            spot_price_per_hour: None,
+            hostname: Some("or-guest-1"),
+        },
+    )
+    .unwrap();
+    let config = RouterConfig {
+        state_path: state_path.clone(),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "or-guest-1",
+                "origin": "verda",
+                "hostname": "or-guest-1",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let loaded = fs.load().unwrap();
+    assert_eq!(loaded.len(), 1);
+    assert!(loaded.contains_key("verda-i-host"));
+    assert!(loaded["verda-i-host"]
+        .url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("http://127.0.0.1:")));
+}
+
+#[tokio::test]
+async fn enroll_fleet_hydrates_existing_permanent_node() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fleet = dir.path().join("fleet.yaml");
+    let yaml = "version: 1\nnodes:\n  - id: nuc\n    url: http://nuc.lan:11434\n";
+    std::fs::write(&fleet, yaml).expect("write fleet");
+    let original = std::fs::read(&fleet).expect("read");
+    let config = RouterConfig {
+        nodes: vec![node("nuc", "http://nuc.lan:11434", 8.0)],
+        fleet_path: fleet.clone(),
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "proposed_id": "nuc",
+                "origin": "fleet",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert_eq!(std::fs::read(&fleet).expect("reread"), original);
+    let snap = state.registry.get(&nid("nuc")).unwrap();
+    assert!(snap
+        .url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("http://127.0.0.1:")));
+}
+
+#[tokio::test]
+async fn enroll_rejects_unknown_body_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "desk",
+                "origin": "adopt",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent",
+                "enable_token": "nope"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert!(
+        status == StatusCode::UNPROCESSABLE_ENTITY || status.is_client_error(),
+        "{status}"
+    );
 }

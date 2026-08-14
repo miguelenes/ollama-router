@@ -223,3 +223,119 @@ tasks:
           bash crates/ollama-node-agent/packaging/windows/pack-msi.sh \
             target/release/ollama-node-agent.exe "$VER" dist/agent
         sh: [bash, -euo, pipefail, -c]
+
+  agent:release:github:
+    desc: Dispatch Release node agent via gh and flatten artifacts into dist/agent (gh auth)
+    cmds:
+      - cmd: |
+          if ! command -v gh >/dev/null 2>&1; then
+            echo "install GitHub CLI (gh) and run: gh auth login  (scopes: repo, workflow)" >&2
+            echo "or set GH_TOKEN. Push the current branch/tag first." >&2
+            exit 1
+          fi
+          if ! gh auth status >/dev/null 2>&1; then
+            echo "gh auth required: gh auth login  (scopes: repo, workflow) or set GH_TOKEN" >&2
+            echo "Push the current branch/tag first — workflow_dispatch only sees remote refs." >&2
+            exit 1
+          fi
+          if git symbolic-ref -q HEAD >/dev/null; then
+            REF=$(git rev-parse --abbrev-ref HEAD)
+          else
+            REF=$(git describe --tags --exact-match 2>/dev/null || git rev-parse HEAD)
+          fi
+          SHA=$(git rev-parse HEAD)
+          echo "dispatching Release node agent for ref ${REF} (${SHA})" >&2
+          BEFORE=$(gh run list --workflow="Release node agent" --commit "$SHA" \
+            --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)
+          gh workflow run "Release node agent" --ref "$REF"
+          RUN_ID=""
+          for _ in $(seq 1 30); do
+            RUN_ID=$(gh run list --workflow="Release node agent" --commit "$SHA" \
+              --json databaseId --jq '.[0].databaseId // empty' 2>/dev/null || true)
+            if [[ -n "$RUN_ID" && "$RUN_ID" != "$BEFORE" ]]; then
+              break
+            fi
+            RUN_ID=""
+            sleep 2
+          done
+          if [[ -z "$RUN_ID" ]]; then
+            echo "no workflow run appeared for ${SHA} within 60s; is ${REF} pushed?" >&2
+            exit 1
+          fi
+          gh run watch "$RUN_ID" --exit-status
+          mkdir -p dist/agent
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
+          gh run download "$RUN_ID" --dir "$tmp"
+          find "$tmp" -type f -exec mv {} dist/agent/ \;
+          echo "artifacts in dist/agent/" >&2
+          ls -1 dist/agent >&2
+        sh: [bash, -euo, pipefail, -c]
+
+  zrok:fetch:
+    desc: Download official zrok-instance compose into .local/zrok (no tokens; not vendored)
+    cmds:
+      - cmd: |
+          mkdir -p .local/zrok
+          if [[ -f .local/zrok/compose.yml || -f .local/zrok/compose.yaml ]]; then
+            echo "already fetched: .local/zrok" >&2
+            exit 0
+          fi
+          curl -sSfL https://get.openziti.io/zrok-instance/fetch.bash | bash -s "$PWD/.local/zrok"
+          if [[ -f .local/zrok/compose.yaml && ! -f .local/zrok/compose.yml ]]; then
+            ln -sfn compose.yaml .local/zrok/compose.yml
+          fi
+          if [[ ! -f .local/zrok/compose.yml ]]; then
+            echo "fetch did not produce .local/zrok/compose.yml — see deploy/zrok/README.md" >&2
+            exit 1
+          fi
+        sh: [bash, -euo, pipefail, -c]
+
+  zrok:up:
+    desc: Start fetched zrok controller/frontend on loopback (see deploy/zrok/README.md)
+    cmds:
+      - task: zrok:fetch
+      - cmd: |
+          umask 077
+          if [[ ! -f .local/zrok/.env ]]; then
+            cp deploy/zrok.env.example .local/zrok/.env
+            fill() {
+              local key=$1
+              if grep -q "^${key}=$" .local/zrok/.env; then
+                local val
+                val=$(openssl rand -hex 24)
+                sed -i "s|^${key}=$|${key}=${val}|" .local/zrok/.env
+              fi
+            }
+            fill ZROK_USER_PWD
+            fill ZITI_PWD
+            fill ZROK_ADMIN_TOKEN
+            echo "wrote .local/zrok/.env (gitignored). Create an enable token next — deploy/zrok/README.md" >&2
+          fi
+          bash deploy/zrok/compose.sh up -d
+          echo "zrok API http://127.0.0.1:18080 — set tunnel.api_endpoint; do not scrape :11436" >&2
+        sh: [bash, -euo, pipefail, -c]
+
+  zrok:down:
+    desc: Stop fetched zrok compose (keeps .local/zrok volumes unless you pass extra flags)
+    cmds:
+      - bash deploy/zrok/compose.sh down --remove-orphans
+
+  zrok:ps:
+    desc: Show fetched zrok compose status
+    cmds:
+      - bash deploy/zrok/compose.sh ps
+
+  zrok:logs:
+    desc: Follow fetched zrok compose logs
+    cmds:
+      - bash deploy/zrok/compose.sh logs -f
+
+  zrok:cli:
+    desc: docker run zrok CLI against loopback controller (ZROK_API_ENDPOINT)
+    cmds:
+      - cmd: |
+          docker run --rm --network host \
+            -e ZROK_API_ENDPOINT="${ZROK_API_ENDPOINT:-http://127.0.0.1:18080}" \
+            docker.io/openziti/zrok:latest version
+        sh: [bash, -euo, pipefail, -c]

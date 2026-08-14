@@ -202,8 +202,6 @@ mod tests {
                 cpu_cores: Some(8),
             },
             max_inflight: None,
-            ssh: None,
-            provision: None,
         }
     }
 

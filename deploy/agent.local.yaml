@@ -1,5 +1,5 @@
 # Loopback serve config for `task dev` / `task agent:serve`.
-# Linux agent default is Tailscale; that misses a loopback-only Ollama.
+# Packaged agents default to loopback + a zrok sidecar; local-dev does not.
 # Do not run `setup` — Ollama is already a host service.
 listen: loopback
 port: 11436
@@ -7,5 +7,5 @@ ollama:
   listen: loopback
 gpu:
   policy: auto
-tailscale:
+tunnel:
   enable: false

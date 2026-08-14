@@ -1,4 +1,4 @@
-//! Durable fleet-state store: remembered Tailscale URLs and Verda metadata.
+//! Durable fleet-state store: remembered overlay URLs and Verda metadata.
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, OpenOptions};
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
 use crate::fleet::ids::{NodeId, VerdaInstanceId};
-use crate::fleet::tailscale::{is_tailscale_ipv4, routing_url_from_fields, url_host_is_tailscale};
+use crate::fleet::url_policy::{url_host_is_loopback, url_is_safe_overlay};
 
 /// Default on-disk location (override with `OLLAMA_ROUTER_STATE_FILE`).
 pub const DEFAULT_STATE_PATH: &str = "/var/lib/ollama-router/fleet-state.json";
@@ -45,10 +45,23 @@ impl FleetStateError {
     }
 }
 
+/// Fields written by [`FleetState::persist_enroll`]. Share ids, not enable tokens.
+#[derive(Clone, Debug)]
+pub struct EnrollPersist<'a> {
+    /// Loopback zrok access URL for Ollama (`http://127.0.0.1:PORT`).
+    pub url: &'a str,
+    /// Loopback zrok access URL for the node-agent.
+    pub capacity_url: &'a str,
+    /// zrok private share unique-name for Ollama.
+    pub ollama_share_id: &'a str,
+    /// zrok private share unique-name for the agent.
+    pub agent_share_id: &'a str,
+}
+
 /// Fields written by [`FleetState::persist_verda_node`].
 #[derive(Clone, Debug)]
 pub struct VerdaNodePersist<'a> {
-    /// Ollama base URL (Tailscale preferred; public IPv4 will not clobber).
+    /// Ollama base URL (overlay/loopback preferred; public IPv4 will not clobber).
     pub url: &'a str,
     /// Cloud instance id.
     pub instance_id: &'a VerdaInstanceId,
@@ -58,10 +71,10 @@ pub struct VerdaNodePersist<'a> {
     pub instance_type: &'a str,
     /// Optional OS volume id.
     pub os_volume_id: Option<&'a str>,
-    /// Optional Tailscale CGNAT address.
-    pub tailscale_ip: Option<&'a str>,
     /// Spot price in currency per hour, when known.
     pub spot_price_per_hour: Option<f64>,
+    /// Hostname assigned at create (guest enroll may key off this).
+    pub hostname: Option<&'a str>,
 }
 
 /// One host entry. Unknown JSON keys round-trip via [`Self::extra`].
@@ -69,8 +82,12 @@ pub struct VerdaNodePersist<'a> {
 pub struct FleetStateEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Private share unique-name (Ollama). Unknown legacy keys land in [`Self::extra`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tailscale_ip: Option<String>,
+    pub share_token_id: Option<String>,
+    /// Loopback zrok access URL (`http://127.0.0.1:PORT`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub local_access_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -85,6 +102,17 @@ pub struct FleetStateEntry {
     pub verda_os_volume_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verda_spot_price_per_hour: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capacity_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ollama_share_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_share_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tunnel_backend: Option<String>,
+    /// Guest hostname set on Verda create (enroll may send this as `id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hostname: Option<String>,
     #[serde(flatten)]
     pub extra: Map<String, Value>,
 }
@@ -147,26 +175,68 @@ impl FleetState {
         }
     }
 
-    /// Return a Tailscale routing URL for `node_id`, or `None`.
+    /// Return a routing URL for `node_id`: loopback enroll, RFC1918, or hostname.
+    ///
+    /// Legacy CGNAT / unknown overlay keys in `extra` are ignored until re-enroll.
     pub fn hydrate_url(&self, node_id: &NodeId) -> Result<Option<String>, FleetStateError> {
         let data = self.load()?;
+        Ok(data.get(node_id.as_str()).and_then(hydrate_entry_url))
+    }
+
+    /// Return a persisted capacity-agent URL (zrok loopback enroll).
+    pub fn hydrate_capacity_url(
+        &self,
+        node_id: &NodeId,
+    ) -> Result<Option<String>, FleetStateError> {
+        let data = self.load()?;
         Ok(data.get(node_id.as_str()).and_then(|entry| {
-            routing_url_from_fields(entry.url.as_deref(), entry.tailscale_ip.as_deref())
+            entry
+                .capacity_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .filter(|url| url_is_safe_overlay(url))
+                .map(|s| s.trim_end_matches('/').to_string())
         }))
     }
 
-    /// Write or update routing fields. Non-Tailscale URLs never clobber an
-    /// existing Tailscale routing URL.
-    pub fn persist_url(
-        &self,
-        node_id: impl AsRef<str>,
-        url: &str,
-        tailscale_ip: Option<&str>,
-    ) -> Result<(), FleetStateError> {
+    /// Write or update routing fields. Public IPv4 never clobbers a good overlay.
+    pub fn persist_url(&self, node_id: impl AsRef<str>, url: &str) -> Result<(), FleetStateError> {
         let _lock = self.lock_exclusive()?;
         let mut data = self.load()?;
         let existing = data.get(node_id.as_ref()).cloned().unwrap_or_default();
-        let mut entry = merge_routing_fields(&existing, url, tailscale_ip);
+        let mut entry = merge_routing_fields(&existing, url);
+        entry.updated_at = Some(now_secs());
+        data.insert(node_id.as_ref().to_string(), entry);
+        atomic_write(&self.path, &data)?;
+        Ok(())
+    }
+
+    /// Persist zrok enroll reachability. Does not change `managed_by`.
+    ///
+    /// Never writes `fleet.yaml`. Share ids only — not enable tokens.
+    pub fn persist_enroll(
+        &self,
+        node_id: impl AsRef<str>,
+        persist: EnrollPersist<'_>,
+    ) -> Result<(), FleetStateError> {
+        let _lock = self.lock_exclusive()?;
+        let mut data = self.load()?;
+        let mut entry = data.get(node_id.as_ref()).cloned().unwrap_or_default();
+        let url = persist.url.trim().trim_end_matches('/').to_string();
+        entry.url = Some(url.clone());
+        entry.local_access_url = Some(url);
+        entry.share_token_id = Some(persist.ollama_share_id.trim().to_string());
+        entry.capacity_url = Some(
+            persist
+                .capacity_url
+                .trim()
+                .trim_end_matches('/')
+                .to_string(),
+        );
+        entry.ollama_share_id = Some(persist.ollama_share_id.trim().to_string());
+        entry.agent_share_id = Some(persist.agent_share_id.trim().to_string());
+        entry.tunnel_backend = Some("zrok".to_string());
         entry.updated_at = Some(now_secs());
         data.insert(node_id.as_ref().to_string(), entry);
         atomic_write(&self.path, &data)?;
@@ -201,7 +271,7 @@ impl FleetState {
         let _lock = self.lock_exclusive()?;
         let mut data = self.load()?;
         let existing = data.get(node_id.as_ref()).cloned().unwrap_or_default();
-        let mut entry = merge_routing_fields(&existing, persist.url, persist.tailscale_ip);
+        let mut entry = merge_routing_fields(&existing, persist.url);
         entry.updated_at = Some(now_secs());
         entry.managed_by = Some("verda".to_string());
         entry.verda_instance_id = Some(persist.instance_id.as_str().to_string());
@@ -212,6 +282,9 @@ impl FleetState {
         }
         if let Some(price) = persist.spot_price_per_hour {
             entry.verda_spot_price_per_hour = Some(price);
+        }
+        if let Some(host) = persist.hostname.map(str::trim).filter(|s| !s.is_empty()) {
+            entry.hostname = Some(host.to_string());
         }
         tracing::info!(
             node_id = %node_id.as_ref(),
@@ -249,38 +322,33 @@ impl FleetState {
     }
 }
 
-fn merge_routing_fields(
-    existing: &FleetStateEntry,
-    url: &str,
-    tailscale_ip: Option<&str>,
-) -> FleetStateEntry {
-    let mut entry = existing.clone();
-    let existing_safe =
-        routing_url_from_fields(existing.url.as_deref(), existing.tailscale_ip.as_deref());
-    let incoming_ts = !url.trim().is_empty() && url_host_is_tailscale(url);
-    let incoming_ts_ip = tailscale_ip
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some_and(is_tailscale_ipv4);
-
-    if incoming_ts {
-        entry.url = Some(url.trim().trim_end_matches('/').to_string());
-    } else if let Some(safe) = existing_safe {
-        entry.url = Some(safe);
-    } else if !url.trim().is_empty() {
-        entry.url = Some(url.trim().trim_end_matches('/').to_string());
-    }
-
-    if incoming_ts_ip {
-        if let Some(ip) = tailscale_ip {
-            entry.tailscale_ip = Some(ip.trim().to_string());
+fn hydrate_entry_url(entry: &FleetStateEntry) -> Option<String> {
+    for candidate in [entry.local_access_url.as_deref(), entry.url.as_deref()] {
+        if let Some(url) = candidate
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .filter(|url| url_is_safe_overlay(url))
+        {
+            return Some(url.trim_end_matches('/').to_string());
         }
-    } else if !existing
-        .tailscale_ip
-        .as_deref()
-        .is_some_and(is_tailscale_ipv4)
-    {
-        entry.tailscale_ip = None;
+    }
+    None
+}
+
+fn merge_routing_fields(existing: &FleetStateEntry, url: &str) -> FleetStateEntry {
+    let mut entry = existing.clone();
+    let incoming = url.trim().trim_end_matches('/');
+    let incoming_safe = !incoming.is_empty() && url_is_safe_overlay(incoming);
+    let existing_safe = hydrate_entry_url(existing);
+
+    if incoming_safe {
+        entry.url = Some(incoming.to_string());
+        if url_host_is_loopback(incoming) {
+            entry.local_access_url = Some(incoming.to_string());
+        }
+    } else if existing_safe.is_some() {
+        entry.url = existing.url.clone();
+        entry.local_access_url = existing.local_access_url.clone();
     }
     entry
 }
@@ -408,15 +476,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet-state.json");
         let state = FleetState::new(&path);
-        state
-            .persist_url("nuc", "http://100.100.14.5:11434", Some("100.100.14.5"))
-            .unwrap();
+        state.persist_url("nuc", "http://10.0.0.5:11434").unwrap();
         fs::write(&path, "{ invalid json {{{").unwrap();
         let loaded = state.load().unwrap();
-        assert_eq!(
-            loaded["nuc"].url.as_deref(),
-            Some("http://100.100.14.5:11434")
-        );
+        assert_eq!(loaded["nuc"].url.as_deref(), Some("http://10.0.0.5:11434"));
     }
 
     #[test]
@@ -446,13 +509,11 @@ mod tests {
     fn persist_and_hydrate() {
         let dir = tempfile::tempdir().unwrap();
         let state = FleetState::new(dir.path().join("fleet-state.json"));
-        state
-            .persist_url("nuc", "http://100.100.14.5:11434", Some("100.100.14.5"))
-            .unwrap();
+        state.persist_url("nuc", "http://10.0.0.5:11434").unwrap();
         let id = NodeId::parse("nuc").unwrap();
         assert_eq!(
             state.hydrate_url(&id).unwrap().as_deref(),
-            Some("http://100.100.14.5:11434")
+            Some("http://10.0.0.5:11434")
         );
         assert!(state
             .hydrate_url(&NodeId::parse("bogus").unwrap())
@@ -461,11 +522,11 @@ mod tests {
     }
 
     #[test]
-    fn public_url_does_not_clobber_tailscale() {
+    fn public_url_does_not_clobber_overlay() {
         let dir = tempfile::tempdir().unwrap();
         let state = FleetState::new(dir.path().join("fleet-state.json"));
         state
-            .persist_url("verda-1", "http://100.64.0.1:11434", Some("100.64.0.1"))
+            .persist_url("verda-1", "http://127.0.0.1:41990")
             .unwrap();
         let instance = VerdaInstanceId::parse("i-1").unwrap();
         state
@@ -477,45 +538,65 @@ mod tests {
                     location: "HEL1",
                     instance_type: "gpu",
                     os_volume_id: None,
-                    tailscale_ip: None,
                     spot_price_per_hour: Some(0.42),
+                    hostname: None,
                 },
             )
             .unwrap();
         let id = NodeId::parse("verda-1").unwrap();
         assert_eq!(
             state.hydrate_url(&id).unwrap().as_deref(),
-            Some("http://100.64.0.1:11434")
+            Some("http://127.0.0.1:41990")
         );
         let entry = state.get_entry("verda-1").unwrap().unwrap();
-        assert_eq!(entry.tailscale_ip.as_deref(), Some("100.64.0.1"));
+        assert_eq!(
+            entry.local_access_url.as_deref(),
+            Some("http://127.0.0.1:41990")
+        );
         assert_eq!(entry.verda_instance_id.as_deref(), Some("i-1"));
         assert_eq!(entry.verda_spot_price_per_hour, Some(0.42));
         assert_eq!(entry.managed_by.as_deref(), Some("verda"));
     }
 
     #[test]
-    fn multiple_hosts_hydrate_only_tailscale() {
+    fn cgnat_is_not_a_routing_url() {
         let dir = tempfile::tempdir().unwrap();
         let state = FleetState::new(dir.path().join("fleet-state.json"));
-        state.persist_url("a", "http://a:11434", None).unwrap();
-        state.persist_url("b", "http://b:11434", None).unwrap();
-        state
-            .persist_url("c", "http://c:11434", Some("100.64.0.1"))
-            .unwrap();
+        state.persist_url("a", "http://a:11434").unwrap();
+        state.persist_url("b", "http://b:11434").unwrap();
+        state.persist_url("c", "http://100.64.0.1:11434").unwrap();
         let loaded = state.load().unwrap();
         assert_eq!(loaded.len(), 3);
         assert_eq!(loaded["a"].url.as_deref(), Some("http://a:11434"));
-        assert!(state
-            .hydrate_url(&NodeId::parse("a").unwrap())
-            .unwrap()
-            .is_none());
         assert_eq!(
             state
-                .hydrate_url(&NodeId::parse("c").unwrap())
+                .hydrate_url(&NodeId::parse("a").unwrap())
                 .unwrap()
                 .as_deref(),
-            Some("http://100.64.0.1:11434")
+            Some("http://a:11434")
+        );
+        assert!(state
+            .hydrate_url(&NodeId::parse("c").unwrap())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn old_tailscale_ip_is_ignored_until_re_enroll() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-state.json");
+        fs::write(
+            &path,
+            r#"{"n":{"url":"http://100.64.0.1:11434","tailscale_ip":"100.64.0.1"}}"#,
+        )
+        .unwrap();
+        let state = FleetState::new(&path);
+        let id = NodeId::parse("n").unwrap();
+        assert!(state.hydrate_url(&id).unwrap().is_none());
+        let entry = state.get_entry("n").unwrap().unwrap();
+        assert_eq!(
+            entry.extra.get("tailscale_ip").and_then(Value::as_str),
+            Some("100.64.0.1")
         );
     }
 
@@ -525,8 +606,8 @@ mod tests {
         let path = dir.path().join("fleet-state.json");
         let tmp = append_suffix(&path, ".tmp");
         let state = FleetState::new(&path);
-        state.persist_url("a", "http://a:11434", None).unwrap();
-        state.persist_url("b", "http://b:11434", None).unwrap();
+        state.persist_url("a", "http://a:11434").unwrap();
+        state.persist_url("b", "http://b:11434").unwrap();
         state.remove("a").unwrap();
         let loaded = state.load().unwrap();
         assert_eq!(loaded.len(), 1);
@@ -542,7 +623,7 @@ mod tests {
         let path = dir.path().join("fleet-state.json");
         fs::write(
             &path,
-            r#"{"n":{"url":"http://100.64.0.1:11434","thunder_instance_id":"old"}}"#,
+            r#"{"n":{"url":"http://127.0.0.1:41990","thunder_instance_id":"old"}}"#,
         )
         .unwrap();
         let state = FleetState::new(&path);
@@ -554,9 +635,7 @@ mod tests {
                 .and_then(Value::as_str),
             Some("old")
         );
-        state
-            .persist_url("n", "http://100.64.0.1:11434", Some("100.64.0.1"))
-            .unwrap();
+        state.persist_url("n", "http://127.0.0.1:41990").unwrap();
         let again = state.get_entry("n").unwrap().unwrap();
         assert_eq!(
             again
@@ -564,6 +643,83 @@ mod tests {
                 .get("thunder_instance_id")
                 .and_then(Value::as_str),
             Some("old")
+        );
+    }
+
+    #[test]
+    fn persist_enroll_hydrates_loopback_and_updates_verda_in_place() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = FleetState::new(dir.path().join("fleet-state.json"));
+        let instance = VerdaInstanceId::parse("i-1").unwrap();
+        state
+            .persist_verda_node(
+                "verda-i-1",
+                VerdaNodePersist {
+                    url: "",
+                    instance_id: &instance,
+                    location: "HEL1",
+                    instance_type: "gpu",
+                    os_volume_id: None,
+                    spot_price_per_hour: None,
+                    hostname: None,
+                },
+            )
+            .unwrap();
+        state
+            .persist_enroll(
+                "verda-i-1",
+                EnrollPersist {
+                    url: "http://127.0.0.1:41990",
+                    capacity_url: "http://127.0.0.1:41991",
+                    ollama_share_id: "share-ollama",
+                    agent_share_id: "share-agent",
+                },
+            )
+            .unwrap();
+        let loaded = state.load().unwrap();
+        assert_eq!(loaded.len(), 1);
+        let entry = &loaded["verda-i-1"];
+        assert_eq!(entry.managed_by.as_deref(), Some("verda"));
+        assert_eq!(entry.verda_instance_id.as_deref(), Some("i-1"));
+        assert_eq!(entry.tunnel_backend.as_deref(), Some("zrok"));
+        assert_eq!(entry.url.as_deref(), Some("http://127.0.0.1:41990"));
+        assert_eq!(
+            entry.local_access_url.as_deref(),
+            Some("http://127.0.0.1:41990")
+        );
+        assert_eq!(entry.share_token_id.as_deref(), Some("share-ollama"));
+        assert_eq!(
+            entry.capacity_url.as_deref(),
+            Some("http://127.0.0.1:41991")
+        );
+        let id = NodeId::parse("verda-i-1").unwrap();
+        assert_eq!(
+            state.hydrate_url(&id).unwrap().as_deref(),
+            Some("http://127.0.0.1:41990")
+        );
+        assert_eq!(
+            state.hydrate_capacity_url(&id).unwrap().as_deref(),
+            Some("http://127.0.0.1:41991")
+        );
+
+        state
+            .persist_verda_node(
+                "verda-i-1",
+                VerdaNodePersist {
+                    url: "http://135.181.1.1:11434",
+                    instance_id: &instance,
+                    location: "HEL1",
+                    instance_type: "gpu",
+                    os_volume_id: None,
+                    spot_price_per_hour: None,
+                    hostname: None,
+                },
+            )
+            .unwrap();
+        assert_eq!(state.load().unwrap().len(), 1);
+        assert_eq!(
+            state.hydrate_url(&id).unwrap().as_deref(),
+            Some("http://127.0.0.1:41990")
         );
     }
 }

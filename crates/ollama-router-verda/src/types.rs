@@ -195,6 +195,10 @@ pub struct Instance {
     pub os_volume_id: Option<String>,
     #[serde(default)]
     pub tags: Vec<Tag>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+    #[serde(default)]
+    pub startup_script_id: Option<String>,
 }
 
 impl Instance {
@@ -218,5 +222,22 @@ impl Instance {
             .iter()
             .map(|t| (t.key.as_str(), t.value.as_str()))
             .collect()
+    }
+}
+
+/// One entry of `GET /v1/scripts`. Extra fields are ignored.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct StartupScript {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub script_id: Option<String>,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl StartupScript {
+    pub fn script_key(&self) -> Option<&str> {
+        self.id.as_deref().or(self.script_id.as_deref())
     }
 }

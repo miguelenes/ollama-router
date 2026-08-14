@@ -490,8 +490,6 @@ mod tests {
                 cpu_cores: Some(8),
             },
             max_inflight,
-            ssh: None,
-            provision: None,
         }
     }
 

@@ -5,7 +5,6 @@ pub mod cloud;
 pub mod config;
 pub mod fleet;
 pub mod jobs;
-pub mod provision;
 pub mod routing;
 
 pub use capacity::{
@@ -18,22 +17,18 @@ pub use cloud::{
     IdleCandidate, IdleNodeView, IdlePolicy, NoopDemandScale, NoopFleetEvents,
 };
 pub use config::{
-    hydrate_node_urls, load_config, load_config_from, parse_yaml, ConfigError, EnvSource, OsEnv,
-    RouterConfig,
+    http_url_for_bind, hydrate_node_urls, load_config, load_config_from, parse_yaml,
+    socket_addr_for_bind, ConfigError, EnvSource, OsEnv, RouterConfig, TunnelConfig,
 };
 pub use fleet::{
-    load_fleet_nodes, parse_fleet_yaml, url_host_is_public_ipv4, FleetState, FleetStateError,
+    load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
+    url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist, FleetState, FleetStateError,
     GpuSnapshot, NodeId, NodeOrigin, NodeSnapshot, PressureLevel, Registry, RouterId,
     VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use jobs::{
     Job, JobId, JobKind, JobObserver, JobOutcome, JobStatus, JobStore, JobTarget,
     ModelOrchestrator, OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
-};
-pub use provision::{
-    posix_quote, provision_config_from_defaults, read_provision_script, redact_authkey,
-    resolve_provision_script, NodeProvisioner, ProvisionFuture, ProvisionOpts, ProvisionPhase,
-    ProvisionResult, ProvisionStatus, DEFAULT_SCRIPT_PATH, REMOTE_SCRIPT,
 };
 pub use routing::{
     classify, parse_model_size_b, placement_class, placement_eligible_node_ids,

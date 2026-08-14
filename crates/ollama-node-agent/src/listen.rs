@@ -1,5 +1,5 @@
-//! Resolve `loopback | tailscale | lan | all` to a bind IP. Tailscale never
-//! silently falls back to 0.0.0.0.
+//! Resolve `loopback | lan | all` to a bind IP. `all` never silently binds
+//! without a bearer token.
 
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -9,21 +9,12 @@ use crate::config::{BindSpec, ListenMode};
 
 #[derive(Debug, Error)]
 pub enum ListenError {
-    #[error("tailscale listen requested but no 100.64/10 IPv4 is present")]
-    TailscaleMissing,
-    #[error("lan listen requested but no private non-Tailscale IPv4 is present")]
+    #[error("lan listen requested but no private IPv4 is present")]
     LanMissing,
     #[error("listen all requires a bearer token")]
     AllRequiresToken,
     #[error("invalid listen address: {0}")]
     InvalidAddress(String),
-}
-
-const TS_PREFIX: u8 = 100;
-
-pub fn is_tailscale_ipv4(ip: Ipv4Addr) -> bool {
-    let oct = ip.octets();
-    oct[0] == TS_PREFIX && (oct[1] & 0xc0) == 64
 }
 
 pub fn is_private_ipv4(ip: Ipv4Addr) -> bool {
@@ -49,8 +40,6 @@ impl AddrSource for HostAddrs {
 
 fn local_ipv4s() -> std::io::Result<Vec<Ipv4Addr>> {
     let mut ips = Vec::new();
-    // Best-effort: parse `hostname -I` / `ip -4 -o addr` is OS-specific.
-    // Use std::net UDP bind trick for a primary address, plus env.
     if let Ok(s) = std::env::var("OLLAMA_NODE_AGENT_DISCOVERED_V4") {
         for part in s.split(',') {
             if let Ok(ip) = part.trim().parse() {
@@ -78,6 +67,12 @@ pub fn resolve_bind(
 ) -> Result<IpAddr, ListenError> {
     match spec {
         BindSpec::Address(raw) => {
+            if raw.eq_ignore_ascii_case("tailscale") {
+                return Err(ListenError::InvalidAddress(
+                    "listen mode tailscale was removed; use loopback (zrok private share) or lan"
+                        .into(),
+                ));
+            }
             let ip: IpAddr = raw
                 .parse()
                 .map_err(|_| ListenError::InvalidAddress(raw.clone()))?;
@@ -93,16 +88,10 @@ pub fn resolve_bind(
             }
             Ok(IpAddr::V4(Ipv4Addr::UNSPECIFIED))
         }
-        BindSpec::Mode(ListenMode::Tailscale) => addrs
-            .ipv4s()
-            .into_iter()
-            .find(|ip| is_tailscale_ipv4(*ip))
-            .map(IpAddr::V4)
-            .ok_or(ListenError::TailscaleMissing),
         BindSpec::Mode(ListenMode::Lan) => addrs
             .ipv4s()
             .into_iter()
-            .find(|ip| ip.is_private() && !is_tailscale_ipv4(*ip) && *ip != Ipv4Addr::LOCALHOST)
+            .find(|ip| ip.is_private() && *ip != Ipv4Addr::LOCALHOST)
             .map(IpAddr::V4)
             .ok_or(ListenError::LanMissing),
     }
@@ -127,21 +116,24 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_errors_without_cgnat() {
+    fn loopback_is_localhost() {
         let addrs = Fixed(vec![Ipv4Addr::new(192, 168, 1, 10)]);
-        let err = resolve_bind(&BindSpec::Mode(ListenMode::Tailscale), &addrs, false)
-            .expect_err("missing ts");
-        assert!(matches!(err, ListenError::TailscaleMissing));
+        let ip = resolve_bind(&BindSpec::Mode(ListenMode::Loopback), &addrs, false).unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::LOCALHOST));
     }
 
     #[test]
-    fn tailscale_picks_cgnat() {
-        let addrs = Fixed(vec![
-            Ipv4Addr::new(192, 168, 1, 10),
-            Ipv4Addr::new(100, 64, 1, 5),
-        ]);
-        let ip = resolve_bind(&BindSpec::Mode(ListenMode::Tailscale), &addrs, false).unwrap();
-        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(100, 64, 1, 5)));
+    fn lan_picks_rfc1918() {
+        let addrs = Fixed(vec![Ipv4Addr::LOCALHOST, Ipv4Addr::new(192, 168, 1, 10)]);
+        let ip = resolve_bind(&BindSpec::Mode(ListenMode::Lan), &addrs, false).unwrap();
+        assert_eq!(ip, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 10)));
+    }
+
+    #[test]
+    fn lan_errors_without_private() {
+        let addrs = Fixed(vec![Ipv4Addr::LOCALHOST]);
+        let err = resolve_bind(&BindSpec::Mode(ListenMode::Lan), &addrs, false).expect_err("lan");
+        assert!(matches!(err, ListenError::LanMissing));
     }
 
     #[test]
@@ -154,10 +146,17 @@ mod tests {
     }
 
     #[test]
-    fn cgnat_helper() {
-        assert!(is_tailscale_ipv4(Ipv4Addr::new(100, 64, 0, 1)));
-        assert!(is_tailscale_ipv4(Ipv4Addr::new(100, 127, 255, 255)));
-        assert!(!is_tailscale_ipv4(Ipv4Addr::new(100, 63, 0, 1)));
-        let _ = is_private_ipv4(Ipv4Addr::LOCALHOST);
+    fn removed_tailscale_mode_is_invalid_address() {
+        let addrs = Fixed(vec![]);
+        let err = resolve_bind(&BindSpec::Address("tailscale".into()), &addrs, false)
+            .expect_err("removed");
+        assert!(matches!(err, ListenError::InvalidAddress(_)));
+    }
+
+    #[test]
+    fn private_helper() {
+        assert!(is_private_ipv4(Ipv4Addr::LOCALHOST));
+        assert!(is_private_ipv4(Ipv4Addr::new(10, 0, 0, 1)));
+        assert!(!is_private_ipv4(Ipv4Addr::new(8, 8, 8, 8)));
     }
 }

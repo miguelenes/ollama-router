@@ -32,5 +32,6 @@ windows-service = "0.8"
 
 [dev-dependencies]
 http-body-util.workspace = true
+httpmock.workspace = true
 tempfile.workspace = true
 tower.workspace = true

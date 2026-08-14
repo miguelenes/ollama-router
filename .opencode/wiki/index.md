@@ -10,7 +10,8 @@ lastReviewed: 2026-08-13
 
 Standalone Rust fleet proxy. Verda Cloud spots only — no Thunder, no RunPod.
 
-- [[concepts/ollama-router-product]] — Env-first fleet, Tailscale-only URLs, Verda spots, no YAML inventory.
+- [[concepts/ollama-router-product]] — Env-first fleet, tunnel/loopback-only cloud URLs, Verda spots, no YAML inventory.
+- [[concepts/ollama-router-node-tunnel]] — Self-hosted zrok private share, enroll token, loopback bind, Verda startup script.
 - [[concepts/ollama-router-idle-scale-down]] — Router-owned idle teardown; `inflight_inc` is the only activity signal.
 - [[concepts/ollama-router-load-share]] — Utilization WLC + class preference.
 - [[concepts/ollama-router-phase-3-retry-and-memory-safety]] — Pre-first-byte retry, bounded NDJSON, warm-keeper inflight.

@@ -1,18 +1,16 @@
 //! Verda spot fleet manager: create, adopt, destroy, reconcile, idle scale-down.
 
 use std::collections::{BTreeMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::cloud::{
     idle_scale_down_candidates, DemandScale, FleetEvents, IdleNodeView, IdlePolicy,
 };
-use ollama_router_core::config::{Capacity, NodeConfig, NodeSshConfig, OsEnv, RouterConfig};
+use ollama_router_core::config::{Capacity, EnvSource, NodeConfig, OsEnv, RouterConfig};
 use ollama_router_core::fleet::{
     FleetState, NodeId, NodeOrigin, Registry, VerdaInstanceId, VerdaNodePersist,
-};
-use ollama_router_core::provision::{
-    provision_config_from_defaults, NodeProvisioner, ProvisionOpts, ProvisionStatus,
 };
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
@@ -23,12 +21,23 @@ use crate::client::{VerdaClient, VerdaError};
 use crate::images::pick_ubuntu24_nvidia_docker_image;
 use crate::keys::{companion_private_key, ensure_ssh_key_id};
 use crate::selector::{rank_candidates, SpotChoice};
+use crate::startup::{agent_init_script, default_package_urls, StartupScriptParams};
 use crate::types::Instance;
 
 pub const MANAGED_BY: &str = "ollama-router";
 const DESCRIPTION: &str = "ollama-router managed spot";
 const TERMINAL: &[&str] = &["failed", "error", "deleted", "terminated"];
 const EVICTED: &[&str] = &["discontinued", "evicted"];
+const REASON_WAITING_FOR_ENROLL: &str = "waiting_for_enroll";
+const REASON_ENROLL_TIMEOUT: &str = "enroll_timeout";
+const REASON_TAGS_UNREACHABLE: &str = "tags_unreachable";
+const REASON_PUBLIC_URL_BLOCKED: &str = "public_url_blocked";
+
+struct EnrollWait {
+    ok: bool,
+    url: Option<String>,
+    detail: String,
+}
 
 pub struct VerdaManager {
     inner: Arc<Inner>,
@@ -37,10 +46,11 @@ pub struct VerdaManager {
 struct Inner {
     config: Arc<RouterConfig>,
     client: VerdaClient,
+    http: reqwest::Client,
     registry: Arc<Registry>,
     fleet_state: Arc<FleetState>,
-    provisioner: Arc<dyn NodeProvisioner>,
     ensure_lock: Mutex<()>,
+    startup_script_id: Mutex<Option<String>>,
     demand: std::sync::Mutex<Option<JoinHandle<()>>>,
     events: std::sync::Mutex<Option<Arc<dyn FleetEvents>>>,
 }
@@ -51,16 +61,22 @@ impl VerdaManager {
         client: VerdaClient,
         registry: Arc<Registry>,
         fleet_state: Arc<FleetState>,
-        provisioner: Arc<dyn NodeProvisioner>,
     ) -> Self {
+        let http = reqwest::Client::builder()
+            .use_rustls_tls()
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(5))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             inner: Arc::new(Inner {
                 config,
                 client,
+                http,
                 registry,
                 fleet_state,
-                provisioner,
                 ensure_lock: Mutex::new(()),
+                startup_script_id: Mutex::new(None),
                 demand: std::sync::Mutex::new(None),
                 events: std::sync::Mutex::new(None),
             }),
@@ -125,21 +141,18 @@ impl VerdaManager {
         if let Some(p) = self.inner.config.verda.ssh_private_key_file.as_deref() {
             return Some(p.to_string());
         }
-        if let Some(p) = self.inner.config.verda.ssh_public_key_file.as_deref() {
-            return Some(
-                companion_private_key(std::path::Path::new(p))
-                    .to_string_lossy()
-                    .into(),
-            );
-        }
         self.inner
             .config
-            .nodes
-            .iter()
-            .find_map(|n| n.ssh.as_ref().and_then(|s| s.key_file.clone()))
+            .verda
+            .ssh_public_key_file
+            .as_deref()
+            .map(|p| {
+                companion_private_key(std::path::Path::new(p))
+                    .to_string_lossy()
+                    .into()
+            })
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn persist_verda(
         &self,
         node_id: &NodeId,
@@ -147,7 +160,6 @@ impl VerdaManager {
         instance: &Instance,
         location: &str,
         instance_type: &str,
-        tailscale_ip: Option<&str>,
         spot_price: Option<f64>,
     ) {
         let Some(iid) = instance.instance_id_value() else {
@@ -162,8 +174,8 @@ impl VerdaManager {
             location,
             instance_type,
             os_volume_id: instance.os_volume_id.as_deref(),
-            tailscale_ip,
             spot_price_per_hour: spot_price,
+            hostname: instance.hostname.as_deref(),
         };
         if let Err(err) = self
             .inner
@@ -178,15 +190,9 @@ impl VerdaManager {
         &self,
         instance: &Instance,
         choice: &SpotChoice,
-        private_key_file: Option<&str>,
         url: Option<String>,
     ) -> Option<NodeConfig> {
         let instance_id = instance.instance_id_value()?;
-        let ip = instance.public_ip_value().unwrap_or("");
-        let mut prov = provision_config_from_defaults(&self.inner.config.provision_defaults);
-        if let Some(accept) = self.inner.config.verda.ts_accept_routes {
-            prov.ts_accept_routes = accept;
-        }
         Some(NodeConfig {
             id: Self::node_id_for(instance_id),
             url,
@@ -199,14 +205,6 @@ impl VerdaManager {
                 cpu_cores: None,
             },
             max_inflight: None,
-            ssh: Some(NodeSshConfig {
-                host: ip.to_string(),
-                port: 22,
-                user: "root".into(),
-                key_file: private_key_file.map(str::to_string),
-                password_env: None,
-            }),
-            provision: Some(prov),
         })
     }
 
@@ -238,7 +236,7 @@ impl VerdaManager {
                 }
                 continue;
             }
-            if status == "running" && instance.public_ip_value().is_some() {
+            if status == "running" {
                 return Ok(self.adopt(instance).await);
             }
         }
@@ -246,15 +244,10 @@ impl VerdaManager {
             return Ok(json!({"status": "none"}));
         }
         let key = self.private_key_file();
-        if key.is_none() && self.inner.config.verda.ssh_public_key_file.is_none() {
-            return Err(VerdaError::Message(
-                "Verda ensure needs a local SSH key: set verda.ssh_private_key_file".into(),
-            ));
-        }
         let Some((created, choice)) = self.create_instance(key.as_deref()).await? else {
             return Ok(json!({"status": "none"}));
         };
-        Ok(self.provision_new(&created, &choice, key.as_deref()).await)
+        Ok(self.finish_create(&created, &choice).await)
     }
 
     pub async fn create_additional(&self) -> Result<Value, VerdaError> {
@@ -266,18 +259,10 @@ impl VerdaManager {
 
     async fn create_additional_locked(&self) -> Result<Value, VerdaError> {
         let key = self.private_key_file();
-        if key.is_none() && self.inner.config.verda.ssh_public_key_file.is_none() {
-            return Err(VerdaError::Message(
-                "Verda ensure needs a local SSH key: set verda.ssh_private_key_file".into(),
-            ));
-        }
         let Some((created, choice)) = self.create_instance(key.as_deref()).await? else {
             return Ok(json!({"status": "none"}));
         };
-        let result = self.provision_new(&created, &choice, key.as_deref()).await;
-        if result.get("provision").and_then(Value::as_str) == Some("fail") {
-            let _ = self.compensate(&created).await;
-        }
+        let result = self.finish_create(&created, &choice).await;
         Ok(result)
     }
 
@@ -287,7 +272,6 @@ impl VerdaManager {
         let location = instance.location_value().unwrap_or("").to_string();
         let node_id = Self::node_id_for(instance_id);
         tracing::info!(
-            instance_id,
             instance_type = %instance_type,
             location_code = %location,
             "verda_adopted"
@@ -300,61 +284,18 @@ impl VerdaManager {
             gpus: 1,
             currency: None,
         };
-        let Some(mut node) =
-            self.build_node(instance, &choice, self.private_key_file().as_deref(), None)
-        else {
+        let Some(node) = self.build_node(instance, &choice, None) else {
             return json!({"status": "none"});
         };
-        if let Ok(Some(url)) = self.inner.fleet_state.hydrate_url(&node_id) {
-            node.url = Some(url.clone());
-            self.inner.registry.upsert_verda(node.clone());
-            let _ = self.inner.registry.set_node_url(&node_id, &url);
-            self.persist_verda(
-                &node_id,
-                &url,
-                instance,
-                &location,
-                &instance_type,
-                None,
-                None,
-            );
-            self.emit("adopt");
-            return json!({
-                "status": "adopted",
-                "node_id": node_id.as_str(),
-                "instance_id": instance_id,
-                "provision": "hydrated",
-                "url": url,
-            });
-        }
-        node.url = None;
-        self.inner.registry.upsert_verda(node.clone());
+        self.inner.registry.upsert_verda(node);
+        self.persist_verda(&node_id, "", instance, &location, &instance_type, None);
+        let ready = self.wait_enrolled_and_healthy(&node_id).await;
         self.persist_verda(
             &node_id,
-            "",
+            ready.url.as_deref().unwrap_or(""),
             instance,
             &location,
             &instance_type,
-            None,
-            None,
-        );
-        let result = self
-            .inner
-            .provisioner
-            .provision_node(node, ProvisionOpts::default())
-            .await;
-        let url = self
-            .inner
-            .registry
-            .node_config(&node_id)
-            .and_then(|n| n.url);
-        self.persist_verda(
-            &node_id,
-            url.as_deref().unwrap_or(""),
-            instance,
-            &location,
-            &instance_type,
-            result.tailscale_ip.as_deref(),
             None,
         );
         self.emit("adopt");
@@ -364,59 +305,35 @@ impl VerdaManager {
             "instance_id": instance_id,
             "instance_type": instance_type,
             "location_code": location,
-            "url": url,
-            "provision": result.status.as_str(),
-            "tailscale_ip": result.tailscale_ip,
-            "detail": result.detail,
-            "phase": result.phase,
+            "url": ready.url,
+            "enroll": if ready.ok { "ok" } else { "fail" },
+            "detail": ready.detail,
         })
     }
 
-    async fn provision_new(
-        &self,
-        instance: &Instance,
-        choice: &SpotChoice,
-        private_key_file: Option<&str>,
-    ) -> Value {
+    async fn finish_create(&self, instance: &Instance, choice: &SpotChoice) -> Value {
         let instance_id = instance.instance_id_value().unwrap_or("unknown");
         let node_id = Self::node_id_for(instance_id);
-        let Some(node) = self.build_node(instance, choice, private_key_file, None) else {
+        let Some(node) = self.build_node(instance, choice, None) else {
             return json!({"status": "none"});
         };
-        self.inner.registry.upsert_verda(node.clone());
+        self.inner.registry.upsert_verda(node);
         self.persist_verda(
             &node_id,
             "",
             instance,
             &choice.location_code,
             &choice.instance_type,
-            None,
             Some(choice.spot_price),
         );
-        let result = self
-            .inner
-            .provisioner
-            .provision_node(
-                node,
-                ProvisionOpts {
-                    wait_for_public_ssh: true,
-                    ..ProvisionOpts::default()
-                },
-            )
-            .await;
-        let url = self
-            .inner
-            .registry
-            .node_config(&node_id)
-            .and_then(|n| n.url);
-        if result.status == ProvisionStatus::Ok {
+        let ready = self.wait_enrolled_and_healthy(&node_id).await;
+        if ready.ok {
             self.persist_verda(
                 &node_id,
-                url.as_deref().unwrap_or(""),
+                ready.url.as_deref().unwrap_or(""),
                 instance,
                 &choice.location_code,
                 &choice.instance_type,
-                result.tailscale_ip.as_deref(),
                 Some(choice.spot_price),
             );
         }
@@ -426,12 +343,75 @@ impl VerdaManager {
             "instance_id": instance_id,
             "instance_type": choice.instance_type,
             "location_code": choice.location_code,
-            "url": url,
-            "provision": result.status.as_str(),
-            "tailscale_ip": result.tailscale_ip,
-            "detail": result.detail,
-            "phase": result.phase,
+            "url": ready.url,
+            "enroll": if ready.ok { "ok" } else { "fail" },
+            "detail": ready.detail,
         })
+    }
+
+    async fn wait_enrolled_and_healthy(&self, node_id: &NodeId) -> EnrollWait {
+        let timeout =
+            Duration::from_secs_f64(self.inner.config.verda.create_timeout_seconds.max(0.0));
+        let poll = Duration::from_secs_f64(self.inner.config.verda.poll_interval_seconds.max(0.5));
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let _detail = match self.try_enroll_ready(node_id).await {
+                Ok((url, capacity_url)) => match self.inner.registry.set_node_url(node_id, &url) {
+                    Ok(()) => {
+                        if let Some(ref cap) = capacity_url {
+                            let _ = self.inner.registry.set_capacity_url(node_id, cap);
+                        }
+                        tracing::info!(node_id = %node_id, "verda_enrolled");
+                        return EnrollWait {
+                            ok: true,
+                            url: Some(url),
+                            detail: "enrolled".into(),
+                        };
+                    }
+                    Err(err) => allowlisted_url_reason(&err),
+                },
+                Err(detail) => detail,
+            };
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(node_id = %node_id, reason = REASON_ENROLL_TIMEOUT, "verda_enroll_timeout");
+                return EnrollWait {
+                    ok: false,
+                    url: None,
+                    detail: REASON_ENROLL_TIMEOUT.into(),
+                };
+            }
+            tokio::time::sleep(poll).await;
+        }
+    }
+
+    async fn try_enroll_ready(
+        &self,
+        node_id: &NodeId,
+    ) -> Result<(String, Option<String>), &'static str> {
+        let url = self
+            .inner
+            .fleet_state
+            .hydrate_url(node_id)
+            .map_err(|_| REASON_WAITING_FOR_ENROLL)?
+            .ok_or(REASON_WAITING_FOR_ENROLL)?;
+        let tags_url = format!("{}/api/tags", url.trim_end_matches('/'));
+        let resp = self
+            .inner
+            .http
+            .get(&tags_url)
+            .send()
+            .await
+            .map_err(|_| REASON_TAGS_UNREACHABLE)?;
+        if !resp.status().is_success() {
+            return Err(REASON_TAGS_UNREACHABLE);
+        }
+        let capacity_url = self
+            .inner
+            .fleet_state
+            .hydrate_capacity_url(node_id)
+            .ok()
+            .flatten();
+        Ok((url, capacity_url))
     }
 
     async fn create_instance(
@@ -522,16 +502,17 @@ impl VerdaManager {
             private_key_file,
         )
         .await?;
+        let startup_script_id = self.ensure_startup_script_id().await?;
         let hostname = hostname_for(&self.router_id());
-        let payload = json!({
+        let mut payload = json!({
             "instance_type": choice.instance_type,
             "image": image,
-            "ssh_key_ids": [ssh_key_id],
             "hostname": hostname,
             "description": DESCRIPTION,
             "location_code": choice.location_code,
             "is_spot": true,
             "contract": "SPOT",
+            "startup_script_id": startup_script_id,
             "os_volume": {
                 "name": "ollama-router-os",
                 "size": self.inner.config.verda.os_volume_gb,
@@ -539,21 +520,31 @@ impl VerdaManager {
             },
             "tags": self.managed_tags(),
         });
+        if let Some(id) = ssh_key_id {
+            payload["ssh_key_ids"] = json!([id]);
+        }
         let created = self.inner.client.create_instance(payload).await?;
         let instance_id = created
             .instance_id_value()
             .ok_or_else(|| VerdaError::Message("Verda create returned no instance id".into()))?
             .to_string();
         tracing::info!(
-            instance_id = %instance_id,
             instance_type = %choice.instance_type,
             location_code = %choice.location_code,
-            image = %image,
-            hostname = %hostname,
+            vram_gb = choice.gpu_memory_gb,
             "verda_created"
         );
         match self.wait_running(&instance_id).await {
-            Ok(inst) => {
+            Ok(mut inst) => {
+                if inst
+                    .hostname
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                {
+                    inst.hostname = Some(hostname);
+                }
                 self.emit("create");
                 Ok(inst)
             }
@@ -562,6 +553,77 @@ impl VerdaManager {
                 Err(err)
             }
         }
+    }
+
+    async fn ensure_startup_script_id(&self) -> Result<String, VerdaError> {
+        let cfg = &self.inner.config.verda;
+        if let Some(id) = cfg
+            .startup_script_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Ok(id.to_string());
+        }
+        {
+            let cached = self.inner.startup_script_id.lock().await;
+            if let Some(id) = cached.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+                return Ok(id.to_string());
+            }
+        }
+        let name = cfg.startup_script_name.trim();
+        let listed = self.inner.client.list_startup_scripts().await?;
+        if let Some(id) = listed.iter().find_map(|script| {
+            let listed_name = script.name.as_deref().map(str::trim)?;
+            if listed_name == name {
+                script.script_key().map(str::to_string)
+            } else {
+                None
+            }
+        }) {
+            *self.inner.startup_script_id.lock().await = Some(id.clone());
+            return Ok(id);
+        }
+        let body = self.build_startup_script()?;
+        let created = self.inner.client.create_startup_script(name, &body).await?;
+        let id = created.script_key().map(str::to_string).ok_or_else(|| {
+            VerdaError::Message("Verda create startup script returned no id".into())
+        })?;
+        *self.inner.startup_script_id.lock().await = Some(id.clone());
+        Ok(id)
+    }
+
+    fn build_startup_script(&self) -> Result<String, VerdaError> {
+        let cfg = &self.inner.config.verda;
+        let env = OsEnv;
+        let (deb_amd64, deb_arm64, tar_amd64, tar_arm64) = default_package_urls(cfg);
+        let zrok = env
+            .var(&cfg.zrok_enable_token_env)
+            .filter(|s| !s.trim().is_empty());
+        let enroll_token = env
+            .var(&cfg.enroll_token_env)
+            .filter(|s| !s.trim().is_empty());
+        let params = StartupScriptParams {
+            enroll_url: cfg
+                .enroll_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            zrok_enable_token: zrok.as_deref(),
+            zrok_api_endpoint: self.inner.config.tunnel.api_endpoint(),
+            enroll_token: enroll_token.as_deref(),
+            enroll_token_env: cfg.enroll_token_env.trim(),
+            package_url: cfg
+                .agent_package_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty()),
+            deb_amd64: &deb_amd64,
+            deb_arm64: &deb_arm64,
+            tar_amd64: &tar_amd64,
+            tar_arm64: &tar_arm64,
+        };
+        agent_init_script(&params).map_err(VerdaError::Message)
     }
 
     async fn wait_running(&self, instance_id: &str) -> Result<Instance, VerdaError> {
@@ -585,12 +647,8 @@ impl VerdaManager {
                     "no_capacity: spot evicted during create".into(),
                 ));
             }
-            if status == "running" && instance.public_ip_value().is_some() {
-                tracing::info!(
-                    instance_id,
-                    ip = instance.public_ip_value().unwrap_or(""),
-                    "verda_running"
-                );
+            if status == "running" {
+                tracing::info!(instance_id, "verda_running");
                 return Ok(instance);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -713,8 +771,8 @@ impl VerdaManager {
                     "status": instance.status,
                     "ip": instance.public_ip_value(),
                     "url": entry.and_then(|e| e.url.clone()),
-                    "tailscale_ip": entry.and_then(|e| e.tailscale_ip.clone()),
-                    "mode": "ssh",
+                    "local_access_url": entry.and_then(|e| e.local_access_url.clone()),
+                    "mode": "enroll",
                     "in_registry": self.inner.registry.get(&node_id).is_some(),
                 })
             })
@@ -761,7 +819,7 @@ impl VerdaManager {
         }
         for inst in &owned {
             let status = inst.status.as_deref().unwrap_or("").to_ascii_lowercase();
-            if status != "running" || inst.public_ip_value().is_none() {
+            if status != "running" {
                 continue;
             }
             let Some(iid) = inst.instance_id_value() else {
@@ -972,6 +1030,20 @@ fn hostname_for(router_id: &str) -> String {
         })
         .collect();
     let slug = slug.trim_matches('-');
-    let take: String = slug.chars().take(16).collect();
-    format!("orouter-{take}")
+    let take: String = slug.chars().take(8).collect();
+    static SEQ: AtomicU64 = AtomicU64::new(1);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(seq);
+    format!("or-{take}-{nanos:x}{seq:x}")
+}
+
+fn allowlisted_url_reason(err: &str) -> &'static str {
+    if err.contains(REASON_PUBLIC_URL_BLOCKED) {
+        REASON_PUBLIC_URL_BLOCKED
+    } else {
+        REASON_TAGS_UNREACHABLE
+    }
 }

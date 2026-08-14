@@ -1,4 +1,15 @@
 # Default agent config (dpkg conffile). This package does not install Ollama;
-# run `sudo ollama-node-agent setup` to converge Ollama and the listen drop-in.
-listen: tailscale
+# run `sudo ollama-node-agent setup` to converge Ollama, loopback binds, and
+# the zrok private-share sidecar. Enable against a self-hosted controller:
+#   export ZROK_API_ENDPOINT=http://127.0.0.1:18080
+#   export ZROK_ENABLE_TOKEN=…   # never commit; never a YAML literal
+#   sudo --preserve-env=ZROK_API_ENDPOINT,ZROK_ENABLE_TOKEN ollama-node-agent setup
+# That is not a VPN. Same-LAN hosts keep direct URLs in fleet.yaml.
+listen: loopback
 port: 11436
+ollama:
+  listen: loopback
+tunnel:
+  enable: true
+  zrok_bin: zrok
+  # api_endpoint: http://127.0.0.1:18080

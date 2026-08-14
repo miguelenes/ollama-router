@@ -4,11 +4,10 @@ use std::net::IpAddr;
 use std::time::Duration;
 
 use tokio::process::Command;
-use tokio::time::timeout;
 
 use super::{
-    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
-    SUPERVISOR_MANUAL, SUPERVISOR_SYSTEMD,
+    install_self_binary, tunnel, write_bytes_idempotent, write_token_file, ConvergeState,
+    SetupContext, SUPERVISOR_MANUAL, SUPERVISOR_SYSTEMD,
 };
 use crate::collect::ollama_version;
 
@@ -61,6 +60,14 @@ pub async fn converge(
         tracing::info!(unit_changed, "agent systemd unit");
         state.unit_written = true;
         state.supervisor = Some(SUPERVISOR_SYSTEMD.into());
+        if ctx.config.tunnel.enable {
+            let tunnel_changed = write_bytes_idempotent(
+                &ctx.paths.unit_dir.join("ollama-node-agent-tunnel.service"),
+                tunnel::tunnel_unit_text().as_bytes(),
+            )?;
+            tracing::info!(tunnel_changed, "tunnel systemd unit");
+            state.tunnel_unit_written = true;
+        }
     } else {
         tracing::info!(
             config = %ctx.paths.config.display(),
@@ -70,12 +77,8 @@ pub async fn converge(
         state.supervisor = Some(SUPERVISOR_MANUAL.into());
     }
 
-    if ctx.config.tailscale.enable {
-        if let Some(key) = ctx.ts_authkey.filter(|k| !k.is_empty()) {
-            join_tailscale(key, ctx.dry_commands).await?;
-        } else {
-            tracing::info!("tailscale.enable but no auth key; skip join");
-        }
+    if ctx.dry_commands && ctx.config.tunnel.enable {
+        tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, true).await?;
     }
 
     if !ctx.dry_commands {
@@ -86,13 +89,28 @@ pub async fn converge(
                 .args(["stop", "ollama-node-agent"])
                 .status()
                 .await;
+            let _ = Command::new("systemctl")
+                .args(["stop", tunnel::TUNNEL_UNIT_NAME])
+                .status()
+                .await;
         }
         install_self_binary(&dest)?;
         if systemd {
             systemctl(&["daemon-reload"]).await?;
             systemctl(&["enable", "--now", "ollama"]).await?;
             wait_ollama_tags(ollama_bind).await?;
+            if ctx.config.tunnel.enable {
+                tunnel::wait_ollama_loopback_tags().await?;
+                tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, false)
+                    .await?;
+                chown_agent_path(&tunnel::zrok_home(ctx.paths)).await;
+                chown_agent_path(&ctx.paths.state).await;
+                chown_agent_path(&tunnel::find_path(ctx.paths)).await;
+            }
             systemctl(&["enable", "--now", "ollama-node-agent"]).await?;
+            if ctx.config.tunnel.enable {
+                systemctl(&["enable", "--now", tunnel::TUNNEL_UNIT_NAME]).await?;
+            }
         } else {
             tracing::info!(
                 bin = %dest.display(),
@@ -101,6 +119,15 @@ pub async fn converge(
                 dest.display(),
                 ctx.paths.config.display()
             );
+            if ctx.config.tunnel.enable {
+                tracing::info!(
+                    "start tunnel sidecar: {} tunnel --config {}",
+                    dest.display(),
+                    ctx.paths.config.display()
+                );
+                tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, false)
+                    .await?;
+            }
         }
     }
 
@@ -182,6 +209,20 @@ async fn ensure_agent_user() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn chown_agent_path(path: &std::path::Path) {
+    if !path.exists() {
+        return;
+    }
+    let _ = Command::new("chown")
+        .args([
+            "-R",
+            "ollama-node-agent:ollama-node-agent",
+            &path.display().to_string(),
+        ])
+        .status()
+        .await;
+}
+
 async fn wait_ollama_tags(bind: &str) -> anyhow::Result<()> {
     let url = format!("http://{bind}/api/tags");
     let client = reqwest::Client::builder()
@@ -202,22 +243,6 @@ async fn wait_ollama_tags(bind: &str) -> anyhow::Result<()> {
     anyhow::bail!("ollama /api/tags did not become ready on {bind}");
 }
 
-async fn join_tailscale(authkey: &str, dry: bool) -> anyhow::Result<()> {
-    if dry {
-        return Ok(());
-    }
-    let fut = Command::new("tailscale")
-        .args(["up", "--authkey", authkey, "--ssh"])
-        .output();
-    match timeout(Duration::from_secs(60), fut).await {
-        Ok(Ok(out)) if out.status.success() => Ok(()),
-        _ => {
-            tracing::warn!("tailscale up failed or timed out");
-            Ok(())
-        }
-    }
-}
-
 fn now_rfc3339() -> String {
     time::OffsetDateTime::now_utc()
         .format(&time::format_description::well_known::Rfc3339)
@@ -234,8 +259,8 @@ mod tests {
         let mut extra = BTreeMap::new();
         extra.insert("OLLAMA_NUM_PARALLEL".into(), "2".into());
         extra.insert("OLLAMA_HOST".into(), "0.0.0.0:11434".into());
-        let text = ollama_dropin("100.64.1.2:11434", Some("/var/lib/ollama/models"), &extra);
-        assert!(text.contains("Environment=OLLAMA_HOST=100.64.1.2:11434"));
+        let text = ollama_dropin("127.0.0.1:11434", Some("/var/lib/ollama/models"), &extra);
+        assert!(text.contains("Environment=OLLAMA_HOST=127.0.0.1:11434"));
         assert!(text.contains("Environment=OLLAMA_MODELS=/var/lib/ollama/models"));
         assert!(text.contains("OLLAMA_NUM_PARALLEL=2"));
         assert_eq!(text.matches("OLLAMA_HOST=").count(), 1);
@@ -247,6 +272,11 @@ mod tests {
         assert!(u.contains("NoNewPrivileges=true"));
         assert!(u.contains("User=ollama-node-agent"));
         assert!(u.contains("ExecStart=/usr/local/bin/ollama-node-agent"));
+        let t = crate::setup::tunnel_unit_text();
+        assert!(t.contains("NoNewPrivileges=true"));
+        assert!(t.contains("ollama-node-agent-tunnel"));
+        assert!(t.contains("HOME=/var/lib/ollama-node-agent"));
+        assert!(t.contains("EnvironmentFile=-/etc/ollama-node-agent/env"));
     }
 
     #[test]
@@ -266,18 +296,25 @@ mod tests {
         let ctx = SetupContext {
             config: &cfg,
             paths: &paths,
-            ts_authkey: None,
+            enable_token: None,
             dry_commands: true,
         };
         let state = converge(&ctx, "127.0.0.1:11434", IpAddr::V4(Ipv4Addr::LOCALHOST))
             .await
             .unwrap();
         assert!(state.unit_written);
+        assert!(state.tunnel_unit_written);
+        assert!(state.share_present());
         assert_eq!(state.supervisor.as_deref(), Some(SUPERVISOR_SYSTEMD));
         assert!(paths.state.exists());
         let unit =
             std::fs::read_to_string(paths.unit_dir.join("ollama-node-agent.service")).unwrap();
         assert!(unit.contains("NoNewPrivileges=true"));
+        let tunnel_unit =
+            std::fs::read_to_string(paths.unit_dir.join("ollama-node-agent-tunnel.service"))
+                .unwrap();
+        assert!(tunnel_unit.contains("ollama-node-agent tunnel"));
+        assert!(tunnel_unit.contains("NoNewPrivileges=true"));
         let dropin = std::fs::read_to_string(
             paths
                 .unit_dir
@@ -289,6 +326,40 @@ mod tests {
             .await
             .unwrap();
         assert!(again.unit_written);
+        assert!(again.tunnel_unit_written);
         assert_eq!(again.supervisor.as_deref(), Some(SUPERVISOR_SYSTEMD));
+    }
+
+    #[tokio::test]
+    async fn dry_converge_skips_zrok_when_tunnel_disabled() {
+        use crate::config::{AgentConfig, TunnelSection};
+        use crate::setup::{SetupContext, SetupPaths};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = SetupPaths::under_root(dir.path());
+        let cfg = AgentConfig {
+            tunnel: TunnelSection {
+                enable: false,
+                ..TunnelSection::default()
+            },
+            ..AgentConfig::default()
+        };
+        let ctx = SetupContext {
+            config: &cfg,
+            paths: &paths,
+            enable_token: None,
+            dry_commands: true,
+        };
+        let state = converge(&ctx, "127.0.0.1:11434", IpAddr::V4(Ipv4Addr::LOCALHOST))
+            .await
+            .unwrap();
+        assert!(state.unit_written);
+        assert!(!state.tunnel_unit_written);
+        assert!(!state.share_present());
+        assert!(!paths
+            .unit_dir
+            .join("ollama-node-agent-tunnel.service")
+            .exists());
     }
 }

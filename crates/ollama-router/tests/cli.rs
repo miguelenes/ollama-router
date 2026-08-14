@@ -34,11 +34,7 @@ fn parses_nodes() {
 }
 
 #[test]
-fn parses_provision() {
-    let cli =
-        Cli::try_parse_from(["ollama-router", "provision", "--dry-run"]).expect("parse provision");
-    assert!(matches!(
-        cli.command,
-        Commands::Provision { dry_run: true, .. }
-    ));
+fn parses_reload() {
+    let cli = Cli::try_parse_from(["ollama-router", "reload"]).expect("parse reload");
+    assert!(matches!(cli.command, Commands::Reload { .. }));
 }

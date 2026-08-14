@@ -24,8 +24,8 @@ use tower_http::request_id::{
 use tower_http::trace::{MakeSpan, TraceLayer};
 use tracing::Span;
 
-use crate::provision::ProvisionOrchestrator;
 use crate::proxy;
+use crate::tunnel::TunnelFrontends;
 
 mod admin;
 pub mod metrics;
@@ -45,9 +45,9 @@ pub struct AppState {
     /// Captured from `OLLAMA_ROUTER_ADMIN_TOKEN` (never YAML). Unset disables admin.
     pub admin_token: Option<String>,
     pub fleet_state: Arc<FleetState>,
-    pub provisioner: Option<Arc<ProvisionOrchestrator>>,
     pub verda: Option<VerdaManager>,
     pub metrics: Arc<Metrics>,
+    pub tunnels: TunnelFrontends,
 }
 
 impl AppState {
@@ -69,12 +69,7 @@ impl AppState {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty());
         let fleet_state = Arc::new(FleetState::new(&config.state_path));
-        let provisioner = Some(Arc::new(ProvisionOrchestrator::new(
-            config.clone(),
-            client.clone(),
-            Some(registry.clone()),
-            Some(fleet_state.clone()),
-        )));
+        let tunnels = TunnelFrontends::from_config(&config.tunnel);
         Ok(Self {
             config,
             registry,
@@ -85,9 +80,9 @@ impl AppState {
             tie_break: Arc::new(AtomicU64::new(0)),
             admin_token,
             fleet_state,
-            provisioner,
             verda: None,
             metrics,
+            tunnels,
         })
     }
 }
@@ -203,7 +198,7 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/v1/jobs/{id}", get(admin::get_job))
         .route("/router/v1/stats", get(admin::stats))
         .route("/router/v1/reload", post(admin::reload))
-        .route("/router/v1/nodes/provision", post(admin::provision_nodes))
+        .route("/router/v1/nodes/enroll", post(admin::enroll_node))
         .route("/router/v1/verda/status", get(admin::verda_status))
         .route("/router/v1/verda/ensure", post(admin::verda_ensure))
         .route("/router/v1/verda/destroy", post(admin::verda_destroy))

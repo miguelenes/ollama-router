@@ -3,7 +3,9 @@
 use std::time::Duration;
 
 use ollama_router_core::cloud::FleetEvents;
-use ollama_router_core::fleet::{FleetState, NodeOrigin, PressureLevel, Registry};
+use ollama_router_core::fleet::{
+    url_is_safe_overlay, FleetState, NodeOrigin, PressureLevel, Registry,
+};
 use ollama_router_core::jobs::{JobKind, JobObserver, JobStatus};
 use prometheus::{
     Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec,
@@ -58,6 +60,7 @@ pub struct Metrics {
     loaded_vram_known: IntGaugeVec,
     disk_available: GaugeVec,
     ollama_up: IntGaugeVec,
+    tunnel_up: IntGaugeVec,
 }
 
 impl Metrics {
@@ -350,6 +353,13 @@ impl Metrics {
             ),
             &["node"],
         )?;
+        let tunnel_up = IntGaugeVec::new(
+            Opts::new(
+                "ollama_router_tunnel_up",
+                "1 if FleetState enroll has tunnel_backend=zrok and a safe overlay URL",
+            ),
+            &["node"],
+        )?;
 
         registry.register(Box::new(requests.clone()))?;
         registry.register(Box::new(duration.clone()))?;
@@ -394,6 +404,7 @@ impl Metrics {
         registry.register(Box::new(loaded_vram_known.clone()))?;
         registry.register(Box::new(disk_available.clone()))?;
         registry.register(Box::new(ollama_up.clone()))?;
+        registry.register(Box::new(tunnel_up.clone()))?;
 
         Ok(Self {
             registry,
@@ -440,6 +451,7 @@ impl Metrics {
             loaded_vram_known,
             disk_available,
             ollama_up,
+            tunnel_up,
         })
     }
 
@@ -477,8 +489,10 @@ impl Metrics {
         self.loaded_vram_known.reset();
         self.disk_available.reset();
         self.ollama_up.reset();
+        self.tunnel_up.reset();
 
         let snap = fleet.snapshot();
+        let state_map = fleet_state.load().unwrap_or_default();
         let mut verda_n: i64 = 0;
         for node in &snap {
             let id = node.id.as_str();
@@ -552,6 +566,11 @@ impl Metrics {
             if let Some(up) = node.ollama_running {
                 set_i(&self.ollama_up, &[id], i64::from(up));
             }
+            let tunnel_up = state_map.get(id).is_some_and(|entry| {
+                entry.tunnel_backend.as_deref() == Some("zrok")
+                    && node.url.as_deref().is_some_and(url_is_safe_overlay)
+            });
+            set_i(&self.tunnel_up, &[id], i64::from(tunnel_up));
             for gpu in &node.gpus_detail {
                 let gpu_id = gpu.index.to_string();
                 let labels = [id, gpu_id.as_str()];

@@ -1,7 +1,7 @@
 use ollama_router::http::metrics::Metrics;
 use ollama_router_core::capacity::{CapacityReport, GpuBackend, GpuDetail, Pressure};
 use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig};
-use ollama_router_core::fleet::{FleetState, NodeId, PressureLevel, Registry};
+use ollama_router_core::fleet::{EnrollPersist, FleetState, NodeId, PressureLevel, Registry};
 
 fn nid(id: &str) -> NodeId {
     NodeId::parse(id).expect("node id")
@@ -20,8 +20,6 @@ fn node(id: &str, vram: f64, gpus: u32) -> NodeConfig {
             cpu_cores: Some(8),
         },
         max_inflight: None,
-        ssh: None,
-        provision: None,
     }
 }
 
@@ -102,4 +100,49 @@ fn refresh_gauges_unknown_free_is_known_zero() {
     let body = metrics.encode_text().expect("encode");
     assert!(body.contains("ollama_router_node_vram_free_known{node=\"cpu\"} 0"));
     assert!(body.contains("ollama_router_node_gpu_util_known{node=\"cpu\"} 0"));
+    assert!(body.contains("ollama_router_tunnel_up{node=\"cpu\"} 0"));
+}
+
+#[test]
+fn refresh_gauges_tunnel_up_when_zrok_enroll() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let fleet_state = FleetState::new(dir.path().join("state.json"));
+    fleet_state
+        .persist_enroll(
+            "gpu",
+            EnrollPersist {
+                url: "http://127.0.0.1:41990",
+                capacity_url: "http://127.0.0.1:41991",
+                ollama_share_id: "share-ollama",
+                agent_share_id: "share-agent",
+            },
+        )
+        .expect("enroll");
+    let registry = Registry::new(&RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("gpu"),
+            url: Some("http://127.0.0.1:41990".into()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: Some(8.0),
+                ram_gb: Some(32.0),
+                gpus: Some(1),
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        ..Default::default()
+    });
+    let metrics = Metrics::new().expect("metrics");
+    metrics.refresh_gauges(&registry, &fleet_state);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_tunnel_up{node=\"gpu\"} 1"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("share-ollama"),
+        "share ids must not be metric labels: {body}"
+    );
 }

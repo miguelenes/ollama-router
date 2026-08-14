@@ -8,13 +8,11 @@ use clap::Parser;
 use ollama_router::cli::{inventory_lines, Cli, Commands};
 use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{build_upstream_client, make_app, AppState};
-use ollama_router::provision::{ProvisionOrchestrator, ProvisionWatcher};
 use ollama_router::warm::run as run_warm;
 use ollama_router_core::cloud::{should_destroy_on_shutdown, DemandScale};
-use ollama_router_core::fleet::{normalize_model, FleetState, Registry};
+use ollama_router_core::fleet::normalize_model;
 use ollama_router_core::jobs::{Job, JobStatus, PullOrchestrator};
 use ollama_router_core::load_config;
-use ollama_router_core::provision::{NodeProvisioner, ProvisionOpts, ProvisionStatus};
 use ollama_router_core::routing::TargetSpec;
 use ollama_router_verda::{VerdaClient, VerdaManager};
 
@@ -130,6 +128,13 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     init_tracing();
     let loaded = load_config(config.as_deref()).context("load config")?;
     let mut state = AppState::from_config(loaded).context("build app state")?;
+    if let Err(error) = state
+        .tunnels
+        .restore_fleet(&state.fleet_state, &state.registry)
+        .await
+    {
+        tracing::warn!(%error, "enroll tunnel restore failed");
+    }
     let recovered = state.orchestrator.recover_incomplete_jobs().await;
     tracing::info!(
         recovered = recovered.len(),
@@ -140,12 +145,6 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     tokio::spawn(run_health(state.clone()));
     if state.config.policy.model_warm_enabled {
         tokio::spawn(run_warm(state.clone()));
-    }
-    if let Some(provisioner) = state.provisioner.clone() {
-        let auto = state.config.provision_defaults.auto;
-        let poll = state.config.provision_defaults.poll_interval_seconds;
-        let watcher = ProvisionWatcher::new(state.registry.clone(), provisioner);
-        tokio::spawn(watcher.run(auto, poll));
     }
     spawn_sighup_reloader(state.clone());
     let started_at = Instant::now();
@@ -197,16 +196,11 @@ fn wire_verda(state: &mut AppState) -> anyhow::Result<()> {
         return Ok(());
     }
     let client = VerdaClient::new(state.config.verda.clone()).context("verda client")?;
-    let Some(provisioner) = state.provisioner.clone() else {
-        anyhow::bail!("verda.enabled requires a provisioner");
-    };
-    let provisioner: Arc<dyn NodeProvisioner> = provisioner;
     let mgr = VerdaManager::new(
         state.config.clone(),
         client,
         state.registry.clone(),
         state.fleet_state.clone(),
-        provisioner,
     );
     mgr.set_events(state.metrics.clone());
     state.demand = Arc::new(mgr.clone()) as Arc<dyn DemandScale>;
@@ -235,57 +229,6 @@ async fn shutdown_signal() {
     }
     #[cfg(not(unix))]
     ctrl_c.await;
-}
-
-async fn run_provision(
-    config: Option<PathBuf>,
-    node: Option<String>,
-    dry_run: bool,
-    force: bool,
-) -> anyhow::Result<()> {
-    let loaded = load_config(config.as_deref()).context("load config")?;
-    let client = build_upstream_client(&loaded).context("http client")?;
-    let config = Arc::new(loaded);
-    let registry = Arc::new(Registry::new(&config));
-    let fleet_state = Arc::new(FleetState::new(&config.state_path));
-    let orch = ProvisionOrchestrator::new(config, client, Some(registry), Some(fleet_state));
-    let ids: Option<Vec<String>> = node.map(|raw| {
-        raw.split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect()
-    });
-    let results = orch
-        .provision_many(
-            ids.as_deref(),
-            ProvisionOpts {
-                dry_run,
-                force,
-                wait_for_public_ssh: false,
-            },
-        )
-        .await
-        .map_err(|err| anyhow::anyhow!("{err}"))?;
-    let mut failed = false;
-    for result in &results {
-        if result.status == ProvisionStatus::Fail {
-            failed = true;
-        }
-        println!(
-            "{}",
-            serde_json::json!({
-                "node_id": result.node_id.as_str(),
-                "status": result.status.as_str(),
-                "detail": result.detail,
-                "tailscale_ip": result.tailscale_ip,
-                "phase": result.phase,
-            })
-        );
-    }
-    if failed {
-        std::process::exit(1);
-    }
-    Ok(())
 }
 
 fn run_nodes(config: Option<PathBuf>) -> anyhow::Result<()> {
@@ -361,11 +304,5 @@ async fn main() -> anyhow::Result<()> {
         } => run_delete(config, models, all_nodes, nodes, wait).await,
         Commands::Nodes { config } => run_nodes(config),
         Commands::Reload { config, host, port } => run_reload(config, host, port).await,
-        Commands::Provision {
-            config,
-            node,
-            dry_run,
-            force,
-        } => run_provision(config, node, dry_run, force).await,
     }
 }

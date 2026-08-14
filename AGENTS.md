@@ -16,8 +16,11 @@ services, Thunder, or RunPod.
   `/etc/ollama-router/fleet.yaml`) + durable FleetState + Verda manager.
   YAML tunables overlays are tunables-only. Top-level YAML `nodes:` is a hard
   config error (wrong file). Verda spots are not listed in fleet.yaml.
-- **Tailscale-only cloud URLs.** Public `:11434` is `public_url_blocked` and never
-  healthy. There is no public-proxy exception.
+- **Tunnel/loopback-only cloud URLs.** Self-hosted zrok **private** share.
+  Public `:11434` is `public_url_blocked` and never healthy. Hostname public
+  tunnels (`*.zrok.io` etc.) are also rejected. There is no public-proxy
+  exception. `fleet.yaml` LAN URLs stay direct HTTP. Enroll must not write
+  `fleet.yaml`.
 - **Idle timer = client forwards only.** `last_client_request_at` is written solely
   from `inflight_inc` on generate / chat / embed. Health, `/api/ps`, capacity
   probes, admin, and the warm-keeper do not count. After idle destroy: coalesced
@@ -30,8 +33,8 @@ services, Thunder, or RunPod.
   (plus `/v1/status`, `/metrics`). Soft-fail. GiB = bytes / `1024³`. Shared DTOs
   in `crates/ollama-capacity-types`. The router does not install or supervise
   Ollama.
-- **Sensitivity.** Never log bodies, prompts, embeddings, Tailscale keys, Verda
-  tokens/secrets, SSH keys, or the admin bearer.
+- **Sensitivity.** Never log bodies, prompts, embeddings, zrok share tokens,
+  Verda tokens/secrets, SSH keys, or the admin bearer.
 
 ## Behavioral spec (read, do not paste)
 
@@ -65,9 +68,8 @@ Axum 0.7 GraphQL/WS guides.
 | `crates/ollama-router-core/src/cloud/` | Idle reconcile (Verda-only manager) |
 | `crates/ollama-router-core/src/capacity/` | HTTP client to `:11436` |
 | `crates/ollama-capacity-types/` | Shared `CapacityReport` / pressure JSON |
-| `crates/ollama-node-agent/` | Node setup + `serve` on `:11436` |
+| `crates/ollama-node-agent/` | Node setup + `serve` on `:11436`; setup installs Ollama and spawns zrok sidecar |
 | `crates/ollama-router-core/src/jobs/` | SQLite durable pull/delete |
-| `crates/ollama-router/src/provision/` | russh + Tailscale handoff (no OpenSSH binary) |
 
 Workspace root: committed `Cargo.lock`, edition **2021**, rustc pin **1.97**.
 
@@ -97,9 +99,12 @@ task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust
 
 Before finishing a coding task, run `task check` and do not stop while it fails.
 
-SSH provision of fleet hosts should eventually upload `ollama-node-agent` and run
-`setup` rather than embedding Ubuntu Ollama logic in bash. The russh provisioner
-still uses `provision-ollama-gpu.sh` until that handoff lands.
+Remote hosts: install `ollama-node-agent` and run `setup` (Ollama + zrok sidecar
+spawned from the zrok binary). `setup`/`doctor` print a find-this-node block
+(share token **id** + enroll status, never the raw share); the router learns
+the share via enroll (FleetState only — never `fleet.yaml`, never SSH). Verda
+bootstrap is a startup script — the router may still
+upload an SSH public key to satisfy Verda's API but must never SSH. See `.opencode/wiki/concepts/ollama-router-node-tunnel.md`.
 
 CI runs the same cargo commands directly (no `task` binary on GitHub):
 
@@ -118,17 +123,17 @@ Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, no
 - Pin GitHub Actions to version tags (`actions/checkout@v7`, `Swatinem/rust-cache@v2`, `github/codeql-action@v4`), never commit SHAs.
 - Prefer Grafana Alloy over a pile of promtails for local compose log shipping; do not add Elasticsearch, Jaeger, or Zipkin unless OTLP/Tempo is explicitly required.
 - Keep the fleet overview Grafana dashboard (`ollama-router.json`) as the compose home dashboard; additive dashboards (nodes, jobs, etc.) must not replace it or change `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`.
-- Treat `fleet.yaml` as GitOps source of truth for permanent hosts; admin `PUT /router/v1/nodes` is debug/adopt only and must not write `fleet.yaml`.
+- Treat `fleet.yaml` as GitOps source of truth for permanent hosts; admin `PUT /router/v1/nodes` and enroll are debug/adopt only and must not write `fleet.yaml`.
 - Node-agent is headless only: no Tauri, tray, `.app`, or webview; OS packages wrap the same `setup`/`serve` binary.
+- Cloud Ollama URLs are a self-hosted zrok **private** share (not Tailscale, not `zrok.io`, not public shares). Verda bootstrap is a startup script; the router never SSH. Enroll does not write `fleet.yaml`. `nodes` CLI prints `origin`, `id`, `url`, `tunnel_backend`, `enroll_age` — never share tokens. Optional Prometheus gauge `ollama_router_tunnel_up{node}`; scrape the router only (never node-agent `:11436`).
 
 ## Learned Workspace Facts
 
 - cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
-- russh must be **>=0.60.3** (we pin **0.62**): 0.54.5 fails deny on RUSTSEC-2026-0154/0153. `RUSTSEC-2023-0071` (rsa Marvin) has no patch — ignored in `deny.toml` because rsa is only pulled via russh.
 - On this private repo without GitHub code scanning enabled, gate artifact attestations with `if: ${{ !github.event.repository.private }}` and gate CodeQL SARIF/`upload-database` (e.g. `CODEQL_SHOULD_UPLOAD`) so analysis can still run as workflow artifacts.
 - Trust the node-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs into the router. Classification lives in `ollama-node-agent`. Keep VRAM/RAM headroom and the reservation ledger.
 - Agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml + agent config), not Verda or capacity payloads.
-- SSH private keys come from `ssh.key_file` / Compose secrets / Verda `ssh_private_key_file` only — never add an SSH key env var.
+- Verda `ssh_public_key_file` / `ssh_private_key_file` exist only to satisfy a possible Verda `ssh_key_ids` API constraint — never add an SSH key env var, and the router must never SSH.
 - Verda `ensure` is adopt-first; demand scale coalesces `create_additional` only (never `ensure`). Tag instances `managed_by=ollama-router` and reject `illumination-*`; FleetState ownership is `managed_by=verda`.
 - Hot Prometheus metrics use the `prometheus` crate in the binary only and must not label by model name; `/metrics` and `/healthz` stay unauthenticated. Scrape the router only — do not add a Prometheus job for node-agent `:11436`. Treat `vram_free_gb=0` as unknown unless `vram_free_known`; do not add labels to `node_info` (`node`, `origin`, `role`).
 - Model jobs: `auto_pull_on_miss` exists (default **false**, placement-gated via `static_capacity_fits`); still no `unsafe_single_node_mutate`. SQLite stores operation metadata only (no bodies or provider error text).

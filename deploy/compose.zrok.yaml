@@ -1,0 +1,13 @@
+# Optional OpenZiti + zrok controller/frontend for the router.
+# Not merged into deploy/compose.yaml (Grafana / Prometheus / Loki).
+# Do not add a Prometheus scrape for node-agent :11436.
+#
+# Upstream's compose is too large to vendor. `task zrok:fetch` downloads it
+# into .local/zrok (gitignored). Tokens stay in .local/zrok/.env.
+# See deploy/zrok/README.md.
+
+name: ollama-router-zrok
+
+include:
+  - path: ../.local/zrok/compose.yml
+    project_directory: ../.local/zrok

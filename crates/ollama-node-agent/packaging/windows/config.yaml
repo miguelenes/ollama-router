@@ -1,6 +1,13 @@
 # Default agent config (MSI; NeverOverwrite). This package does not install
-# Ollama; run elevated `ollama-node-agent setup` to converge Ollama and
-# firewall rules. Do not also run the Ollama tray app on :11434 — NVIDIA
-# under LocalSystem conflicts with a user-session tray.
-listen: tailscale
+# Ollama; run elevated `ollama-node-agent setup` to converge Ollama, loopback
+# binds, and the zrok sidecar. Enable with ZROK_API_ENDPOINT and
+# ZROK_ENABLE_TOKEN in the environment (not this file; not a VPN). Do not also
+# run the Ollama tray app on :11434 — NVIDIA under LocalSystem conflicts with a
+# user-session tray.
+listen: loopback
 port: 11436
+ollama:
+  listen: loopback
+tunnel:
+  enable: true
+  zrok_bin: zrok

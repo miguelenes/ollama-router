@@ -1,5 +1,5 @@
 ---
-description: fleet.yaml inventory, Tailscale-only cloud URLs, Verda spots, idle from client forwards
+description: fleet.yaml inventory, tunnel/loopback-only cloud URLs, Verda spots, idle from client forwards
 alwaysApply: true
 ---
 
@@ -9,8 +9,14 @@ alwaysApply: true
   tunables only. Top-level YAML `nodes:` → hard config error (wrong file).
 - **Verda spots only.** No Thunder, no RunPod, no `THUNDER_*`/`RUNPOD_*`, no
   `**/thunder/**` or `**/runpod/**`, no admin routes or tests for them.
-- Cloud Ollama URLs are **Tailscale-only**. Public `:11434` → `public_url_blocked`,
-  never healthy. No public-proxy fallback.
+- Cloud Ollama URLs are **tunnel/loopback-only** (self-hosted zrok **private**
+  share). Public `:11434` → `public_url_blocked`, never healthy. Hostname public
+  tunnels (`*.zrok.io` etc.) are also rejected. No public-proxy fallback.
+  `fleet.yaml` LAN URLs stay direct HTTP (no tunnel on the same L2/L3).
+  No Tailscale join. Verda create does not SSH (startup script + enroll).
+- Enroll learns the zrok share token via `POST /router/v1/nodes/enroll`
+  (fail-closed admin bearer). It must **not** write `fleet.yaml`. `origin=verda`
+  only updates an existing `managed_by=verda` FleetState row.
 - Idle: `last_client_request_at` only from `inflight_inc` on generate/chat/embed.
   Health, `/api/ps`, capacity, admin, warm-keeper do not count. **Never destroy
   fleet.yaml hosts.** Verda teardown uses `delete_permanently`. Failed
@@ -28,4 +34,5 @@ policy:
   default_max_inflight: 2
 ```
 
-See `.opencode/wiki/concepts/ollama-router-product.md` and `ollama-router-idle-scale-down.md`.
+See `.opencode/wiki/concepts/ollama-router-product.md`,
+`ollama-router-node-tunnel.md`, and `ollama-router-idle-scale-down.md`.

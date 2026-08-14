@@ -5,9 +5,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use crate::config::error::ConfigError;
-use crate::config::models::{
-    reject_duplicate_node_ids, Capacity, NodeConfig, NodeProvisionConfig, NodeSshConfig,
-};
+use crate::config::models::{reject_duplicate_node_ids, Capacity, NodeConfig};
 use crate::fleet::ids::NodeId;
 
 /// Default GitOps inventory path.
@@ -96,27 +94,10 @@ struct FleetNode {
     capacity_url: Option<String>,
     #[serde(default)]
     max_inflight: Option<u32>,
-    #[serde(default)]
-    ssh: Option<NodeSshConfig>,
-    #[serde(default)]
-    provision: Option<FleetProvisionSpec>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(untagged)]
-enum FleetProvisionSpec {
-    Flag(bool),
-    Full(NodeProvisionConfig),
 }
 
 impl FleetNode {
     fn into_config(self) -> Result<NodeConfig, ConfigError> {
-        let provision = match self.provision {
-            Some(FleetProvisionSpec::Flag(true)) => Some(NodeProvisionConfig::default()),
-            Some(FleetProvisionSpec::Flag(false)) => None,
-            Some(FleetProvisionSpec::Full(cfg)) => Some(cfg),
-            None => None,
-        };
         let mut node = NodeConfig {
             id: self.id,
             url: self.url,
@@ -124,8 +105,6 @@ impl FleetNode {
             labels: self.labels,
             static_capacity: self.capacity,
             max_inflight: self.max_inflight,
-            ssh: self.ssh,
-            provision,
         };
         node.normalize_and_validate()?;
         Ok(node)
@@ -143,25 +122,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_nested_ssh_capacity_labels() {
+    fn parses_nested_capacity_labels() {
         let yaml = r#"
 version: 1
 nodes:
   - id: desk
-    url: http://100.64.12.10:11434
+    url: http://desk:11434
     labels: [gpu, always-on]
     capacity: { vram_gb: 8 }
     max_inflight: 2
   - id: laptop
-    url: http://100.64.12.11:11434
+    url: http://laptop:11434
     labels: [cpu]
   - id: colo
+    url: http://10.0.0.5:11434
     labels: [gpu]
-    ssh:
-      host: 203.0.113.10
-      user: root
-      key_file: /run/secrets/ssh_key
-    provision: true
 "#;
         let nodes = parse_fleet_yaml(yaml, origin()).unwrap();
         assert_eq!(nodes.len(), 3);
@@ -170,31 +145,28 @@ nodes:
         assert_eq!(nodes[0].max_inflight, Some(2));
         assert_eq!(nodes[0].labels, ["gpu", "always-on"]);
         assert_eq!(nodes[1].labels, ["cpu"]);
-        assert!(nodes[2].url.is_none());
-        assert_eq!(nodes[2].ssh.as_ref().unwrap().host, "203.0.113.10");
-        assert!(nodes[2].provision.as_ref().unwrap().enabled);
+        assert_eq!(nodes[2].url.as_deref(), Some("http://10.0.0.5:11434"));
     }
 
     #[test]
-    fn provision_mapping_and_false_flag() {
-        let yaml = r#"
+    fn ssh_and_provision_fields_rejected() {
+        let ssh = r#"
+version: 1
+nodes:
+  - id: colo
+    url: http://10.0.0.5:11434
+    ssh:
+      host: 203.0.113.10
+"#;
+        assert!(parse_fleet_yaml(ssh, origin()).is_err());
+        let provision = r#"
 version: 1
 nodes:
   - id: a
     url: http://a:11434
-    provision:
-      enabled: true
-      ts_hostname: gpu-a
-  - id: b
-    url: http://b:11434
-    provision: false
+    provision: true
 "#;
-        let nodes = parse_fleet_yaml(yaml, origin()).unwrap();
-        assert_eq!(
-            nodes[0].provision.as_ref().unwrap().ts_hostname.as_deref(),
-            Some("gpu-a")
-        );
-        assert!(nodes[1].provision.is_none());
+        assert!(parse_fleet_yaml(provision, origin()).is_err());
     }
 
     #[test]
@@ -226,6 +198,18 @@ nodes:
     fn empty_nodes_ok() {
         let nodes = parse_fleet_yaml("version: 1\nnodes: []\n", origin()).unwrap();
         assert!(nodes.is_empty());
+    }
+
+    #[test]
+    fn url_required_without_url_is_invalid() {
+        let yaml = r#"
+version: 1
+nodes:
+  - id: colo
+    labels: [gpu]
+"#;
+        let err = parse_fleet_yaml(yaml, origin()).unwrap_err();
+        assert!(err.to_string().contains("needs a routing url"));
     }
 
     #[test]

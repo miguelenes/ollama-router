@@ -6,7 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::capacity::{bytes_to_gib, capacity_target, CapacityClient};
 use ollama_router_core::config::HealthConfig;
-use ollama_router_core::fleet::{url_host_is_public_ipv4, NodeId, NodeSnapshot, PressureLevel};
+use ollama_router_core::fleet::{routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
 use tokio::task::JoinHandle;
@@ -118,7 +118,10 @@ async fn probe_cycle_inner(
             state.registry.mark_unreachable(&node.id, "no_url");
             return;
         }
-        Some(url) if url_host_is_public_ipv4(url) => {
+        Some(url)
+            if routing_url_blocked_reason(url, state.registry.public_share_suffixes())
+                .is_some() =>
+        {
             state.metrics.route_reason("public_url_blocked");
             state
                 .registry

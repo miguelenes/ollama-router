@@ -1,5 +1,6 @@
 //! Serde config models (YAML tunables + fleet.yaml nodes).
 
+use std::net::IpAddr;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -150,155 +151,6 @@ impl ModelTier {
     }
 }
 
-/// SSH reachability for auto / CLI host provisioning.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct NodeSshConfig {
-    pub host: String,
-    #[serde(default = "default_ssh_port")]
-    pub port: u16,
-    #[serde(default = "default_ssh_user")]
-    pub user: String,
-    #[serde(default)]
-    pub key_file: Option<String>,
-    #[serde(default)]
-    pub password_env: Option<String>,
-}
-
-fn default_ssh_port() -> u16 {
-    22
-}
-
-fn default_ssh_user() -> String {
-    "root".to_string()
-}
-
-impl NodeSshConfig {
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        if self.host.trim().is_empty() || self.user.trim().is_empty() {
-            return Err(ConfigError::invalid("ssh host/user must be non-empty"));
-        }
-        if self.port == 0 {
-            return Err(ConfigError::invalid("ssh.port must be between 1 and 65535"));
-        }
-        if let Some(name) = &self.password_env {
-            require_env_name(name, "ssh.password_env")?;
-        }
-        Ok(())
-    }
-}
-
-/// Per-node host provisioning knobs.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct NodeProvisionConfig {
-    pub enabled: bool,
-    pub os_upgrade: bool,
-    pub skip_models: bool,
-    pub skip_ollama: bool,
-    pub ts_ephemeral: bool,
-    pub ts_accept_routes: bool,
-    pub ts_hostname: Option<String>,
-    pub ts_tags: Option<String>,
-    pub ts_advertise_routes: Option<String>,
-}
-
-impl Default for NodeProvisionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            os_upgrade: true,
-            skip_models: false,
-            skip_ollama: false,
-            ts_ephemeral: false,
-            ts_accept_routes: false,
-            ts_hostname: None,
-            ts_tags: None,
-            ts_advertise_routes: None,
-        }
-    }
-}
-
-/// Fleet-wide SSH provision watcher + orchestrator defaults.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProvisionDefaults {
-    pub auto: bool,
-    pub concurrency: u32,
-    pub cooldown_seconds: f64,
-    pub ssh_connect_timeout_seconds: f64,
-    pub reboot_wait_timeout_seconds: f64,
-    pub tailscale_ssh_wait_timeout_seconds: f64,
-    pub tailscale_ssh_port: u16,
-    pub poll_interval_seconds: f64,
-    pub ts_authkey_env: String,
-    pub script_path: Option<String>,
-    pub ts_ephemeral: bool,
-    pub ts_accept_routes: bool,
-    pub ts_hostname: Option<String>,
-    pub ts_tags: Option<String>,
-    pub ts_advertise_routes: Option<String>,
-}
-
-impl Default for ProvisionDefaults {
-    fn default() -> Self {
-        Self {
-            auto: true,
-            concurrency: 1,
-            cooldown_seconds: 900.0,
-            ssh_connect_timeout_seconds: 5.0,
-            reboot_wait_timeout_seconds: 900.0,
-            tailscale_ssh_wait_timeout_seconds: 300.0,
-            tailscale_ssh_port: 22,
-            poll_interval_seconds: 15.0,
-            ts_authkey_env: "TS_AUTHKEY".to_string(),
-            script_path: None,
-            ts_ephemeral: false,
-            ts_accept_routes: false,
-            ts_hostname: None,
-            ts_tags: None,
-            ts_advertise_routes: None,
-        }
-    }
-}
-
-impl ProvisionDefaults {
-    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
-        if self.concurrency < 1 {
-            return Err(ConfigError::invalid("provision concurrency must be >= 1"));
-        }
-        if self.tailscale_ssh_port == 0 {
-            return Err(ConfigError::invalid(
-                "tailscale_ssh_port must be between 1 and 65535",
-            ));
-        }
-        require_env_name(&self.ts_authkey_env, "provision_defaults.ts_authkey_env")?;
-        for (name, value) in [
-            ("cooldown_seconds", self.cooldown_seconds),
-            (
-                "ssh_connect_timeout_seconds",
-                self.ssh_connect_timeout_seconds,
-            ),
-            (
-                "reboot_wait_timeout_seconds",
-                self.reboot_wait_timeout_seconds,
-            ),
-            (
-                "tailscale_ssh_wait_timeout_seconds",
-                self.tailscale_ssh_wait_timeout_seconds,
-            ),
-            ("poll_interval_seconds", self.poll_interval_seconds),
-        ] {
-            if value <= 0.0 {
-                return Err(ConfigError::invalid(format!(
-                    "provision timings must be > 0 ({name})"
-                )));
-            }
-        }
-        Ok(())
-    }
-}
-
 /// One Ollama node in the fleet.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -314,10 +166,6 @@ pub struct NodeConfig {
     pub static_capacity: Capacity,
     #[serde(default)]
     pub max_inflight: Option<u32>,
-    #[serde(default)]
-    pub ssh: Option<NodeSshConfig>,
-    #[serde(default)]
-    pub provision: Option<NodeProvisionConfig>,
 }
 
 impl NodeConfig {
@@ -339,14 +187,11 @@ impl NodeConfig {
                 return Err(ConfigError::invalid("max_inflight must be >= 1 when set"));
             }
         }
-        if self.url.is_none() && self.ssh.is_none() {
+        if self.url.is_none() {
             return Err(ConfigError::invalid(format!(
-                "node {} needs url and/or ssh (SSH-only ok until first provision)",
+                "node {} needs a routing url",
                 self.id
             )));
-        }
-        if let Some(ssh) = &self.ssh {
-            ssh.validate()?;
         }
         Ok(())
     }
@@ -737,6 +582,130 @@ impl UpstreamPoolConfig {
     }
 }
 
+fn default_zrok_bin() -> String {
+    "zrok".to_string()
+}
+
+fn default_public_share_suffixes() -> Vec<String> {
+    vec![".zrok.io".to_string()]
+}
+
+fn default_enable_token_env() -> String {
+    "ZROK_ENABLE_TOKEN".to_string()
+}
+
+fn default_access_bind() -> String {
+    "127.0.0.1".to_string()
+}
+
+/// `host:port` for `TcpListener` / `zrok --bindAddress` (bracket IPv6).
+pub fn socket_addr_for_bind(bind: &str, port: u16) -> String {
+    if bind.contains(':') {
+        format!("[{bind}]:{port}")
+    } else {
+        format!("{bind}:{port}")
+    }
+}
+
+/// `http://` URL for an access frontend on `bind`.
+pub fn http_url_for_bind(bind: &str, port: u16) -> String {
+    if bind.contains(':') {
+        format!("http://[{bind}]:{port}")
+    } else {
+        format!("http://{bind}:{port}")
+    }
+}
+
+fn validate_loopback_bind(bind: &str, field: &str) -> Result<(), ConfigError> {
+    let trimmed = bind.trim();
+    if trimmed.is_empty() {
+        return Err(ConfigError::invalid(format!(
+            "{field} must be a loopback address"
+        )));
+    }
+    let ip: IpAddr = trimmed.parse().map_err(|_| {
+        ConfigError::invalid(format!("{field} must be a loopback IP, not {trimmed:?}"))
+    })?;
+    if !ip.is_loopback() {
+        return Err(ConfigError::invalid(format!(
+            "{field} must be a loopback address, not {trimmed}"
+        )));
+    }
+    Ok(())
+}
+
+/// Router-side zrok access + public-share hostname denylist.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TunnelConfig {
+    #[serde(default = "default_zrok_bin")]
+    pub zrok_bin: String,
+    /// Extra public-share suffixes. `.zrok.io` is always blocked.
+    #[serde(default = "default_public_share_suffixes")]
+    pub public_share_suffixes: Vec<String>,
+    /// Self-hosted zrok controller API (`ZROK_API_ENDPOINT`). Empty uses the
+    /// process env / `zrok` config file. Never `zrok.io` for this product.
+    #[serde(default)]
+    pub api_endpoint: String,
+    /// Env **name** holding the enable token for `zrok enable`. Never a literal.
+    #[serde(default = "default_enable_token_env")]
+    pub enable_token_env: String,
+    /// Loopback host for `zrok access private --bindAddress` (default `127.0.0.1`).
+    #[serde(default = "default_access_bind")]
+    pub access_bind: String,
+}
+
+impl Default for TunnelConfig {
+    fn default() -> Self {
+        Self {
+            zrok_bin: default_zrok_bin(),
+            public_share_suffixes: default_public_share_suffixes(),
+            api_endpoint: String::new(),
+            enable_token_env: default_enable_token_env(),
+            access_bind: default_access_bind(),
+        }
+    }
+}
+
+impl TunnelConfig {
+    /// Trimmed controller API URL, if configured.
+    pub fn api_endpoint(&self) -> Option<&str> {
+        let trimmed = self.api_endpoint.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        }
+    }
+
+    /// Loopback HTTP URL for an access frontend port.
+    pub fn loopback_http_url(&self, port: u16) -> String {
+        http_url_for_bind(self.access_bind.trim(), port)
+    }
+
+    /// Socket address for an access frontend port.
+    pub fn access_socket_addr(&self, port: u16) -> String {
+        socket_addr_for_bind(self.access_bind.trim(), port)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        if self.zrok_bin.trim().is_empty() {
+            return Err(ConfigError::invalid("tunnel.zrok_bin must be non-empty"));
+        }
+        for suffix in &self.public_share_suffixes {
+            if suffix.trim().is_empty() {
+                return Err(ConfigError::invalid(
+                    "tunnel.public_share_suffixes must not contain empty values",
+                ));
+            }
+        }
+        strip_http_url(&self.api_endpoint, "tunnel.api_endpoint")?;
+        require_env_name(&self.enable_token_env, "tunnel.enable_token_env")?;
+        validate_loopback_bind(&self.access_bind, "tunnel.access_bind")?;
+        Ok(())
+    }
+}
+
 /// Verda Cloud spot GPU provisioning (opt-in; disabled by default).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -759,7 +728,22 @@ pub struct VerdaConfig {
     pub ssh_key_name: String,
     pub ssh_public_key_file: Option<String>,
     pub ssh_private_key_file: Option<String>,
-    pub ts_accept_routes: Option<bool>,
+    /// Pre-created Verda startup script id. When set, create skips list/create.
+    pub startup_script_id: Option<String>,
+    /// Reuse-by-name catalog script (installer body; secrets injected at create).
+    pub startup_script_name: String,
+    /// Optional override for the agent `.deb` / tarball (wins over GitHub release).
+    pub agent_package_url: Option<String>,
+    /// GitHub `owner/repo` used to build default release URLs.
+    pub agent_github_repo: String,
+    /// Agent package version (`v{version}` tag). Empty → crate version.
+    pub agent_version: Option<String>,
+    /// Router URL the spot can reach for `POST /router/v1/nodes/enroll`.
+    pub enroll_url: Option<String>,
+    /// Env **name** holding the zrok enable token (setup only). Never a literal.
+    pub zrok_enable_token_env: String,
+    /// Env **name** holding `OLLAMA_ROUTER_ADMIN_TOKEN` (or equivalent).
+    pub enroll_token_env: String,
     pub preferred_image_globs: Vec<String>,
     pub min_vram_gb: f64,
     pub max_vram_gb: Option<f64>,
@@ -800,7 +784,14 @@ impl Default for VerdaConfig {
             ssh_key_name: "ollama-router".to_string(),
             ssh_public_key_file: None,
             ssh_private_key_file: None,
-            ts_accept_routes: None,
+            startup_script_id: None,
+            startup_script_name: "ollama-router-agent-init".to_string(),
+            agent_package_url: None,
+            agent_github_repo: "miguelenes/ollama-router".to_string(),
+            agent_version: None,
+            enroll_url: None,
+            zrok_enable_token_env: "ZROK_ENABLE_TOKEN".to_string(),
+            enroll_token_env: "OLLAMA_ROUTER_ADMIN_TOKEN".to_string(),
             preferred_image_globs: vec![
                 "*ubuntu-24*cuda*docker*".to_string(),
                 "*ubuntu-24*docker*".to_string(),
@@ -837,6 +828,34 @@ impl VerdaConfig {
         require_env_name(&self.client_id_env, "verda.client_id_env")?;
         require_env_name(&self.client_secret_env, "verda.client_secret_env")?;
         require_env_name(&self.router_id_env, "verda.router_id_env")?;
+        require_env_name(&self.zrok_enable_token_env, "verda.zrok_enable_token_env")?;
+        require_env_name(&self.enroll_token_env, "verda.enroll_token_env")?;
+        if self.startup_script_name.trim().is_empty() {
+            return Err(ConfigError::invalid(
+                "verda.startup_script_name must be non-empty",
+            ));
+        }
+        if let Some(id) = self.startup_script_id.as_deref() {
+            if id.trim().is_empty() {
+                return Err(ConfigError::invalid(
+                    "verda.startup_script_id must be non-empty when set",
+                ));
+            }
+        }
+        if let Some(raw) = self.enroll_url.as_deref() {
+            let _ = strip_http_url(raw, "verda.enroll_url")?;
+        }
+        if let Some(raw) = self.agent_package_url.as_deref() {
+            let _ = strip_http_url(raw, "verda.agent_package_url")?;
+        }
+        if self.agent_github_repo.trim().is_empty()
+            || !self.agent_github_repo.contains('/')
+            || self.agent_github_repo.contains("://")
+        {
+            return Err(ConfigError::invalid(
+                "verda.agent_github_repo must be owner/repo",
+            ));
+        }
         if self.min_vram_gb < 0.0 {
             return Err(ConfigError::invalid("verda VRAM bounds must be >= 0"));
         }
@@ -948,9 +967,9 @@ pub struct YamlTunables {
     pub ensure_wait_max_seconds: f64,
     pub listen_host: String,
     pub listen_port: u16,
-    pub provision_defaults: ProvisionDefaults,
     pub verda: VerdaConfig,
     pub upstream: UpstreamPoolConfig,
+    pub tunnel: TunnelConfig,
 }
 
 impl Default for YamlTunables {
@@ -973,9 +992,9 @@ impl Default for YamlTunables {
             ensure_wait_max_seconds: 300.0,
             listen_host: "0.0.0.0".to_string(),
             listen_port: 11434,
-            provision_defaults: ProvisionDefaults::default(),
             verda: VerdaConfig::default(),
             upstream: UpstreamPoolConfig::default(),
+            tunnel: TunnelConfig::default(),
         }
     }
 }
@@ -985,9 +1004,9 @@ impl YamlTunables {
         self.policy.validate()?;
         self.health.validate()?;
         self.timeouts.validate()?;
-        self.provision_defaults.validate()?;
         self.verda.validate()?;
         self.upstream.validate()?;
+        self.tunnel.validate()?;
         for tier in &self.desired_model_tiers {
             tier.validate()?;
         }
@@ -1044,12 +1063,12 @@ pub struct RouterConfig {
     pub ensure_wait_max_seconds: f64,
     pub listen_host: String,
     pub listen_port: u16,
-    pub provision_defaults: ProvisionDefaults,
     pub verda: VerdaConfig,
     pub upstream: UpstreamPoolConfig,
     pub fleet_path: PathBuf,
     pub fleet_missing_is_error: bool,
     pub state_path: PathBuf,
+    pub tunnel: TunnelConfig,
 }
 
 impl Default for RouterConfig {
@@ -1079,12 +1098,12 @@ impl RouterConfig {
             ensure_wait_max_seconds: tunables.ensure_wait_max_seconds,
             listen_host: tunables.listen_host,
             listen_port: tunables.listen_port,
-            provision_defaults: tunables.provision_defaults,
             verda: tunables.verda,
             upstream: tunables.upstream,
             fleet_path: PathBuf::from("/etc/ollama-router/fleet.yaml"),
             fleet_missing_is_error: false,
             state_path: PathBuf::from("/var/lib/ollama-router/fleet-state.json"),
+            tunnel: tunables.tunnel,
         }
     }
 
@@ -1169,5 +1188,63 @@ mod tests {
         assert!(is_env_name("VERDA_CLIENT_SECRET"));
         assert!(!is_env_name("literal-secret-value"));
         assert!(!is_env_name("tskey-auth-literal"));
+    }
+
+    #[test]
+    fn verda_startup_script_knobs_validate() {
+        let mut verda = VerdaConfig::default();
+        verda.validate().unwrap();
+        verda.enroll_url = Some("not-a-url".into());
+        assert!(verda.validate().is_err());
+        verda.enroll_url = Some("https://router.example:11435".into());
+        verda.zrok_enable_token_env = "literal-token".into();
+        assert!(verda.validate().is_err());
+    }
+
+    #[test]
+    fn tunnel_defaults_are_loopback_and_env_name() {
+        let tunnel = TunnelConfig::default();
+        tunnel.validate().unwrap();
+        assert!(tunnel.api_endpoint().is_none());
+        assert_eq!(tunnel.enable_token_env, "ZROK_ENABLE_TOKEN");
+        assert_eq!(tunnel.access_bind, "127.0.0.1");
+        assert_eq!(tunnel.loopback_http_url(41990), "http://127.0.0.1:41990");
+        assert_eq!(tunnel.access_socket_addr(41990), "127.0.0.1:41990");
+    }
+
+    #[test]
+    fn tunnel_rejects_non_loopback_bind_and_literal_token() {
+        let bad_bind = TunnelConfig {
+            access_bind: "0.0.0.0".into(),
+            ..TunnelConfig::default()
+        };
+        assert!(bad_bind.validate().is_err());
+        let bad_env = TunnelConfig {
+            enable_token_env: "not-an-env".into(),
+            ..TunnelConfig::default()
+        };
+        assert!(bad_env.validate().is_err());
+        let bad_url = TunnelConfig {
+            api_endpoint: "zrok.example".into(),
+            ..TunnelConfig::default()
+        };
+        assert!(bad_url.validate().is_err());
+        let ok = TunnelConfig {
+            api_endpoint: "http://127.0.0.1:18080".into(),
+            ..TunnelConfig::default()
+        };
+        ok.validate().unwrap();
+    }
+
+    #[test]
+    fn tunnel_unknown_field_is_denied() {
+        let err = serde_yaml::from_str::<TunnelConfig>("zrok_bin: zrok\nfoo: 1\n").unwrap_err();
+        assert!(err.to_string().contains("unknown field"));
+    }
+
+    #[test]
+    fn ipv6_loopback_bind_urls_use_brackets() {
+        assert_eq!(http_url_for_bind("::1", 9), "http://[::1]:9");
+        assert_eq!(socket_addr_for_bind("::1", 9), "[::1]:9");
     }
 }

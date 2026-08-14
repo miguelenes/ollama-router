@@ -150,6 +150,46 @@ const KNOBS: &[Knob] = &[
         kind: KnobKind::Str,
     },
     Knob {
+        env: "VERDA_STARTUP_SCRIPT_ID",
+        path: &["verda", "startup_script_id"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_STARTUP_SCRIPT_NAME",
+        path: &["verda", "startup_script_name"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_AGENT_PACKAGE_URL",
+        path: &["verda", "agent_package_url"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_AGENT_GITHUB_REPO",
+        path: &["verda", "agent_github_repo"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_AGENT_VERSION",
+        path: &["verda", "agent_version"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_ENROLL_URL",
+        path: &["verda", "enroll_url"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_ZROK_ENABLE_TOKEN_ENV",
+        path: &["verda", "zrok_enable_token_env"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "VERDA_ENROLL_TOKEN_ENV",
+        path: &["verda", "enroll_token_env"],
+        kind: KnobKind::Str,
+    },
+    Knob {
         env: "VERDA_MIN_VRAM_GB",
         path: &["verda", "min_vram_gb"],
         kind: KnobKind::Float,
@@ -213,6 +253,31 @@ const KNOBS: &[Knob] = &[
         env: "VERDA_CREATE_RETRIES",
         path: &["verda", "create_retries"],
         kind: KnobKind::Int,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_ZROK_BIN",
+        path: &["tunnel", "zrok_bin"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_PUBLIC_SHARE_SUFFIXES",
+        path: &["tunnel", "public_share_suffixes"],
+        kind: KnobKind::Csv,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_ZROK_API_ENDPOINT",
+        path: &["tunnel", "api_endpoint"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_ZROK_ENABLE_TOKEN_ENV",
+        path: &["tunnel", "enable_token_env"],
+        kind: KnobKind::Str,
+    },
+    Knob {
+        env: "OLLAMA_ROUTER_ZROK_ACCESS_BIND",
+        path: &["tunnel", "access_bind"],
+        kind: KnobKind::Str,
     },
 ];
 

@@ -8,12 +8,13 @@ use std::time::Duration;
 use tokio::process::Command;
 
 use super::{
-    install_self_binary, write_bytes_idempotent, write_token_file, ConvergeState, SetupContext,
-    SUPERVISOR_MANUAL, SUPERVISOR_SCM,
+    install_self_binary, tunnel, write_bytes_idempotent, write_token_file, ConvergeState,
+    SetupContext, SUPERVISOR_MANUAL, SUPERVISOR_SCM,
 };
 use crate::collect::ollama_version;
 use crate::service_identity::{
-    service_bin_path, FIREWALL_RULE_11434, FIREWALL_RULE_11436, SERVICE_DISPLAY_NAME, SERVICE_NAME,
+    service_bin_path, tunnel_service_bin_path, FIREWALL_RULE_11434, FIREWALL_RULE_11436,
+    SERVICE_DISPLAY_NAME, SERVICE_NAME, TUNNEL_SERVICE_DISPLAY_NAME, TUNNEL_SERVICE_NAME,
 };
 
 /// Inno Setup flags from ollama/ollama `scripts/install.ps1`.
@@ -63,9 +64,15 @@ pub async fn converge(
         "Windows: do not also run the tray app on :11434; NVIDIA in a service usually needs LocalSystem"
     );
 
+    if ctx.dry_commands && ctx.config.tunnel.enable {
+        tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, true).await?;
+        state.tunnel_unit_written = true;
+    }
+
     if !ctx.dry_commands {
         let dest = ctx.paths.bin_dir.join("ollama-node-agent.exe");
         stop_windows_service().await;
+        stop_windows_tunnel_service().await;
         install_self_binary(&dest)?;
         let registered = register_windows_service(&dest).await?;
         state.unit_written = registered;
@@ -74,6 +81,12 @@ pub async fn converge(
         } else {
             SUPERVISOR_MANUAL.into()
         });
+        if ctx.config.tunnel.enable {
+            tunnel::wait_ollama_loopback_tags().await?;
+            tunnel::prepare_shares(ctx.config, ctx.paths, &mut state, ctx.enable_token, false)
+                .await?;
+            state.tunnel_unit_written = register_windows_tunnel_service(&dest).await?;
+        }
         let _ = set_firewall().await;
     } else {
         state.unit_written = true;
@@ -164,10 +177,29 @@ async fn stop_windows_service() {
         .await;
 }
 
+async fn stop_windows_tunnel_service() {
+    let _ = Command::new("sc.exe")
+        .args(["stop", TUNNEL_SERVICE_NAME])
+        .status()
+        .await;
+}
+
 async fn register_windows_service(exe: &Path) -> anyhow::Result<bool> {
-    let bin_path = service_bin_path(exe);
+    register_scm_service(SERVICE_NAME, SERVICE_DISPLAY_NAME, &service_bin_path(exe)).await
+}
+
+async fn register_windows_tunnel_service(exe: &Path) -> anyhow::Result<bool> {
+    register_scm_service(
+        TUNNEL_SERVICE_NAME,
+        TUNNEL_SERVICE_DISPLAY_NAME,
+        &tunnel_service_bin_path(exe),
+    )
+    .await
+}
+
+async fn register_scm_service(name: &str, display: &str, bin_path: &str) -> anyhow::Result<bool> {
     let exists = Command::new("sc.exe")
-        .args(["query", SERVICE_NAME])
+        .args(["query", name])
         .status()
         .await
         .is_ok_and(|s| s.success());
@@ -175,15 +207,15 @@ async fn register_windows_service(exe: &Path) -> anyhow::Result<bool> {
         Command::new("sc.exe")
             .args([
                 "config",
-                SERVICE_NAME,
+                name,
                 "binPath=",
-                &bin_path,
+                bin_path,
                 "start=",
                 "auto",
                 "obj=",
                 "LocalSystem",
                 "DisplayName=",
-                SERVICE_DISPLAY_NAME,
+                display,
             ])
             .status()
             .await?
@@ -191,27 +223,24 @@ async fn register_windows_service(exe: &Path) -> anyhow::Result<bool> {
         Command::new("sc.exe")
             .args([
                 "create",
-                SERVICE_NAME,
+                name,
                 "binPath=",
-                &bin_path,
+                bin_path,
                 "start=",
                 "auto",
                 "obj=",
                 "LocalSystem",
                 "DisplayName=",
-                SERVICE_DISPLAY_NAME,
+                display,
             ])
             .status()
             .await?
     };
     if !status.success() {
-        tracing::warn!("sc create/config failed; start `ollama-node-agent serve` as LocalSystem");
+        tracing::warn!("sc create/config failed for {name}");
         return Ok(false);
     }
-    let _ = Command::new("sc.exe")
-        .args(["start", SERVICE_NAME])
-        .status()
-        .await;
+    let _ = Command::new("sc.exe").args(["start", name]).status().await;
     Ok(true)
 }
 

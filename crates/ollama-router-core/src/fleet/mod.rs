@@ -4,7 +4,7 @@ pub(crate) mod file;
 pub(crate) mod ids;
 pub(crate) mod registry;
 pub(crate) mod state;
-pub(crate) mod tailscale;
+pub(crate) mod url_policy;
 
 pub use file::{fleet_path_from_env, load_fleet_nodes, parse_fleet_yaml, DEFAULT_FLEET_PATH};
 pub use ids::{NodeId, RouterId, VerdaInstanceId};
@@ -13,9 +13,10 @@ pub use registry::{
     PressureLevel, Registry,
 };
 pub use state::{
-    FleetState, FleetStateEntry, FleetStateError, VerdaNodePersist, DEFAULT_STATE_PATH,
+    EnrollPersist, FleetState, FleetStateEntry, FleetStateError, VerdaNodePersist,
+    DEFAULT_STATE_PATH,
 };
-pub use tailscale::{
-    is_tailscale_ipv4, ollama_url_for_tailscale_ip, routing_url_from_fields, url_host_is_ip,
-    url_host_is_public_ipv4, url_host_is_tailscale,
+pub use url_policy::{
+    routing_url_blocked_reason, share_id_looks_public, url_host_is_ip, url_host_is_loopback,
+    url_host_is_public_ipv4, url_host_is_public_share, url_host_is_rfc1918, url_is_safe_overlay,
 };

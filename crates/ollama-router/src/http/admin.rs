@@ -1,4 +1,4 @@
-//! Admin API: `/router/v1/models/*`, jobs, nodes, stats, reload, provision, Verda.
+//! Admin API: `/router/v1/models/*`, jobs, nodes, stats, reload, enroll, Verda.
 //!
 //! Bearer token comes from `OLLAMA_ROUTER_ADMIN_TOKEN` (captured on
 //! [`AppState`] construction). Unset → 403. No Thunder / RunPod routes.
@@ -10,9 +10,11 @@ use axum::Json;
 use serde::Deserialize;
 use serde_json::json;
 
-use ollama_router_core::fleet::{url_host_is_public_ipv4, NodeId};
+use ollama_router_core::fleet::{
+    share_id_looks_public, url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist,
+    FleetState, NodeId, NodeOrigin,
+};
 use ollama_router_core::jobs::{Job, OrchestratorError};
-use ollama_router_core::provision::ProvisionOpts;
 use ollama_router_core::routing::{placement_eligible_node_ids, TargetSpec};
 
 use super::{json_status, AppState};
@@ -240,6 +242,14 @@ pub async fn put_node(
                 json!({"error": "refusing public IPv4 routing URL"}),
             );
         }
+        if !trimmed.is_empty()
+            && url_host_is_public_share(trimmed, &state.config.tunnel.public_share_suffixes)
+        {
+            return json_status(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "refusing public share routing URL", "reason": "public_url_blocked"}),
+            );
+        }
     }
     let existing = state.registry.get(&id);
     if existing.is_none() {
@@ -252,8 +262,6 @@ pub async fn put_node(
                 labels: body.labels.clone().unwrap_or_default(),
                 static_capacity: ollama_router_core::config::Capacity::default(),
                 max_inflight: None,
-                ssh: None,
-                provision: None,
             });
     }
     if let Some(labels) = body.labels {
@@ -263,7 +271,7 @@ pub async fn put_node(
         if let Err(err) = state.registry.set_node_url(&id, url) {
             return json_status(StatusCode::BAD_REQUEST, json!({"error": err}));
         }
-        if let Err(err) = state.fleet_state.persist_url(id.as_str(), url, None) {
+        if let Err(err) = state.fleet_state.persist_url(id.as_str(), url) {
             tracing::warn!(node_id = %id, error = %err, "put_node persist_url failed");
         }
     }
@@ -271,6 +279,299 @@ pub async fn put_node(
         return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
     };
     Json(json!({"node": node_public_view(&snap)})).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnrollOrigin {
+    Fleet,
+    Verda,
+    Adopt,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EnrollRequest {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub proposed_id: Option<String>,
+    pub origin: EnrollOrigin,
+    pub ollama_share_id: String,
+    pub agent_share_id: String,
+    #[serde(default)]
+    pub agent_version: Option<String>,
+    #[serde(default)]
+    pub hostname: Option<String>,
+}
+
+fn enroll_reason(status: StatusCode, reason: &str, error: &str) -> Response {
+    json_status(status, json!({"error": error, "reason": reason}))
+}
+
+fn resolve_enroll_id(body: &EnrollRequest) -> Result<NodeId, (&'static str, &'static str)> {
+    let raw = body
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            body.proposed_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        });
+    let Some(raw) = raw else {
+        return Err(("invalid_node_id", "id or proposed_id is required"));
+    };
+    NodeId::parse(raw).map_err(|_| ("invalid_node_id", "invalid node id"))
+}
+
+/// Map a guest enroll id/hostname onto the FleetState Verda row (`verda-{instance_id}`).
+fn resolve_owned_verda_id(
+    fleet_state: &FleetState,
+    requested: &NodeId,
+    hostname: Option<&str>,
+) -> Result<NodeId, (&'static str, &'static str)> {
+    match fleet_state.get_entry(requested.as_str()) {
+        Ok(Some(_)) => return Ok(requested.clone()),
+        Ok(None) => {}
+        Err(_) => return Err(("fleet_state_unreadable", "fleet state unreadable")),
+    }
+    let host = hostname.map(str::trim).filter(|s| !s.is_empty());
+    let nodes = fleet_state
+        .list_verda_nodes()
+        .map_err(|_| ("fleet_state_unreadable", "fleet state unreadable"))?;
+    let mut found: Option<String> = None;
+    for (id, entry) in nodes {
+        let stored = entry
+            .hostname
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let hit = stored == Some(requested.as_str())
+            || (host.is_some() && stored == host)
+            || id == requested.as_str();
+        if !hit {
+            continue;
+        }
+        if found.is_some() {
+            return Err(("unknown_verda_node", "unknown Verda node"));
+        }
+        found = Some(id);
+    }
+    found
+        .and_then(|id| NodeId::parse(id).ok())
+        .ok_or(("unknown_verda_node", "unknown Verda node"))
+}
+
+fn reject_public_share(share_id: &str, suffixes: &[String]) -> Option<Response> {
+    let trimmed = share_id.trim();
+    if trimmed.is_empty() {
+        return Some(enroll_reason(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "invalid_share_id",
+            "share id must be non-empty",
+        ));
+    }
+    if share_id_looks_public(trimmed, suffixes) {
+        return Some(enroll_reason(
+            StatusCode::BAD_REQUEST,
+            "public_url_blocked",
+            "refusing public share",
+        ));
+    }
+    None
+}
+
+/// Hydrate reachability from zrok private share tokens. Never SSH.
+/// Does not write `fleet.yaml`. Production inventory stays fleet.yaml + FleetState + Verda.
+pub async fn enroll_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<EnrollRequest>,
+) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let mut id = match resolve_enroll_id(&body) {
+        Ok(id) => id,
+        Err((reason, error)) => {
+            return enroll_reason(StatusCode::UNPROCESSABLE_ENTITY, reason, error);
+        }
+    };
+    let suffixes = &state.config.tunnel.public_share_suffixes;
+    if let Some(resp) = reject_public_share(&body.ollama_share_id, suffixes) {
+        return resp;
+    }
+    if let Some(resp) = reject_public_share(&body.agent_share_id, suffixes) {
+        return resp;
+    }
+
+    match body.origin {
+        EnrollOrigin::Verda => {
+            id = match resolve_owned_verda_id(&state.fleet_state, &id, body.hostname.as_deref()) {
+                Ok(resolved) => resolved,
+                Err((reason, error)) => {
+                    return enroll_reason(
+                        if reason == "fleet_state_unreadable" {
+                            StatusCode::BAD_GATEWAY
+                        } else if reason == "unknown_verda_node" {
+                            StatusCode::NOT_FOUND
+                        } else {
+                            StatusCode::CONFLICT
+                        },
+                        reason,
+                        error,
+                    );
+                }
+            };
+            let entry = match state.fleet_state.get_entry(id.as_str()) {
+                Ok(entry) => entry,
+                Err(err) => {
+                    tracing::warn!(node_id = %id, error = %err, "enroll fleet-state read failed");
+                    return enroll_reason(
+                        StatusCode::BAD_GATEWAY,
+                        "fleet_state_unreadable",
+                        "fleet state unreadable",
+                    );
+                }
+            };
+            let Some(entry) = entry else {
+                return enroll_reason(
+                    StatusCode::NOT_FOUND,
+                    "unknown_verda_node",
+                    "unknown Verda node",
+                );
+            };
+            if entry.managed_by.as_deref() != Some("verda") {
+                return enroll_reason(
+                    StatusCode::CONFLICT,
+                    "verda_not_owned",
+                    "FleetState row is not Verda-owned",
+                );
+            }
+            if state.registry.origin(&id) == Some(NodeOrigin::Permanent) {
+                return enroll_reason(
+                    StatusCode::CONFLICT,
+                    "origin_mismatch",
+                    "node id is a fleet.yaml host",
+                );
+            }
+            if state.registry.get(&id).is_none() {
+                state
+                    .registry
+                    .upsert_verda(ollama_router_core::config::NodeConfig {
+                        id: id.clone(),
+                        url: None,
+                        capacity_url: None,
+                        labels: Vec::new(),
+                        static_capacity: ollama_router_core::config::Capacity::default(),
+                        max_inflight: None,
+                    });
+            }
+        }
+        EnrollOrigin::Fleet => match state.registry.origin(&id) {
+            Some(NodeOrigin::Permanent) => {}
+            Some(NodeOrigin::Verda) => {
+                return enroll_reason(
+                    StatusCode::CONFLICT,
+                    "origin_mismatch",
+                    "node id is not a fleet.yaml host",
+                );
+            }
+            None => {
+                return enroll_reason(
+                    StatusCode::NOT_FOUND,
+                    "unknown_fleet_node",
+                    "unknown fleet.yaml node",
+                );
+            }
+        },
+        EnrollOrigin::Adopt => {
+            if state.registry.get(&id).is_none() {
+                state
+                    .registry
+                    .upsert_verda(ollama_router_core::config::NodeConfig {
+                        id: id.clone(),
+                        url: None,
+                        capacity_url: None,
+                        labels: Vec::new(),
+                        static_capacity: ollama_router_core::config::Capacity::default(),
+                        max_inflight: None,
+                    });
+            }
+        }
+    }
+
+    let ollama_port = match state.tunnels.ensure(body.ollama_share_id.trim()).await {
+        Ok(port) => port,
+        Err(_) => {
+            return enroll_reason(
+                StatusCode::BAD_GATEWAY,
+                "zrok_access_failed",
+                "zrok access frontend failed",
+            );
+        }
+    };
+    let agent_port = match state.tunnels.ensure(body.agent_share_id.trim()).await {
+        Ok(port) => port,
+        Err(_) => {
+            return enroll_reason(
+                StatusCode::BAD_GATEWAY,
+                "zrok_access_failed",
+                "zrok access frontend failed",
+            );
+        }
+    };
+    let url = state.config.tunnel.loopback_http_url(ollama_port);
+    let capacity_url = state.config.tunnel.loopback_http_url(agent_port);
+    if let Err(err) = state.registry.set_node_url(&id, &url) {
+        return json_status(StatusCode::BAD_REQUEST, json!({"error": err}));
+    }
+    if let Err(err) = state.registry.set_capacity_url(&id, &capacity_url) {
+        return json_status(StatusCode::BAD_REQUEST, json!({"error": err}));
+    }
+    if let Err(err) = state.fleet_state.persist_enroll(
+        id.as_str(),
+        EnrollPersist {
+            url: &url,
+            capacity_url: &capacity_url,
+            ollama_share_id: body.ollama_share_id.trim(),
+            agent_share_id: body.agent_share_id.trim(),
+        },
+    ) {
+        tracing::warn!(node_id = %id, error = %err, "enroll persist failed");
+        return enroll_reason(
+            StatusCode::BAD_GATEWAY,
+            "fleet_state_unreadable",
+            "fleet state persist failed",
+        );
+    }
+    tracing::info!(
+        node_id = %id,
+        origin = match body.origin {
+            EnrollOrigin::Fleet => "fleet",
+            EnrollOrigin::Verda => "verda",
+            EnrollOrigin::Adopt => "adopt",
+        },
+        ollama_port,
+        agent_port,
+        tunnel_backend = "zrok",
+        agent_version = body.agent_version.as_deref().unwrap_or(""),
+        hostname = body.hostname.as_deref().unwrap_or(""),
+        "node enrolled"
+    );
+    let Some(snap) = state.registry.get(&id) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    };
+    Json(json!({
+        "node": node_public_view(&snap),
+        "url": url,
+        "capacity_url": capacity_url,
+        "tunnel_backend": "zrok",
+    }))
+    .into_response()
 }
 
 pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -376,63 +677,6 @@ fn node_public_view(node: &ollama_router_core::fleet::NodeSnapshot) -> serde_jso
         "pressure": node.pressure_level.as_str(),
         "vram_free_gb": node.vram_free_gb,
     })
-}
-
-#[derive(Debug, Deserialize)]
-pub struct ProvisionRequest {
-    #[serde(default)]
-    pub nodes: Option<Vec<String>>,
-    #[serde(default)]
-    pub dry_run: bool,
-    #[serde(default)]
-    pub force: bool,
-}
-
-pub async fn provision_nodes(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(body): Json<ProvisionRequest>,
-) -> Response {
-    if let Some(resp) = require_admin(&state, &headers) {
-        return resp;
-    }
-    let Some(provisioner) = state.provisioner.as_ref() else {
-        return json_status(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "provisioner not available"}),
-        );
-    };
-    let opts = ProvisionOpts {
-        dry_run: body.dry_run,
-        force: body.force,
-        wait_for_public_ssh: false,
-    };
-    let result = provisioner
-        .provision_many(body.nodes.as_deref(), opts)
-        .await;
-    match result {
-        Err(err) => json_status(StatusCode::UNPROCESSABLE_ENTITY, json!({"error": err})),
-        Ok(results) => {
-            let failed = results.iter().any(|r| r.status.as_str() == "fail");
-            let payload = json!({
-                "results": results.iter().map(|r| json!({
-                    "node_id": r.node_id.as_str(),
-                    "status": r.status.as_str(),
-                    "detail": r.detail,
-                    "tailscale_ip": r.tailscale_ip,
-                    "phase": r.phase,
-                })).collect::<Vec<_>>(),
-            });
-            json_status(
-                if failed {
-                    StatusCode::MULTI_STATUS
-                } else {
-                    StatusCode::OK
-                },
-                payload,
-            )
-        }
-    }
 }
 
 fn require_verda(state: &AppState) -> Option<&ollama_router_verda::VerdaManager> {

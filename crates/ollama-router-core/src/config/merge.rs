@@ -28,22 +28,17 @@ mod tests {
     #[test]
     fn nested_maps_merge_and_sequences_replace() {
         let mut base: Value = serde_yaml::from_str(
-            "provision_defaults:\n  auto: true\n  ts_ephemeral: true\npolicy:\n  sticky_affinity: false\n",
+            "verda:\n  enabled: true\n  auto_scale: true\npolicy:\n  sticky_affinity: false\n",
         )
         .unwrap();
-        let overlay: Value = serde_yaml::from_str(
-            "provision_defaults:\n  auto: false\npolicy:\n  retry_on_status: [503]\n",
-        )
-        .unwrap();
+        let overlay: Value =
+            serde_yaml::from_str("verda:\n  enabled: false\npolicy:\n  retry_on_status: [503]\n")
+                .unwrap();
         deep_merge(&mut base, overlay);
         let merged = base.as_mapping().unwrap();
-        let provision = merged
-            .get("provision_defaults")
-            .unwrap()
-            .as_mapping()
-            .unwrap();
-        assert_eq!(provision.get("auto").unwrap().as_bool(), Some(false));
-        assert_eq!(provision.get("ts_ephemeral").unwrap().as_bool(), Some(true));
+        let verda = merged.get("verda").unwrap().as_mapping().unwrap();
+        assert_eq!(verda.get("enabled").unwrap().as_bool(), Some(false));
+        assert_eq!(verda.get("auto_scale").unwrap().as_bool(), Some(true));
         let policy = merged.get("policy").unwrap().as_mapping().unwrap();
         assert_eq!(
             policy

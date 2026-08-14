@@ -67,11 +67,11 @@ patterns:
     - "crates/ollama-router-core/src/jobs/mod.rs"
     - ".opencode/wiki/concepts/ollama-router-durable-model-operations.md"
 
-  "provision|russh|ssh|tailscale|handoff":
-    - "crates/ollama-router/src/provision/orchestrator.rs"
-    - "crates/ollama-router/src/provision/ssh.rs"
-    - "crates/ollama-router/src/provision/watcher.rs"
-    - "crates/ollama-router-core/src/fleet/tailscale.rs"
+  "enroll|zrok|verda|url_policy|overlay":
+    - "crates/ollama-router/src/http/admin.rs"
+    - "crates/ollama-router/src/tunnel.rs"
+    - "crates/ollama-router-core/src/fleet/url_policy.rs"
+    - "crates/ollama-router-verda/src/manager.rs"
 
   "config|tunables|knobs|overlay|nodes:":
     - "crates/ollama-router-core/src/config/load.rs"

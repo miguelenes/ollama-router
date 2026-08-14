@@ -1,8 +1,8 @@
 //! httpmock coverage for the Verda client and manager. Never hits live Verda.
 #![allow(clippy::field_reassign_with_default)]
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use httpmock::prelude::*;
@@ -11,16 +11,14 @@ use serde_json::{json, Value};
 
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig, VerdaConfig};
-use ollama_router_core::fleet::{FleetState, NodeId, Registry, VerdaInstanceId, VerdaNodePersist};
-use ollama_router_core::provision::{
-    NodeProvisioner, ProvisionFuture, ProvisionOpts, ProvisionPhase, ProvisionResult,
-    ProvisionStatus,
+use ollama_router_core::fleet::{
+    EnrollPersist, FleetState, NodeId, Registry, VerdaInstanceId, VerdaNodePersist,
 };
 use ollama_router_core::routing::RoutingError;
 
 use crate::client::VerdaClient;
 use crate::manager::{VerdaManager, MANAGED_BY};
-use crate::types::Instance;
+use crate::types::{Instance, StartupScript};
 
 fn client(server: &MockServer) -> VerdaClient {
     let config = VerdaConfig {
@@ -67,7 +65,7 @@ fn gpu_l4_type() -> Value {
     })
 }
 
-fn stub_catalog(server: &MockServer) -> Mock<'_> {
+fn stub_catalog_core(server: &MockServer) -> Mock<'_> {
     server.mock(|when, then| {
         when.method(GET).path("/v1/instance-availability");
         then.status(200)
@@ -93,55 +91,44 @@ fn stub_catalog(server: &MockServer) -> Mock<'_> {
     })
 }
 
-struct RecProvisioner {
-    waits: Mutex<Vec<bool>>,
-    fail: AtomicBool,
-    delay_ms: AtomicUsize,
+fn stub_named_script(server: &MockServer) {
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/scripts");
+        then.status(200).json_body(json!([{
+            "id": "script-1",
+            "name": "ollama-router-agent-init",
+        }]));
+    });
 }
 
-impl RecProvisioner {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            waits: Mutex::new(Vec::new()),
-            fail: AtomicBool::new(false),
-            delay_ms: AtomicUsize::new(0),
-        })
-    }
+fn stub_catalog(server: &MockServer) -> Mock<'_> {
+    let confirm = stub_catalog_core(server);
+    stub_named_script(server);
+    confirm
 }
 
-impl NodeProvisioner for RecProvisioner {
-    fn provision_node(
-        &self,
-        node: ollama_router_core::config::NodeConfig,
-        opts: ProvisionOpts,
-    ) -> ProvisionFuture<'_> {
-        Box::pin(async move {
-            let delay = self.delay_ms.load(Ordering::SeqCst);
-            if delay > 0 {
-                tokio::time::sleep(Duration::from_millis(delay as u64)).await;
-            }
-            self.waits
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push(opts.wait_for_public_ssh);
-            if self.fail.load(Ordering::SeqCst) {
-                ProvisionResult::fail(node.id, "mock fail", ProvisionPhase::Fail, None)
-            } else {
-                ProvisionResult {
-                    node_id: node.id,
-                    status: ProvisionStatus::Ok,
-                    detail: "ok".into(),
-                    tailscale_ip: Some("100.64.0.8".into()),
-                    phase: Some("ok".into()),
-                }
-            }
-        })
-    }
+fn stub_tags(server: &MockServer) -> Mock<'_> {
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200).json_body(json!({"models": []}));
+    })
+}
+
+fn persist_test_enroll(fs: &FleetState, node_id: &str, base: &str) {
+    fs.persist_enroll(
+        node_id,
+        EnrollPersist {
+            url: base,
+            capacity_url: &format!("{base}/v1/capacity"),
+            ollama_share_id: "share-ollama",
+            agent_share_id: "share-agent",
+        },
+    )
+    .expect("enroll");
 }
 
 fn manager_with(
     server: &MockServer,
-    provisioner: Arc<dyn NodeProvisioner>,
     tweak: impl FnOnce(&mut RouterConfig),
 ) -> (VerdaManager, Arc<Registry>, Arc<FleetState>) {
     let dir = tempfile::tempdir().expect("tmp");
@@ -151,23 +138,21 @@ fn manager_with(
     config.verda.enabled = true;
     config.verda.base_url = server.base_url();
     config.verda.ssh_key_id = Some("key-1".into());
-    config.verda.ssh_private_key_file = Some("/run/secrets/ssh_key".into());
-    config.verda.poll_interval_seconds = 1.0;
+    config.verda.poll_interval_seconds = 0.5;
     config.verda.create_timeout_seconds = 5.0;
     tweak(&mut config);
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
     let client = client(server);
-    let mgr = VerdaManager::new(config, client, registry.clone(), fs.clone(), provisioner);
+    let mgr = VerdaManager::new(config, client, registry.clone(), fs.clone());
     (mgr, registry, fs)
 }
 
 fn manager(
     server: &MockServer,
-    provisioner: Arc<dyn NodeProvisioner>,
     auto_scale: bool,
 ) -> (VerdaManager, Arc<Registry>, Arc<FleetState>) {
-    manager_with(server, provisioner, |c| c.verda.auto_scale = auto_scale)
+    manager_with(server, |c| c.verda.auto_scale = auto_scale)
 }
 
 #[tokio::test]
@@ -283,16 +268,19 @@ async fn client_create_parses_bare_uuid_and_object() {
 }
 
 #[tokio::test]
-async fn manager_create_waits_public_ssh() {
+async fn manager_create_waits_for_enroll_and_tags() {
     let server = MockServer::start();
     token_ok(&server, 3600);
     let confirm = stub_catalog(&server);
+    stub_tags(&server);
     server.mock(|when, then| {
         when.method(GET).path("/v1/instances");
         then.status(200).json_body(json!([]));
     });
     let post = server.mock(|when, then| {
-        when.method(POST).path("/v1/instances");
+        when.method(POST)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"startup_script_id":"script-1"}"#);
         then.status(200).json_body(json!({
             "id": "inst-new",
             "status": "pending",
@@ -313,30 +301,109 @@ async fn manager_create_waits_public_ssh() {
             "tags": [{"key": "managed_by", "value": MANAGED_BY}],
         }));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec.clone(), false);
+    let (mgr, _, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-new", &server.base_url());
     let out = mgr.create_additional().await.expect("create");
     assert_eq!(out["status"], "created");
-    assert_eq!(*rec.waits.lock().unwrap(), vec![true]);
+    assert_eq!(out["enroll"], "ok");
     assert!(confirm.calls() >= 1, "confirm_availability must run");
     assert!(post.calls() >= 1, "create POST must run after confirm");
 }
 
 #[tokio::test]
-async fn manager_adopt_does_not_wait_public_ssh() {
+async fn manager_creates_named_startup_script_when_missing() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog_core(&server);
+    stub_tags(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/scripts");
+        then.status(200).json_body(json!([]));
+    });
+    let created_script = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/scripts")
+            .json_body_includes(r#"{"name":"ollama-router-agent-init"}"#);
+        then.status(200).body("script-new");
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200).json_body(json!([]));
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST)
+            .path("/v1/instances")
+            .json_body_includes(r#"{"startup_script_id":"script-new"}"#);
+        then.status(200).json_body(json!({
+            "id": "inst-script",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances/inst-script");
+        then.status(200).json_body(json!({
+            "id": "inst-script",
+            "status": "running",
+            "location_code": "HEL",
+            "instance_type": "gpu-l4",
+            "tags": [{"key": "managed_by", "value": MANAGED_BY}],
+        }));
+    });
+    let (mgr, _, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-script", &server.base_url());
+    let out = mgr.create_additional().await.expect("create");
+    assert_eq!(out["status"], "created");
+    assert!(created_script.calls() >= 1);
+    assert!(post.calls() >= 1);
+}
+
+#[tokio::test]
+async fn manager_adopt_does_not_recreate_or_attach_startup_script() {
     let server = MockServer::start();
     token_ok(&server, 3600);
     stub_catalog(&server);
+    stub_tags(&server);
     server.mock(|when, then| {
         when.method(GET).path("/v1/instances");
         then.status(200)
             .json_body(json!([owned_instance("inst-1")]));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec.clone(), false);
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(500);
+    });
+    let scripts = server.mock(|when, then| {
+        when.method(POST).path("/v1/scripts");
+        then.status(500);
+    });
+    let (mgr, _, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-1", &server.base_url());
     let out = mgr.ensure(true).await.expect("ensure");
     assert_eq!(out["status"], "adopted");
-    assert_eq!(*rec.waits.lock().unwrap(), vec![false]);
+    assert_eq!(out["enroll"], "ok");
+    assert_eq!(post.calls(), 0, "adopt must not POST /v1/instances");
+    assert_eq!(scripts.calls(), 0, "adopt must not create a startup script");
+}
+
+#[tokio::test]
+async fn manager_adopt_waits_for_enroll_and_tags() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    stub_tags(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/v1/instances");
+        then.status(200)
+            .json_body(json!([owned_instance("inst-1")]));
+    });
+    let (mgr, _, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-1", &server.base_url());
+    let out = mgr.ensure(true).await.expect("ensure");
+    assert_eq!(out["status"], "adopted");
+    assert_eq!(out["enroll"], "ok");
 }
 
 #[tokio::test]
@@ -376,16 +443,24 @@ async fn manager_fail_does_not_set_public_url() {
         when.method(PUT).path("/v1/instances");
         then.status(204);
     });
-    let rec = RecProvisioner::new();
-    rec.fail.store(true, Ordering::SeqCst);
-    let (mgr, registry, _) = manager(&server, rec, false);
+    let (mgr, registry, fs) = manager_with(&server, |c| {
+        c.verda.auto_scale = false;
+        c.verda.create_timeout_seconds = 1.0;
+    });
     let out = mgr.create_additional().await.expect("create");
-    assert_eq!(out["provision"], "fail");
+    assert_eq!(out["enroll"], "fail");
+    assert_eq!(out["detail"], "enroll_timeout");
     let nid = NodeId::parse("verda-inst-fail").unwrap();
     let url = registry.node_config(&nid).and_then(|n| n.url);
     assert!(
         url.is_none(),
-        "failed provision must not publish a public URL: {url:?}"
+        "failed enroll must not publish a routing URL: {url:?}"
+    );
+    assert!(
+        fs.list_verda_nodes()
+            .unwrap()
+            .contains_key("verda-inst-fail"),
+        "enroll timeout must keep FleetState ownership"
     );
 }
 
@@ -404,8 +479,7 @@ async fn manager_destroy_permanent_and_idempotent() {
             .json_body_includes(r#"{"action":"delete","delete_permanently":true}"#);
         then.status(204);
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, fs) = manager(&server, rec, false);
+    let (mgr, _, fs) = manager(&server, false);
     let iid = VerdaInstanceId::parse("inst-1").unwrap();
     fs.persist_verda_node(
         "verda-inst-1",
@@ -415,8 +489,8 @@ async fn manager_destroy_permanent_and_idempotent() {
             location: "HEL",
             instance_type: "gpu-l4",
             os_volume_id: Some("vol-1"),
-            tailscale_ip: None,
             spot_price_per_hour: None,
+            hostname: None,
         },
     )
     .unwrap();
@@ -434,8 +508,7 @@ async fn manager_destroy_permanent_and_idempotent() {
         when.method(PUT).path("/v1/instances");
         then.status(404).json_body(json!({"error": "not found"}));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, fs) = manager(&server404, rec, false);
+    let (mgr, _, fs) = manager(&server404, false);
     fs.persist_verda_node(
         "verda-inst-1",
         VerdaNodePersist {
@@ -444,8 +517,8 @@ async fn manager_destroy_permanent_and_idempotent() {
             location: "HEL",
             instance_type: "gpu-l4",
             os_volume_id: None,
-            tailscale_ip: None,
             spot_price_per_hour: None,
+            hostname: None,
         },
     )
     .unwrap();
@@ -466,19 +539,18 @@ async fn manager_failed_destroy_retains_fleet_state() {
         when.method(PUT).path("/v1/instances");
         then.status(500).json_body(json!({"error": "busy"}));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, fs) = manager(&server, rec, false);
+    let (mgr, _, fs) = manager(&server, false);
     let iid = VerdaInstanceId::parse("inst-keep").unwrap();
     fs.persist_verda_node(
         "verda-inst-keep",
         VerdaNodePersist {
-            url: "http://100.64.0.8:11434",
+            url: "http://127.0.0.1:41990",
             instance_id: &iid,
             location: "HEL",
             instance_type: "gpu-l4",
             os_volume_id: None,
-            tailscale_ip: Some("100.64.0.8"),
             spot_price_per_hour: None,
+            hostname: None,
         },
     )
     .unwrap();
@@ -495,17 +567,17 @@ async fn reconcile_adopts_orphan_when_auto_scale_false() {
     let server = MockServer::start();
     token_ok(&server, 3600);
     stub_catalog(&server);
+    stub_tags(&server);
     server.mock(|when, then| {
         when.method(GET).path("/v1/instances");
         then.status(200)
             .json_body(json!([owned_instance("inst-9")]));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, registry, _) = manager(&server, rec.clone(), false);
+    let (mgr, registry, fs) = manager(&server, false);
+    persist_test_enroll(&fs, "verda-inst-9", &server.base_url());
     mgr.reconcile().await;
     let nid = NodeId::parse("verda-inst-9").unwrap();
     assert!(registry.get(&nid).is_some());
-    assert_eq!(*rec.waits.lock().unwrap(), vec![false]);
 }
 
 #[tokio::test]
@@ -538,8 +610,7 @@ async fn demand_scale_up_does_not_block() {
             "tags": [{"key": "managed_by", "value": MANAGED_BY}],
         }));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec, true);
+    let (mgr, _, _) = manager(&server, true);
     let start = Instant::now();
     mgr.request_scale_up(RoutingError::NoHealthy);
     assert!(
@@ -553,6 +624,15 @@ fn instance_ignores_unknown_fields() {
     let raw = r#"{"id":"x","status":"running","future_column":true,"ip":"1.2.3.4"}"#;
     let inst: Instance = serde_json::from_str(raw).expect("extras");
     assert_eq!(inst.instance_id_value(), Some("x"));
+}
+
+#[test]
+fn startup_script_ignores_unknown_fields() {
+    let raw =
+        r#"{"id":"script-9","name":"ollama-router-agent-init","script":"true","future":true}"#;
+    let script: StartupScript = serde_json::from_str(raw).expect("extras");
+    assert_eq!(script.script_key(), Some("script-9"));
+    assert_eq!(script.name.as_deref(), Some("ollama-router-agent-init"));
 }
 
 #[test]
@@ -594,6 +674,7 @@ async fn create_additional_does_not_adopt_running_instance() {
     let server = MockServer::start();
     token_ok(&server, 3600);
     stub_catalog(&server);
+    stub_tags(&server);
     server.mock(|when, then| {
         when.method(GET).path("/v1/instances");
         then.status(200)
@@ -621,13 +702,12 @@ async fn create_additional_does_not_adopt_running_instance() {
             "tags": [{"key": "managed_by", "value": MANAGED_BY}],
         }));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec.clone(), true);
+    let (mgr, _, fs) = manager(&server, true);
+    persist_test_enroll(&fs, "verda-inst-extra", &server.base_url());
     let out = mgr.create_additional().await.expect("create");
     assert_eq!(out["status"], "created");
     assert_eq!(out["instance_id"], "inst-extra");
     assert!(post.calls() >= 1);
-    assert_eq!(*rec.waits.lock().unwrap(), vec![true]);
 }
 
 #[tokio::test]
@@ -635,6 +715,7 @@ async fn illumination_managed_by_is_not_owned() {
     let server = MockServer::start();
     token_ok(&server, 3600);
     stub_catalog(&server);
+    stub_tags(&server);
     server.mock(|when, then| {
         when.method(GET).path("/v1/instances");
         then.status(200).json_body(json!([{
@@ -668,8 +749,8 @@ async fn illumination_managed_by_is_not_owned() {
             "tags": [{"key": "managed_by", "value": MANAGED_BY}],
         }));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec, true);
+    let (mgr, _, fs) = manager(&server, true);
+    persist_test_enroll(&fs, "verda-inst-new", &server.base_url());
     let out = mgr.ensure(true).await.expect("ensure");
     assert_eq!(out["status"], "created");
     assert!(post.calls() >= 1);
@@ -705,9 +786,7 @@ async fn demand_scale_up_coalesces_create_additional() {
             "tags": [{"key": "managed_by", "value": MANAGED_BY}],
         }));
     });
-    let rec = RecProvisioner::new();
-    rec.delay_ms.store(250, Ordering::SeqCst);
-    let (mgr, _, _) = manager(&server, rec, true);
+    let (mgr, _, _) = manager(&server, true);
     mgr.request_scale_up(RoutingError::NoHealthy);
     mgr.request_scale_up(RoutingError::Saturated);
     tokio::time::sleep(Duration::from_millis(800)).await;
@@ -723,8 +802,7 @@ async fn demand_scale_up_respects_max_instances() {
         when.method(POST).path("/v1/instances");
         then.status(200).json_body(json!({"id": "should-not"}));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, registry, _) = manager_with(&server, rec, |c| {
+    let (mgr, registry, _) = manager_with(&server, |c| {
         c.verda.auto_scale = true;
         c.verda.auto_scale_max_instances = 1;
     });
@@ -735,8 +813,6 @@ async fn demand_scale_up_respects_max_instances() {
         labels: vec!["gpu".into(), "verda".into(), "spot".into()],
         static_capacity: Capacity::default(),
         max_inflight: None,
-        ssh: None,
-        provision: None,
     });
     mgr.request_scale_up(RoutingError::Saturated);
     tokio::time::sleep(Duration::from_millis(100)).await;
@@ -752,8 +828,7 @@ async fn demand_scale_up_skips_when_auto_scale_false() {
         when.method(POST).path("/v1/instances");
         then.status(200).json_body(json!({"id": "should-not"}));
     });
-    let rec = RecProvisioner::new();
-    let (mgr, _, _) = manager(&server, rec, false);
+    let (mgr, _, _) = manager(&server, false);
     mgr.request_scale_up(RoutingError::NoHealthy);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(post.calls(), 0);

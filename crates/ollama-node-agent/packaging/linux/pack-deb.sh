@@ -40,6 +40,7 @@ fi
 
 cp "$SCRIPT_DIR/nfpm.yaml" "$stage/nfpm.yaml"
 cp "$SCRIPT_DIR/config.yaml" "$stage/config.yaml"
+cp "$SCRIPT_DIR/ollama-node-agent-tunnel.service" "$stage/ollama-node-agent-tunnel.service"
 cp "$SCRIPT_DIR/postinst.sh" "$stage/postinst.sh"
 cp "$SCRIPT_DIR/prerm.sh" "$stage/prerm.sh"
 chmod 755 "$stage/postinst.sh" "$stage/prerm.sh"

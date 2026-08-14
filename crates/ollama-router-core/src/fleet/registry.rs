@@ -327,8 +327,6 @@ impl NodeState {
         self.config.labels = config.labels;
         self.config.capacity_url = config.capacity_url;
         self.config.max_inflight = config.max_inflight;
-        self.config.ssh = config.ssh;
-        self.config.provision = config.provision;
         self.config.static_capacity = config.static_capacity;
         remarge(self);
         self.draining = false;
@@ -384,6 +382,7 @@ pub struct Registry {
     inner: RwLock<Inner>,
     health: HealthConfig,
     policy: PolicyConfig,
+    public_share_suffixes: Vec<String>,
 }
 
 impl Registry {
@@ -403,6 +402,7 @@ impl Registry {
             inner: RwLock::new(Inner { nodes }),
             health: config.health.clone(),
             policy: config.policy.clone(),
+            public_share_suffixes: config.tunnel.public_share_suffixes.clone(),
         }
     }
 
@@ -428,6 +428,11 @@ impl Registry {
         &self.health
     }
 
+    /// Extra public-share hostname suffixes (`.zrok.io` is always blocked).
+    pub fn public_share_suffixes(&self) -> &[String] {
+        &self.public_share_suffixes
+    }
+
     /// Ranking snapshot of every configured node.
     pub fn snapshot(&self) -> Vec<NodeSnapshot> {
         self.read()
@@ -442,21 +447,26 @@ impl Registry {
         self.read().nodes.get(id).map(NodeState::snapshot)
     }
 
-    /// Clone the live `NodeConfig` (SSH host may have been switched to Tailscale).
+    /// Clone the live `NodeConfig` (SSH host may have been remapped).
     pub fn node_config(&self, id: &NodeId) -> Option<NodeConfig> {
         self.read().nodes.get(id).map(|n| n.config.clone())
     }
 
-    /// Set the Ollama routing URL after Tailscale verify. Refuses public IPv4.
+    /// Set the Ollama routing URL after enroll.
     ///
-    /// Does not count as inflight. Marks the node unhealthy so health re-probes.
+    /// Refuses public IPv4 and public-share hostnames. Does not count as inflight.
+    /// Marks the node unhealthy so health re-probes.
     pub fn set_node_url(&self, id: &NodeId, url: &str) -> Result<(), String> {
         let trimmed = url.trim().trim_end_matches('/');
         if trimmed.is_empty() {
             return Err("empty url".into());
         }
-        if crate::fleet::tailscale::url_host_is_public_ipv4(trimmed) {
+        if crate::fleet::url_policy::url_host_is_public_ipv4(trimmed) {
             return Err("refusing public IPv4 routing URL".into());
+        }
+        if crate::fleet::url_policy::url_host_is_public_share(trimmed, &self.public_share_suffixes)
+        {
+            return Err("refusing public share routing URL".into());
         }
         let mut inner = self.write();
         let Some(node) = inner.nodes.get_mut(id) else {
@@ -469,37 +479,34 @@ impl Registry {
         Ok(())
     }
 
+    /// Set the capacity-agent URL (separate zrok frontend). Same public-URL rules.
+    pub fn set_capacity_url(&self, id: &NodeId, url: &str) -> Result<(), String> {
+        let trimmed = url.trim().trim_end_matches('/');
+        if trimmed.is_empty() {
+            return Err("empty capacity_url".into());
+        }
+        if crate::fleet::url_policy::url_host_is_public_ipv4(trimmed) {
+            return Err("refusing public IPv4 capacity URL".into());
+        }
+        if crate::fleet::url_policy::url_host_is_public_share(trimmed, &self.public_share_suffixes)
+        {
+            return Err("refusing public share capacity URL".into());
+        }
+        if let Some(node) = self.write().nodes.get_mut(id) {
+            node.config.capacity_url = Some(trimmed.to_string());
+        }
+        Ok(())
+    }
+
+    /// Live origin for `id`, if the node exists.
+    pub fn origin(&self, id: &NodeId) -> Option<NodeOrigin> {
+        self.read().nodes.get(id).map(|n| n.origin)
+    }
+
     /// Replace live labels (admin PUT). Does not write fleet.yaml.
     pub fn set_node_labels(&self, id: &NodeId, labels: Vec<String>) {
         if let Some(node) = self.write().nodes.get_mut(id) {
             node.config.labels = labels;
-        }
-    }
-
-    /// Point ordinary OpenSSH at a Tailscale IPv4 (same key/user).
-    pub fn set_ssh_endpoint(&self, id: &NodeId, host: &str, port: u16) {
-        if let Some(node) = self.write().nodes.get_mut(id) {
-            if let Some(ssh) = node.config.ssh.as_mut() {
-                ssh.host = host.to_string();
-                ssh.port = port;
-            }
-        }
-    }
-
-    /// Clear a non-Tailscale IP routing URL after a failed provision.
-    pub fn clear_unsafe_routing_url(&self, id: &NodeId) {
-        let mut inner = self.write();
-        let Some(node) = inner.nodes.get_mut(id) else {
-            return;
-        };
-        let Some(url) = node.config.url.as_deref() else {
-            return;
-        };
-        if crate::fleet::tailscale::url_host_is_tailscale(url) {
-            return;
-        }
-        if crate::fleet::tailscale::url_host_is_ip(url) {
-            node.config.url = None;
         }
     }
 
@@ -1064,8 +1071,6 @@ mod tests {
                 cpu_cores: Some(8),
             },
             max_inflight: None,
-            ssh: None,
-            provision: None,
         }
     }
 
@@ -1245,14 +1250,36 @@ mod tests {
             registry.get(&id).unwrap().url.as_deref(),
             Some("http://a:11434")
         );
-        registry
+        let err = registry
             .set_node_url(&id, "http://100.64.0.9:11434")
-            .expect("tailscale");
+            .expect_err("cgnat");
+        assert!(err.contains("public IPv4"));
+        registry
+            .set_node_url(&id, "http://10.0.0.9:11434")
+            .expect("rfc1918");
         assert_eq!(
             registry.get(&id).unwrap().url.as_deref(),
-            Some("http://100.64.0.9:11434")
+            Some("http://10.0.0.9:11434")
         );
         assert!(!registry.get(&id).unwrap().healthy);
+    }
+
+    #[test]
+    fn set_node_url_refuses_public_share_hostname() {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("a");
+        let err = registry
+            .set_node_url(&id, "https://abc.share.zrok.io")
+            .expect_err("public share");
+        assert!(err.contains("public share"));
+        assert_eq!(
+            registry.get(&id).unwrap().url.as_deref(),
+            Some("http://a:11434")
+        );
     }
 
     #[test]

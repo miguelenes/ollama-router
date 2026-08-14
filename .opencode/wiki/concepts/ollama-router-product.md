@@ -7,14 +7,14 @@ sourceRefs:
   - crates/ollama-router/src/proxy
   - crates/ollama-router-verda
   - crates/ollama-router-core/src/jobs
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-14
 ---
 
 # ollama-router product surface
 
 Mixed CPU+GPU Ollama-compatible fleet proxy. The router process needs **no GPU**.
 One URL (`:11434`) load-balances embeddings and chat across `fleet.yaml` hosts
-and optional Verda Tailscale GPU nodes.
+and optional Verda GPU nodes over a self-hosted zrok **private** share.
 
 This crate is **not** Illumination. The Python tree at
 `/home/menes/Projects/illumination/services/ollama-router/` is a behavioral
@@ -24,8 +24,8 @@ spec — read it; do not paste it.
 
 | Source | Role |
 |--------|------|
-| `OLLAMA_ROUTER_FLEET` / `fleet.yaml` | Permanent CPU and GPU membership |
-| `FleetState` | Durable Tailscale URLs + Verda metadata |
+| `OLLAMA_ROUTER_FLEET` / `fleet.yaml` | Permanent CPU and GPU membership (LAN URLs are direct HTTP) |
+| `FleetState` | Durable enroll/tunnel URLs + Verda metadata |
 | Verda manager | Dynamic spot GPUs (not in fleet.yaml) |
 
 YAML overlays are **tunables-only**. Top-level `nodes:` is a hard config error
@@ -38,11 +38,21 @@ layered load that rejects YAML inventory.
 
 **Verda only.** NVIDIA spots, cheapest then smallest qualifying GPU inside
 inclusive `min_vram_gb` / `max_vram_gb` (default 8–80). Never advertise public
-`:11434` as healthy.
+`:11434` as healthy. Hostname public tunnels (`*.zrok.io` etc.) are also
+`public_url_blocked`.
 
-Path: public SSH bootstrap → ordinary OpenSSH over Tailscale. The provisioner
-does **not** enable Tailscale SSH. Register an Ollama URL only after OpenSSH
-and `/api/tags` succeed on the tailnet. Public SSH is bootstrap/recovery-only.
+Path: Verda **startup script** (`startup_script_id` on instance create) installs
+`ollama-node-agent` and runs `setup` (Ollama + zrok sidecar). Reuse catalog
+script `ollama-router-agent-init` by name (or a configured id). Secrets are
+injected from router env at create into a 0600 guest env file — never committed,
+never echoed. `tunnel.api_endpoint` is also written as `ZROK_API_ENDPOINT` so
+the guest `zrok enable` talks to the self-hosted controller. The router may upload an SSH key to satisfy Verda's API but must
+**never SSH** (no russh, no public SSH wait). Register an Ollama URL only after
+enroll of the private share token and `/api/tags` succeed through the tunnel.
+Enroll timeout keeps FleetState ownership and returns an allowlisted reason.
+On tunneled hosts, Ollama and the node-agent bind **loopback**.
+`fleet.yaml` LAN URLs stay direct HTTP. Enroll must not write `fleet.yaml`.
+Preferred images stay Ubuntu 24 CUDA. See [[concepts/ollama-router-node-tunnel]].
 
 Demand scale-up calls the Verda manager only (no multi-provider ranking). It is
 coalesced and asynchronous; the client receives **503 + Retry-After**.
@@ -74,5 +84,6 @@ is an ownership discriminator, not the cloud tag.
 
 - [[concepts/ollama-cloud-vram-guardrails]]
 - [[concepts/ollama-capacity-discovery]]
+- [[concepts/ollama-router-node-tunnel]]
 - [[concepts/ollama-router-durable-model-operations]]
 - [[concepts/ollama-router-idle-scale-down]]

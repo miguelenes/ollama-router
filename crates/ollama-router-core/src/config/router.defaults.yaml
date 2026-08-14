@@ -76,6 +76,18 @@ timeouts:
   generate_seconds: 600
   pull_seconds: 3600
 
+# Router-side zrok access frontend. `.zrok.io` public shares are always blocked;
+# extra suffixes are optional (hostname tunnels → public_url_blocked).
+# api_endpoint is the self-hosted controller (ZROK_API_ENDPOINT). Enable token
+# stays in the env named by enable_token_env — never a YAML literal.
+tunnel:
+  zrok_bin: zrok
+  public_share_suffixes:
+    - .zrok.io
+  api_endpoint: ""
+  enable_token_env: ZROK_ENABLE_TOKEN
+  access_bind: "127.0.0.1"
+
 # reqwest pool keepalive + semaphore around each upstream send.
 upstream:
   max_connections: 256
@@ -104,19 +116,6 @@ desired_model_tiers:
       - qwen2.5:14b
     min_vram_gb: 24
 
-provision_defaults:
-  auto: true
-  concurrency: 1
-  cooldown_seconds: 900
-  ssh_connect_timeout_seconds: 5
-  reboot_wait_timeout_seconds: 900
-  tailscale_ssh_wait_timeout_seconds: 300
-  tailscale_ssh_port: 22
-  poll_interval_seconds: 15
-  ts_authkey_env: TS_AUTHKEY
-  ts_ephemeral: true
-  ts_accept_routes: false
-
 # Verda Cloud spot GPU provisioning — DISABLED by default.
 # Credentials are boot/infra secrets (VERDA_CLIENT_ID / VERDA_CLIENT_SECRET);
 # never put secrets in this file. Cloud instance tag managed_by=ollama-router.
@@ -138,6 +137,16 @@ verda:
   ssh_key_name: ollama-router
   ssh_public_key_file: null
   ssh_private_key_file: null
+  # First-boot catalog script (reuse by name). Secrets are injected from env
+  # names below at instance create — never commit tokens here.
+  startup_script_id: null
+  startup_script_name: ollama-router-agent-init
+  agent_package_url: null
+  agent_github_repo: miguelenes/ollama-router
+  agent_version: null
+  enroll_url: null
+  zrok_enable_token_env: ZROK_ENABLE_TOKEN
+  enroll_token_env: OLLAMA_ROUTER_ADMIN_TOKEN
   preferred_image_globs:
     - "*ubuntu-24*cuda*docker*"
     - "*ubuntu-24*docker*"
