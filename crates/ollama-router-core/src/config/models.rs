@@ -9,6 +9,15 @@ use crate::fleet::ids::NodeId;
 
 use super::error::ConfigError;
 
+fn reject_non_finite(name: &str, value: f64) -> Result<(), ConfigError> {
+    if !value.is_finite() {
+        return Err(ConfigError::invalid(format!(
+            "{name} must be a finite number"
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_env_name(value: &str) -> bool {
     let mut chars = value.chars();
     match chars.next() {
@@ -117,6 +126,7 @@ impl Capacity {
     pub(crate) fn validate(&self) -> Result<(), ConfigError> {
         for (name, value) in [("vram_gb", self.vram_gb), ("ram_gb", self.ram_gb)] {
             if let Some(v) = value {
+                reject_non_finite(name, v)?;
                 if v < 0.0 {
                     return Err(ConfigError::invalid(format!(
                         "capacity values must be >= 0 ({name})"
@@ -144,6 +154,7 @@ impl ModelTier {
                 "desired_model_tiers.models must be non-empty",
             ));
         }
+        reject_non_finite("min_vram_gb", self.min_vram_gb)?;
         if self.min_vram_gb < 0.0 {
             return Err(ConfigError::invalid("min_vram_gb must be >= 0"));
         }
@@ -307,6 +318,7 @@ impl PolicyConfig {
             ("vram_floor_gb", self.vram_floor_gb),
             ("medium_reserve_min_gb", self.medium_reserve_min_gb),
         ] {
+            reject_non_finite(name, value)?;
             if value <= 0.0 {
                 return Err(ConfigError::invalid(format!(
                     "policy thresholds must be > 0 ({name})"
@@ -335,6 +347,8 @@ impl PolicyConfig {
                 )));
             }
         }
+        reject_non_finite("small_reserve_vram_gb", self.small_reserve_vram_gb)?;
+        reject_non_finite("embed_reserve_vram_gb", self.embed_reserve_vram_gb)?;
         if self.small_reserve_vram_gb < 0.0 || self.embed_reserve_vram_gb < 0.0 {
             return Err(ConfigError::invalid("flat reservation knobs must be >= 0"));
         }
@@ -354,12 +368,14 @@ impl PolicyConfig {
             ("embed_reserve_ram_gb", self.embed_reserve_ram_gb),
             ("small_reserve_ram_gb", self.small_reserve_ram_gb),
         ] {
+            reject_non_finite(name, value)?;
             if value < 0.0 {
                 return Err(ConfigError::invalid(format!(
                     "RAM policy values must be >= 0 ({name})"
                 )));
             }
         }
+        reject_non_finite("ram_headroom", self.ram_headroom)?;
         if self.ram_headroom <= 0.0 || self.ram_headroom > 1.0 {
             return Err(ConfigError::invalid("ram_headroom must be > 0 and <= 1"));
         }
@@ -378,21 +394,38 @@ impl PolicyConfig {
                 "pull_miss_retry_after_seconds must be between 1 and 900",
             ));
         }
+        reject_non_finite("auto_pull_wait_seconds", self.auto_pull_wait_seconds)?;
         if !(0.0..=120.0).contains(&self.auto_pull_wait_seconds) {
             return Err(ConfigError::invalid(
                 "auto_pull_wait_seconds must be between 0 and 120",
             ));
         }
+        reject_non_finite(
+            "model_warm_interval_seconds",
+            self.model_warm_interval_seconds,
+        )?;
+        reject_non_finite(
+            "model_warm_cooldown_seconds",
+            self.model_warm_cooldown_seconds,
+        )?;
         if self.model_warm_interval_seconds <= 0.0 || self.model_warm_cooldown_seconds <= 0.0 {
             return Err(ConfigError::invalid(
                 "model warm interval/cooldown must be > 0",
             ));
         }
+        reject_non_finite(
+            "model_warm_min_free_vram_gb",
+            self.model_warm_min_free_vram_gb,
+        )?;
         if self.model_warm_min_free_vram_gb < 0.0 {
             return Err(ConfigError::invalid(
                 "model_warm_min_free_vram_gb must be >= 0",
             ));
         }
+        reject_non_finite(
+            "model_warm_max_inflight_ratio",
+            self.model_warm_max_inflight_ratio,
+        )?;
         if self.model_warm_max_inflight_ratio <= 0.0 || self.model_warm_max_inflight_ratio > 1.0 {
             return Err(ConfigError::invalid(
                 "model_warm_max_inflight_ratio must be > 0 and <= 1",
@@ -423,6 +456,7 @@ pub struct HealthConfig {
     pub pressure_probe_path: Option<String>,
     pub probe_jitter_ratio: f64,
     pub max_concurrent_probes: u32,
+    pub max_probe_body_bytes: u64,
 }
 
 impl Default for HealthConfig {
@@ -445,6 +479,7 @@ impl Default for HealthConfig {
             pressure_probe_path: None,
             probe_jitter_ratio: 0.2,
             max_concurrent_probes: 8,
+            max_probe_body_bytes: 8 * 1024 * 1024,
         }
     }
 }
@@ -460,6 +495,7 @@ impl HealthConfig {
                 self.capacity_probe_timeout_seconds,
             ),
         ] {
+            reject_non_finite(name, value)?;
             if value <= 0.0 {
                 return Err(ConfigError::invalid(format!(
                     "health timings must be > 0 ({name})"
@@ -495,6 +531,7 @@ impl HealthConfig {
                 "overload_fail_credit must be <= request_fail_credit",
             ));
         }
+        reject_non_finite("probe_jitter_ratio", self.probe_jitter_ratio)?;
         if self.probe_jitter_ratio < 0.0 || self.probe_jitter_ratio > 1.0 {
             return Err(ConfigError::invalid(
                 "probe_jitter_ratio must be between 0 and 1",
@@ -502,6 +539,11 @@ impl HealthConfig {
         }
         if self.max_concurrent_probes < 1 {
             return Err(ConfigError::invalid("max_concurrent_probes must be >= 1"));
+        }
+        if self.max_probe_body_bytes < 1 || self.max_probe_body_bytes > 1024 * 1024 * 1024 {
+            return Err(ConfigError::invalid(
+                "max_probe_body_bytes must be between 1 byte and 1 GiB",
+            ));
         }
         Ok(())
     }
@@ -539,6 +581,7 @@ impl TimeoutsConfig {
             ("generate_seconds", self.generate_seconds),
             ("pull_seconds", self.pull_seconds),
         ] {
+            reject_non_finite(name, value)?;
             if value <= 0.0 {
                 return Err(ConfigError::invalid(format!(
                     "timeouts must be > 0 ({name})"
@@ -860,10 +903,12 @@ impl VerdaConfig {
                 "verda.agent_github_repo must be owner/repo",
             ));
         }
+        reject_non_finite("min_vram_gb", self.min_vram_gb)?;
         if self.min_vram_gb < 0.0 {
             return Err(ConfigError::invalid("verda VRAM bounds must be >= 0"));
         }
         if let Some(max) = self.max_vram_gb {
+            reject_non_finite("max_vram_gb", max)?;
             if max < 0.0 {
                 return Err(ConfigError::invalid("verda VRAM bounds must be >= 0"));
             }
@@ -1037,7 +1082,7 @@ impl YamlTunables {
                 ));
             }
         }
-        if self.ensure_wait_max_seconds <= 0.0 {
+        if self.ensure_wait_max_seconds <= 0.0 || !self.ensure_wait_max_seconds.is_finite() {
             return Err(ConfigError::invalid("ensure_wait_max_seconds must be > 0"));
         }
         if self.listen_port == 0 {
@@ -1045,7 +1090,8 @@ impl YamlTunables {
                 "listen_port must be between 1 and 65535",
             ));
         }
-        if self.bootstrap_probe_wait_seconds < 0.0 {
+        if self.bootstrap_probe_wait_seconds < 0.0 || !self.bootstrap_probe_wait_seconds.is_finite()
+        {
             return Err(ConfigError::invalid(
                 "bootstrap_probe_wait_seconds must be >= 0",
             ));

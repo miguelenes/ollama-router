@@ -4,6 +4,7 @@ pub mod capacity;
 pub mod cloud;
 pub mod config;
 pub mod fleet;
+pub mod http_util;
 pub mod jobs;
 pub mod routing;
 
@@ -24,9 +25,11 @@ pub use config::{
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
     url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist,
-    FleetState, FleetStateError, GpuSnapshot, NodeId, NodeOrigin, NodeSnapshot, PressureLevel,
-    Registry, RouterId, VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId, NodeOrigin, NodeSnapshot,
+    PressureLevel, Registry, RouterId, VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH,
+    DEFAULT_STATE_PATH,
 };
+pub use http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 pub use jobs::{
     Job, JobId, JobKind, JobObserver, JobOutcome, JobStatus, JobStore, JobTarget,
     ModelOrchestrator, OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,

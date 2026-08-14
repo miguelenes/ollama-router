@@ -19,7 +19,8 @@ use futures_util::Stream;
 use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
-use ollama_router_core::fleet::{NodeId, NodeSnapshot, Registry};
+use ollama_router_core::fleet::{InflightAdmit, NodeId, NodeSnapshot, Registry};
+use ollama_router_core::http_util::reqwest_error_for_log;
 use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify, estimate_request_ram_gb, estimate_request_vram_gb,
@@ -93,6 +94,13 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
                         "error": "ollama-router: request body exceeds configured limit",
                         "max_request_body_bytes": state.config.policy.max_request_body_bytes,
                     }),
+                    None,
+                );
+            }
+            Err(BodyCapError::Interrupted) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    json!({"error": "ollama-router: request body interrupted"}),
                     None,
                 );
             }
@@ -375,33 +383,6 @@ async fn forward_once(
     }
 
     let client_forward = is_client_forward(call.path);
-    let (vram_id, ram_id) = if client_forward {
-        maybe_reserve(
-            &state.registry,
-            &state.config.policy,
-            node,
-            call.model.as_deref(),
-            call.request_class,
-        )
-    } else {
-        (None, None)
-    };
-    if client_forward && !state.registry.inflight_inc(&node.id) {
-        state.registry.release_vram(&node.id, vram_id);
-        state.registry.release_ram(&node.id, ram_id);
-        return Err(ForwardError::Retryable {
-            reason: "draining",
-            message: "node is draining".into(),
-        });
-    }
-    let guard = InflightGuard {
-        registry: Arc::clone(&state.registry),
-        node_id: node.id.clone(),
-        vram_id,
-        ram_id,
-        counts_inflight: client_forward,
-    };
-
     let timeout = class_timeout(&state.config.timeouts, call.request_class);
     let headers = forward_headers(call.incoming_headers);
     let permit = state
@@ -414,6 +395,46 @@ async fn forward_once(
             message: "connection pool closed".into(),
         })?;
 
+    let (vram_id, ram_id) = if client_forward {
+        maybe_reserve(
+            &state.registry,
+            &state.config.policy,
+            node,
+            call.model.as_deref(),
+            call.request_class,
+        )
+    } else {
+        (None, None)
+    };
+    if client_forward {
+        match state.registry.inflight_inc(&node.id) {
+            InflightAdmit::Admitted => {}
+            InflightAdmit::Saturated => {
+                state.registry.release_vram(&node.id, vram_id);
+                state.registry.release_ram(&node.id, ram_id);
+                return Err(ForwardError::Retryable {
+                    reason: "saturated",
+                    message: "node is at inflight cap".into(),
+                });
+            }
+            InflightAdmit::Missing | InflightAdmit::Draining => {
+                state.registry.release_vram(&node.id, vram_id);
+                state.registry.release_ram(&node.id, ram_id);
+                return Err(ForwardError::Retryable {
+                    reason: "draining",
+                    message: "node is draining".into(),
+                });
+            }
+        }
+    }
+    let guard = InflightGuard {
+        registry: Arc::clone(&state.registry),
+        node_id: node.id.clone(),
+        vram_id,
+        ram_id,
+        counts_inflight: client_forward,
+    };
+
     let mut builder = state.client.request(call.method.clone(), &url);
     for (name, value) in &headers {
         builder = builder.header(name, value);
@@ -421,13 +442,13 @@ async fn forward_once(
     if !call.body.is_empty() {
         builder = builder.body(call.body.clone());
     }
-    let request = builder.timeout(timeout).build().map_err(|err| {
-        let err = err.without_url();
-        ForwardError::Fatal {
+    let request = builder
+        .timeout(timeout)
+        .build()
+        .map_err(|err| ForwardError::Fatal {
             kind: "RequestBuild".into(),
-            message: err.to_string(),
-        }
-    })?;
+            message: reqwest_error_for_log(err),
+        })?;
 
     let response = match state.client.execute(request).await {
         Ok(response) => response,
@@ -463,7 +484,6 @@ async fn forward_once(
         }
     }
 
-    state.registry.mark_request_success(&node.id);
     tracing::debug!(
         path = call.path,
         request_class = %call.request_class,
@@ -530,24 +550,26 @@ fn class_timeout(timeouts: &TimeoutsConfig, request_class: RequestClass) -> Dura
 }
 
 fn classify_reqwest(err: reqwest::Error) -> ForwardError {
-    let err = err.without_url();
-    let message = err.to_string();
-    if err.is_timeout() && err.is_connect() {
+    let is_timeout = err.is_timeout();
+    let is_connect = err.is_connect();
+    let is_request = err.is_request();
+    let message = reqwest_error_for_log(err);
+    if is_timeout && is_connect {
         ForwardError::Retryable {
             reason: "connect_timeout",
             message,
         }
-    } else if err.is_connect() {
+    } else if is_connect {
         ForwardError::Retryable {
             reason: "connect_error",
             message,
         }
-    } else if err.is_timeout() {
+    } else if is_timeout {
         ForwardError::Retryable {
             reason: "read_timeout",
             message,
         }
-    } else if err.is_request() {
+    } else if is_request {
         ForwardError::Retryable {
             reason: "protocol_error",
             message,
@@ -600,11 +622,18 @@ impl Stream for ProxyStream {
                 Poll::Ready(Some(Ok(bytes)))
             }
             Poll::Ready(Some(Err(err))) => {
-                let err = err.without_url();
-                Poll::Ready(Some(Err(std::io::Error::other(truncate(
-                    &err.to_string(),
-                    200,
-                )))))
+                if let Some(guard) = this.inflight.as_ref() {
+                    guard.registry.mark_request_failure(&guard.node_id);
+                }
+                this.inflight.take();
+                this._permit.take();
+                let message = reqwest_error_for_log(err);
+                tracing::debug!(
+                    node = %this.node,
+                    error = %truncate(&message, 200),
+                    "upstream_stream_error"
+                );
+                Poll::Ready(Some(Err(std::io::Error::other(truncate(&message, 200)))))
             }
             Poll::Ready(None) => {
                 this.collector.flush();
@@ -617,6 +646,9 @@ impl Stream for ProxyStream {
                     eval_tokens = timing.eval_tokens,
                     "upstream_timing"
                 );
+                if let Some(guard) = this.inflight.as_ref() {
+                    guard.registry.mark_request_success(&guard.node_id);
+                }
                 this.inflight.take();
                 this._permit.take();
                 Poll::Ready(None)
@@ -643,6 +675,7 @@ enum ForwardError {
 enum BodyCapError {
     InvalidContentLength,
     TooLarge,
+    Interrupted,
 }
 
 async fn read_body_capped(
@@ -668,7 +701,13 @@ async fn read_body_capped(
     let limited = Limited::new(body, limit);
     match limited.collect().await {
         Ok(collected) => Ok(collected.to_bytes()),
-        Err(_) => Err(BodyCapError::TooLarge),
+        Err(err) => {
+            if <dyn std::error::Error>::is::<http_body_util::LengthLimitError>(err.as_ref()) {
+                Err(BodyCapError::TooLarge)
+            } else {
+                Err(BodyCapError::Interrupted)
+            }
+        }
     }
 }
 

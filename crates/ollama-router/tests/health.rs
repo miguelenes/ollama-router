@@ -350,6 +350,82 @@ async fn warm_skips_cpu_for_gpu_class_tier() {
 }
 
 #[tokio::test]
+async fn oversized_tags_does_not_empty_models() {
+    let server = MockServer::start();
+    let tags = server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .header("content-length", "1000000")
+            .body(r#"{"models":[{"name":"should-not-replace"}]}"#);
+    });
+    let mut config = RouterConfig {
+        nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
+        ..RouterConfig::default()
+    };
+    config.health = HealthConfig {
+        max_probe_body_bytes: 8,
+        capacity_probe_enabled: false,
+        ..fast_health()
+    };
+    let state = AppState::from_config(config).expect("state");
+    state.registry.set_healthy(&nid("gpu"));
+    state.registry.update_models(&nid("gpu"), ["llama3.2:3b"]);
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(3), || {
+        state
+            .registry
+            .get(&nid("gpu"))
+            .is_some_and(|n| !n.healthy && n.fail_streak >= 2)
+    })
+    .await;
+    let snap = state.registry.get(&nid("gpu")).unwrap();
+    assert!(snap.has_model("llama3.2:3b"));
+    assert!(!snap.has_model("should-not-replace"));
+    handle.abort();
+    assert!(tags.calls() >= 2);
+}
+
+#[tokio::test]
+async fn oversized_ps_does_not_clear_loaded_or_health() {
+    let server = MockServer::start();
+    let _tags = server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[{"name":"llama3.2:3b"}]}"#);
+    });
+    let ps = server.mock(|when, then| {
+        when.method(GET).path("/api/ps");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(format!(r#"{{"models":[],"pad":"{}"}}"#, "x".repeat(200)));
+    });
+    let mut config = RouterConfig {
+        nodes: vec![node("gpu", Some(&server.base_url()), 8.0, 1)],
+        ..RouterConfig::default()
+    };
+    config.health = HealthConfig {
+        max_probe_body_bytes: 64,
+        capacity_probe_enabled: false,
+        ..fast_health()
+    };
+    let state = AppState::from_config(config).expect("state");
+    state.registry.set_healthy(&nid("gpu"));
+    state.registry.update_models(&nid("gpu"), ["llama3.2:3b"]);
+    state
+        .registry
+        .update_ps_state(&nid("gpu"), ["llama3.2:3b"], Some(3.0));
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(3), || ps.calls() >= 1).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let snap = state.registry.get(&nid("gpu")).unwrap();
+    assert!(snap.healthy);
+    assert!(snap.has_model_loaded("llama3.2:3b"));
+    handle.abort();
+}
+
+#[tokio::test]
 async fn cancel_stops_health_supervisor() {
     let server = MockServer::start();
     let tags = server.mock(|when, then| {

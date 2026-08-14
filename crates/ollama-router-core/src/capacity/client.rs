@@ -7,6 +7,8 @@ use url::Url;
 
 use ollama_capacity_types::{CapacityReport, PressureEnvelope};
 
+use crate::http_util::{read_reqwest_capped, ProbeBodyError};
+
 /// Allowlisted probe failure. Never includes bodies, tokens, or URLs.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CapacityError {
@@ -76,12 +78,13 @@ impl CapacityClient {
         target: &CapacityTarget,
         token: Option<&str>,
         timeout: Duration,
+        max_bytes: u64,
     ) -> Result<CapacityProbe, CapacityError> {
         let report = self
-            .get_json::<CapacityReport>(&target.capacity_url, token, timeout)
+            .get_json::<CapacityReport>(&target.capacity_url, token, timeout, max_bytes)
             .await?;
         let pressure_level = match self
-            .get_json::<PressureEnvelope>(&target.pressure_url, token, timeout)
+            .get_json::<PressureEnvelope>(&target.pressure_url, token, timeout, max_bytes)
             .await
         {
             Ok(envelope) => envelope.pressure_level,
@@ -98,6 +101,7 @@ impl CapacityClient {
         url: &str,
         token: Option<&str>,
         timeout: Duration,
+        max_bytes: u64,
     ) -> Result<T, CapacityError> {
         let mut req = self.inner.get(url).timeout(timeout);
         if let Some(token) = token {
@@ -110,7 +114,12 @@ impl CapacityClient {
                 status: status.as_u16(),
             });
         }
-        let bytes = resp.bytes().await.map_err(CapacityError::from_reqwest)?;
+        let bytes = match read_reqwest_capped(resp, max_bytes).await {
+            Ok(bytes) => bytes,
+            Err(ProbeBodyError::TooLarge | ProbeBodyError::Interrupted | ProbeBodyError::Parse) => {
+                return Err(CapacityError::Parse);
+            }
+        };
         serde_json::from_slice(&bytes).map_err(|_| CapacityError::Parse)
     }
 }

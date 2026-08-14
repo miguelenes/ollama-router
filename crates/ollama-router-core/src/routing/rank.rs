@@ -410,6 +410,7 @@ pub fn rank_nodes(
         let ka = load_key(a, request_class, model, policy);
         let kb = load_key(b, request_class, model, policy);
         ka.partial_cmp(&kb)
+            // NaN keys are rejected at config/agent ingest; Equal is defensive.
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
@@ -450,7 +451,7 @@ pub fn blocked_only_by_reservations(
     policy: &PolicyConfig,
 ) -> bool {
     for node in nodes {
-        if !node.healthy {
+        if !node.healthy || node.draining {
             continue;
         }
         if let Some(model) = model {
@@ -461,7 +462,13 @@ pub fn blocked_only_by_reservations(
         if !label_ok(&node.labels, policy) {
             continue;
         }
-        if static_capacity_fits(node, request_class, model, policy) {
+        if capacity_fits(node, request_class, model, policy) {
+            continue;
+        }
+        let mut cleared = node.clone();
+        cleared.reserved_vram_gb = 0.0;
+        cleared.reserved_ram_gb = 0.0;
+        if capacity_fits(&cleared, request_class, model, policy) {
             return true;
         }
     }
@@ -656,6 +663,87 @@ mod tests {
         assert!(!RoutingError::ModelMissing.requests_demand_scale_up());
         assert!(!RoutingError::Ram.requests_demand_scale_up());
         assert!(!RoutingError::RamPressure.requests_demand_scale_up());
+    }
+
+    #[test]
+    fn blocked_only_by_reservations_false_when_loaded_vram_fills_headroom() {
+        let config = RouterConfig {
+            nodes: vec![node("gpu", 24.0, 1, None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("gpu");
+        registry.set_healthy(&id);
+        registry.update_models(&id, ["llama3.1:8b"]);
+        let mut snap = registry.snapshot();
+        snap[0].loaded_vram_gb = Some(20.0);
+        snap[0].reserved_vram_gb = 0.0;
+        assert!(!blocked_only_by_reservations(
+            &snap,
+            RequestClass::Medium,
+            Some("llama3.1:8b"),
+            &config.policy,
+        ));
+    }
+
+    #[test]
+    fn blocked_only_by_reservations_true_when_ledger_is_the_blocker() {
+        let config = RouterConfig {
+            nodes: vec![node("gpu", 24.0, 1, None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let id = nid("gpu");
+        registry.set_healthy(&id);
+        registry.update_models(&id, ["llama3.1:8b"]);
+        let mut snap = registry.snapshot();
+        snap[0].loaded_vram_gb = Some(10.0);
+        snap[0].reserved_vram_gb = 12.0;
+        assert!(blocked_only_by_reservations(
+            &snap,
+            RequestClass::Medium,
+            Some("llama3.1:8b"),
+            &config.policy,
+        ));
+    }
+
+    #[test]
+    fn blocked_only_by_reservations_false_for_undersized_large() {
+        let (registry, policy) = fleet();
+        assert!(!blocked_only_by_reservations(
+            &registry.snapshot(),
+            RequestClass::Large,
+            Some("llama3.1:70b"),
+            &policy,
+        ));
+    }
+
+    #[test]
+    fn nan_load_key_falls_back_to_id_order() {
+        let config = RouterConfig {
+            nodes: vec![node("node-b", 8.0, 1, None), node("node-a", 8.0, 1, None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&nid("node-a"));
+        registry.set_healthy(&nid("node-b"));
+        registry.update_models(&nid("node-a"), ["llama3.2:3b"]);
+        registry.update_models(&nid("node-b"), ["llama3.2:3b"]);
+        let mut snap = registry.snapshot();
+        for node in &mut snap {
+            node.ram_available_ratio = Some(f64::NAN);
+        }
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Small,
+            Some("llama3.2:3b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "node-a");
+        assert_eq!(outcome.ranked[1].id.as_str(), "node-b");
     }
 
     #[test]

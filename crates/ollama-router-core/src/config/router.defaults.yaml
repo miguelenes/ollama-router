@@ -61,6 +61,7 @@ health:
   overload_fail_credit: 1
   probe_jitter_ratio: 0.2
   max_concurrent_probes: 8
+  max_probe_body_bytes: 8388608
   ps_probe_enabled: true
   # Node-local capacity discovery (soft-fail, never affects health).
   capacity_probe_enabled: true
