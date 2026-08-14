@@ -296,6 +296,10 @@ pub fn load_key(
     )
 }
 
+fn snapshot_ids<'a>(nodes: impl IntoIterator<Item = &'a NodeSnapshot>) -> Vec<NodeId> {
+    nodes.into_iter().map(|n| n.id.clone()).collect()
+}
+
 /// Ordered candidate list (best first), rejection reason, evaluated ids.
 pub fn rank_nodes(
     nodes: &[NodeSnapshot],
@@ -314,7 +318,6 @@ pub fn rank_nodes(
         };
     }
 
-    let all_ids: Vec<NodeId> = nodes.iter().map(|n| n.id.clone()).collect();
     let healthy: Vec<&NodeSnapshot> = nodes
         .iter()
         .filter(|n| n.healthy && !n.draining && !excluded_node_ids.contains(&n.id))
@@ -323,7 +326,7 @@ pub fn rank_nodes(
         return RankOutcome {
             ranked: Vec::new(),
             reason: Some(RoutingError::NoHealthy),
-            evaluated: all_ids,
+            evaluated: snapshot_ids(nodes),
         };
     }
 
@@ -337,7 +340,7 @@ pub fn rank_nodes(
             return RankOutcome {
                 ranked: Vec::new(),
                 reason: Some(RoutingError::ModelMissing),
-                evaluated: healthy.iter().map(|n| n.id.clone()).collect(),
+                evaluated: snapshot_ids(healthy),
             };
         }
         with_model
@@ -364,7 +367,7 @@ pub fn rank_nodes(
             return RankOutcome {
                 ranked: Vec::new(),
                 reason: Some(RoutingError::Capacity),
-                evaluated: labeled.iter().map(|n| n.id.clone()).collect(),
+                evaluated: snapshot_ids(labeled),
             };
         }
         let mut reason = RoutingError::Ram;
@@ -383,7 +386,7 @@ pub fn rank_nodes(
         return RankOutcome {
             ranked: Vec::new(),
             reason: Some(reason),
-            evaluated: labeled.iter().map(|n| n.id.clone()).collect(),
+            evaluated: snapshot_ids(labeled),
         };
     }
 
@@ -396,12 +399,14 @@ pub fn rank_nodes(
         return RankOutcome {
             ranked: Vec::new(),
             reason: Some(RoutingError::Saturated),
-            evaluated: fitting.iter().map(|n| n.id.clone()).collect(),
+            evaluated: snapshot_ids(fitting),
         };
     }
 
-    let mut ranked: Vec<NodeSnapshot> = uncapped.into_iter().cloned().collect();
-    ranked.sort_by(|a, b| {
+    let mut order: Vec<usize> = (0..uncapped.len()).collect();
+    order.sort_by(|&i, &j| {
+        let a = uncapped[i];
+        let b = uncapped[j];
         let ka = load_key(a, request_class, model, policy);
         let kb = load_key(b, request_class, model, policy);
         ka.partial_cmp(&kb)
@@ -409,30 +414,27 @@ pub fn rank_nodes(
             .then_with(|| a.id.as_str().cmp(b.id.as_str()))
     });
 
-    let best_key = load_key(&ranked[0], request_class, model, policy);
+    let best_key = load_key(uncapped[order[0]], request_class, model, policy);
     if let Some(owner_id) = sticky_owner {
-        if let Some(pos) = ranked.iter().position(|n| n.id == *owner_id) {
-            if pos != 0 && load_key(&ranked[pos], request_class, model, policy) == best_key {
-                let owner = ranked.remove(pos);
-                ranked.insert(0, owner);
+        if let Some(pos) = order.iter().position(|&i| uncapped[i].id == *owner_id) {
+            if pos != 0 && load_key(uncapped[order[pos]], request_class, model, policy) == best_key
+            {
+                order[..=pos].rotate_right(1);
             }
         }
     }
 
-    let tied_len = ranked
+    let tied_len = order
         .iter()
-        .filter(|n| load_key(n, request_class, model, policy) == best_key)
+        .filter(|&&i| load_key(uncapped[i], request_class, model, policy) == best_key)
         .count();
     if tied_len > 1 && tie_break > 0 {
         let rot = (tie_break as usize) % tied_len;
-        let mut tied: Vec<NodeSnapshot> = ranked.drain(..tied_len).collect();
-        tied.rotate_left(rot);
-        let rest = ranked;
-        ranked = tied;
-        ranked.extend(rest);
+        order[..tied_len].rotate_left(rot);
     }
 
-    let evaluated: Vec<NodeId> = ranked.iter().map(|n| n.id.clone()).collect();
+    let ranked: Vec<NodeSnapshot> = order.iter().map(|&i| uncapped[i].clone()).collect();
+    let evaluated = snapshot_ids(&ranked);
     RankOutcome {
         ranked,
         reason: None,

@@ -629,6 +629,16 @@ async fn demand_scale_up_does_not_block() {
 }
 
 #[test]
+fn node_id_for_uses_verda_prefix_and_fallback_is_valid() {
+    let id = VerdaManager::node_id_for("inst-1");
+    assert_eq!(id.as_str(), "verda-inst-1");
+    assert_eq!(
+        NodeId::from_static("verda-unknown").as_str(),
+        "verda-unknown"
+    );
+}
+
+#[test]
 fn instance_ignores_unknown_fields() {
     let raw = r#"{"id":"x","status":"running","future_column":true,"ip":"1.2.3.4"}"#;
     let inst: Instance = serde_json::from_str(raw).expect("extras");

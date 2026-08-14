@@ -1,7 +1,7 @@
 //! Live in-memory fleet view: health, inflight, models, reservations.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::Instant;
 
 use crate::capacity::{
@@ -103,8 +103,8 @@ pub struct NodeSnapshot {
     pub url: Option<String>,
     pub labels: Vec<String>,
     pub healthy: bool,
-    pub models: HashSet<String>,
-    pub loaded_models: HashSet<String>,
+    pub models: Arc<HashSet<String>>,
+    pub loaded_models: Arc<HashSet<String>>,
     pub inflight: u32,
     pub max_inflight: Option<u32>,
     pub capacity: Capacity,
@@ -237,8 +237,8 @@ struct NodeState {
     healthy: bool,
     fail_streak: u32,
     success_streak: u32,
-    models: HashSet<String>,
-    loaded_models: HashSet<String>,
+    models: Arc<HashSet<String>>,
+    loaded_models: Arc<HashSet<String>>,
     inflight: u32,
     last_client_request_at: Option<Instant>,
     registered_at: Instant,
@@ -283,8 +283,8 @@ impl NodeState {
             healthy: false,
             fail_streak: 0,
             success_streak: 0,
-            models: HashSet::new(),
-            loaded_models: HashSet::new(),
+            models: Arc::new(HashSet::new()),
+            loaded_models: Arc::new(HashSet::new()),
             inflight: 0,
             last_client_request_at: None,
             registered_at: Instant::now(),
@@ -338,11 +338,11 @@ impl NodeState {
             url: self.config.url.clone(),
             labels: self.config.labels.clone(),
             healthy: self.healthy,
-            models: self.models.clone(),
-            loaded_models: self.loaded_models.clone(),
+            models: Arc::clone(&self.models),
+            loaded_models: Arc::clone(&self.loaded_models),
             inflight: self.inflight,
             max_inflight: self.config.max_inflight,
-            capacity: self.capacity_effective.clone(),
+            capacity: self.capacity_effective,
             reserved_vram_gb: self.reserved_vram_gb,
             reserved_ram_gb: self.reserved_ram_gb,
             loaded_vram_gb: self.loaded_vram_gb,
@@ -618,10 +618,12 @@ impl Registry {
     /// Replace the on-disk model set reported by `/api/tags`.
     pub fn update_models(&self, id: &NodeId, models: impl IntoIterator<Item = impl AsRef<str>>) {
         if let Some(node) = self.write().nodes.get_mut(id) {
-            node.models = models
-                .into_iter()
-                .map(|m| normalize_model(m.as_ref()))
-                .collect();
+            node.models = Arc::new(
+                models
+                    .into_iter()
+                    .map(|m| normalize_model(m.as_ref()))
+                    .collect(),
+            );
         }
     }
 
@@ -636,10 +638,12 @@ impl Registry {
         let Some(node) = inner.nodes.get_mut(id) else {
             return;
         };
-        node.loaded_models = loaded_models
-            .into_iter()
-            .map(|m| normalize_model(m.as_ref()))
-            .collect();
+        node.loaded_models = Arc::new(
+            loaded_models
+                .into_iter()
+                .map(|m| normalize_model(m.as_ref()))
+                .collect(),
+        );
         node.loaded_vram_gb = loaded_vram_gb;
         reconcile_ps_reservations(node);
         remarge(node);
@@ -932,10 +936,9 @@ impl Registry {
         }
     }
 
-    /// Sticky-affinity owner: prefer a warm healthy holder of `model`.
-    pub fn sticky_owner(&self, model: &str) -> Option<NodeId> {
-        let snap = self.snapshot();
-        let holders: Vec<&NodeSnapshot> = snap
+    /// Sticky-affinity owner from an existing snapshot: prefer a warm healthy holder of `model`.
+    pub fn sticky_owner_from(nodes: &[NodeSnapshot], model: &str) -> Option<NodeId> {
+        let holders: Vec<&NodeSnapshot> = nodes
             .iter()
             .filter(|n| n.healthy && !n.draining && n.has_model(model))
             .collect();
@@ -950,6 +953,11 @@ impl Registry {
         Some(chosen.id.clone())
     }
 
+    /// Sticky-affinity owner: prefer a warm healthy holder of `model`.
+    pub fn sticky_owner(&self, model: &str) -> Option<NodeId> {
+        Self::sticky_owner_from(&self.snapshot(), model)
+    }
+
     /// Healthy nodes' on-disk models, grouped for `/api/tags`.
     pub fn aggregated_tags(&self) -> Vec<(String, Vec<String>)> {
         let mut by_model: HashMap<String, Vec<String>> = HashMap::new();
@@ -957,7 +965,7 @@ impl Registry {
             if !node.healthy || node.draining {
                 continue;
             }
-            for model in &node.models {
+            for model in node.models.iter() {
                 by_model
                     .entry(model.clone())
                     .or_default()

@@ -142,9 +142,9 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
     let path = call.path;
     let model = call.model.as_deref();
 
-    let mut outcome = rank(state, request_class, model, &excluded);
-    if !outcome.ok()
-        && outcome.reason == Some(RoutingError::Saturated)
+    let mut decision = rank_decision(state, request_class, model, &excluded);
+    if !decision.outcome.ok()
+        && decision.outcome.reason == Some(RoutingError::Saturated)
         && policy.overload_wait_ms > 0
     {
         tracing::info!(
@@ -154,12 +154,12 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
             "overload_wait"
         );
         tokio::time::sleep(Duration::from_millis(u64::from(policy.overload_wait_ms))).await;
-        outcome = rank(state, request_class, model, &excluded);
+        decision = rank_decision(state, request_class, model, &excluded);
     }
-    if !outcome.ok()
-        && outcome.reason == Some(RoutingError::Capacity)
+    if !decision.outcome.ok()
+        && decision.outcome.reason == Some(RoutingError::Capacity)
         && policy.admission_wait_ms > 0
-        && blocked_only_by_reservations(&state.registry.snapshot(), request_class, model, policy)
+        && blocked_only_by_reservations(&decision.nodes, request_class, model, policy)
     {
         tracing::info!(
             path,
@@ -169,8 +169,9 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
             "admission_wait"
         );
         tokio::time::sleep(Duration::from_millis(u64::from(policy.admission_wait_ms))).await;
-        outcome = rank(state, request_class, model, &excluded);
+        decision = rank_decision(state, request_class, model, &excluded);
     }
+    let mut outcome = decision.outcome;
 
     if !outcome.ok() {
         let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
@@ -213,8 +214,13 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
         .min(ranked.len())
         .max(1);
     let mut last_error: Option<ForwardError> = None;
+    let mut last_node_id: Option<NodeId> = None;
     for attempt in 0..max_attempts {
-        let node = ranked[0].clone();
+        if ranked.is_empty() {
+            break;
+        }
+        let node = ranked.swap_remove(0);
+        last_node_id = Some(node.id.clone());
         excluded.insert(node.id.clone());
         let has_next = attempt + 1 < max_attempts;
         match forward_once(state, &call, &node).await {
@@ -278,10 +284,7 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
         }
     }
 
-    let node = ranked
-        .first()
-        .map(|n| n.id.as_str().to_string())
-        .unwrap_or_else(|| "-".to_string());
+    let node = last_node_id.as_ref().map_or("-", NodeId::as_str);
     let response = match last_error {
         Some(ForwardError::Overload { status }) => {
             DemandScale::request_scale_up(state.demand.as_ref(), RoutingError::Saturated);
@@ -303,10 +306,15 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
     state.metrics.observe_request(
         request_class.as_str(),
         response.status().as_u16(),
-        &node,
+        node,
         start.elapsed(),
     );
     response
+}
+
+struct RankDecision {
+    nodes: Vec<NodeSnapshot>,
+    outcome: RankOutcome,
 }
 
 fn rank(
@@ -314,24 +322,35 @@ fn rank(
     request_class: RequestClass,
     model: Option<&str>,
     excluded: &HashSet<NodeId>,
-) -> ollama_router_core::RankOutcome {
+) -> RankOutcome {
+    rank_decision(state, request_class, model, excluded).outcome
+}
+
+fn rank_decision(
+    state: &AppState,
+    request_class: RequestClass,
+    model: Option<&str>,
+    excluded: &HashSet<NodeId>,
+) -> RankDecision {
+    let nodes = state.registry.snapshot();
     let sticky = if state.config.policy.sticky_affinity {
-        model.and_then(|m| state.registry.sticky_owner(m))
+        model.and_then(|m| Registry::sticky_owner_from(&nodes, m))
     } else {
         None
     };
     let tie = state
         .tie_break
         .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    rank_nodes(
-        &state.registry.snapshot(),
+    let outcome = rank_nodes(
+        &nodes,
         request_class,
         model,
         &state.config.policy,
         sticky.as_ref(),
         excluded,
         tie,
-    )
+    );
+    RankDecision { nodes, outcome }
 }
 
 async fn forward_once(

@@ -62,7 +62,7 @@ pub enum SelectionStrategy {
 }
 
 /// Static hardware capacity. `None` means the operator omitted the field.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Capacity {
     #[serde(skip_serializing_if = "Option::is_none")]

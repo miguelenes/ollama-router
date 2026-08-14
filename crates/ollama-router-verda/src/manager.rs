@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::cloud::{
@@ -33,6 +33,9 @@ const REASON_WAITING_FOR_ENROLL: &str = "waiting_for_enroll";
 const REASON_ENROLL_TIMEOUT: &str = "enroll_timeout";
 const REASON_TAGS_UNREACHABLE: &str = "tags_unreachable";
 const REASON_PUBLIC_URL_BLOCKED: &str = "public_url_blocked";
+
+static VERDA_UNKNOWN_NODE_ID: LazyLock<NodeId> =
+    LazyLock::new(|| NodeId::from_static("verda-unknown"));
 
 struct EnrollWait {
     ok: bool,
@@ -171,10 +174,8 @@ impl VerdaManager {
     }
 
     pub fn node_id_for(instance_id: &str) -> NodeId {
-        let raw = format!("verda-{instance_id}");
-        NodeId::parse(&raw).unwrap_or_else(|_| {
-            NodeId::parse("verda-unknown").unwrap_or_else(|_| unreachable!("static node id"))
-        })
+        NodeId::parse(format!("verda-{instance_id}"))
+            .unwrap_or_else(|_| VERDA_UNKNOWN_NODE_ID.clone())
     }
 
     fn router_id(&self) -> String {
