@@ -1,0 +1,28 @@
+---
+description: Keep workspace line coverage at or above 80% via cargo-llvm-cov
+alwaysApply: true
+---
+
+# Test coverage gate
+
+Workspace **line** coverage must stay **≥ 80%**. Enforce with `cargo-llvm-cov`
+(`llvm-tools-preview` + `cargo install cargo-llvm-cov`).
+
+```bash
+task coverage
+# same as:
+cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+```
+
+After Rust or test changes, do not claim done until `task coverage` passes.
+If coverage drops below 80%, add tests for the new/changed paths — do not
+lower the threshold, skip the gate, or exclude crates to paper over gaps.
+
+```bash
+# BAD — merge without the gate / weaken the floor
+cargo test
+cargo llvm-cov --fail-under-lines 50
+
+# GOOD
+task check && task coverage
+```

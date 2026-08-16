@@ -90,6 +90,7 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
+task coverage       # cargo llvm-cov --fail-under-lines 80 (≥80% lines)
 task docker         # docker build -t ollama-router:local .
 task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
@@ -98,7 +99,7 @@ task agent:doctor   # read-only node-agent report for this machine
 task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97-slim-bookworm; GHA never installs task)
 ```
 
-Before finishing a coding task, run `task check` and do not stop while it fails.
+Before finishing a coding task, run `task check` and (for Rust/test changes) `task coverage`; do not stop while either fails. Line coverage must stay **≥ 80%**.
 
 Remote hosts: install `ollama-node-agent` and run `setup` (Ollama + zrok sidecar
 spawned from the zrok binary). `setup`/`doctor` print a find-this-node block
@@ -114,6 +115,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check advisories bans
+cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
 ```
 
 Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.

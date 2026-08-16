@@ -1,8 +1,8 @@
 ---
-description: Rust quality gates
+description: Rust quality gates including ≥80% line coverage
 alwaysApply: true
 ---
 
 # Rust quality gates
 
-Before committing, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`. Fix warnings instead of allowing them.
+Before committing, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`, and `task coverage` (line coverage **≥ 80%** via `cargo llvm-cov --fail-under-lines 80`). Fix warnings instead of allowing them.

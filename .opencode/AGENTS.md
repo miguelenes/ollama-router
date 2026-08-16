@@ -4,8 +4,9 @@ After any Rust, Cargo, Taskfile, or Dockerfile change, do **not** claim the task
 
 1. Clear rust-analyzer / IDE diagnostics on edited files.
 2. Run **`task check`** (sequential `fmt --check`, clippy `-D warnings`, `cargo test --workspace --locked`, `cargo deny`).
-3. If fmt `--check` fails, run `cargo fmt --all`, then re-run `task check`.
-4. Fix clippy, test, deny, and analyzer failures. Do not leave warnings.
+3. For Rust or test changes, also run **`task coverage`** (`cargo llvm-cov --workspace --locked --fail-under-lines 80`). Line coverage must stay **≥ 80%**.
+4. If fmt `--check` fails, run `cargo fmt --all`, then re-run `task check`.
+5. Fix clippy, test, deny, coverage, and analyzer failures. Do not leave warnings or lower the coverage floor.
 
 Skip the cargo gate only for docs / rules / plan-only work with **no** code or lockfile changes. Keep using Task — do not add a Makefile, justfile, or npm scripts.
 
@@ -14,8 +15,23 @@ Skip the cargo gate only for docs / rules / plan-only work with **no** code or l
 cargo check
 
 # GOOD — gate matches CI intent
-task check
+task check && task coverage
 ```
+
+# Test coverage gate
+
+Workspace **line** coverage must stay **≥ 80%**. Needs `llvm-tools-preview`
+and `cargo-llvm-cov` (`rustup component add llvm-tools-preview` and
+`cargo install cargo-llvm-cov`).
+
+```bash
+task coverage
+# same as:
+cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+```
+
+If coverage drops below 80%, add tests for the new/changed paths — do not
+lower the threshold, skip the gate, or exclude crates to paper over gaps.
 
 # OpenCodeRAG index config
 

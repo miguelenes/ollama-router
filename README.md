@@ -160,6 +160,7 @@ Local recipes live in [`Taskfile.yml`](Taskfile.yml) (not Make). `check` is sequ
 
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
+task coverage       # cargo llvm-cov --fail-under-lines 80 (≥80% lines)
 task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
 task compose:mock   # optional canned CPU+GPU mock fleet (no host Ollama)

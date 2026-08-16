@@ -26,6 +26,11 @@ tasks:
     cmds:
       - cargo deny check advisories bans
 
+  coverage:
+    desc: Line coverage ≥80% (needs llvm-tools-preview + cargo-llvm-cov)
+    cmds:
+      - cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+
   check:
     desc: Sequential fmt, clippy, test, deny (do not parallelize — cargo target lock)
     cmds:

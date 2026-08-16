@@ -26,7 +26,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: "1.97"
-          components: clippy, rustfmt
+          components: clippy, rustfmt, llvm-tools-preview
 
       - uses: Swatinem/rust-cache@v2
 
@@ -46,6 +46,14 @@ jobs:
 
       - name: cargo deny
         run: cargo deny check advisories bans
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: coverage (≥80% lines)
+        run: cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
 
   docker:
     name: Docker

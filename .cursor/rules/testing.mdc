@@ -1,5 +1,5 @@
 ---
-description: Unit tests for pure fns, httpmock for HTTP, no live Verda
+description: Unit tests for pure fns, httpmock for HTTP, no live Verda; ≥80% coverage
 globs: "**/*.rs"
 alwaysApply: false
 ---
@@ -12,6 +12,9 @@ alwaysApply: false
 - **proptest** for Verda selector ranking and WLC sort (utilization dominates preference).
 - No Thunder/RunPod fixtures, types, env knobs, or route tests.
 - Do not log bodies/tokens in test output. Capacity fixtures must use GiB = `1024³`.
+- **Coverage gate:** workspace line coverage **≥ 80%** via `task coverage`
+  (`cargo llvm-cov --workspace --locked --fail-under-lines 80`). Add tests when
+  coverage drops; do not lower the threshold.
 
 ```rust
 // BAD
