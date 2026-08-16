@@ -34,7 +34,7 @@
 ## 5. Multi-provider demand and wiring
 
 - [ ] 5.1 `CloudProviderHandle` trait + `MultiProviderDemand` in core `cloud/` (design D1): best cached value score (lowest $/known VRAM GiB) below ceiling wins, unknown VRAM sorts last, equal scores break by lower hourly price, stockout falls back, provider without cached offer skipped; unit tests for "Better-value provider wins" and "Stockout falls back"
-- [ ] 5.2 Implement the handle on `VerdaManager` (cached best-offer price refreshed on reconcile tick) and `RunpodManager`
+- [ ] 5.2 Implement the handle on `VerdaManager` and `RunpodManager` (each refreshes a cached `CachedOffer` — hourly price plus optional known VRAM — on its reconcile tick)
 - [ ] 5.3 Wire `main.rs`/`bootstrap.rs`: spawn each enabled manager's reconcile loop, set `state.demand = MultiProviderDemand`; single-provider setups degenerate to current behavior (verda-only integration test stays green)
 - [ ] 5.4 Proxy integration test: capacity miss still returns 503 + `Retry-After` immediately and triggers exactly one coalesced create on the chosen provider; health//api/ps/admin/warm-keeper traffic never scales (cloud-autoscale scenarios)
 
@@ -46,13 +46,16 @@
 ## 7. Metrics and dashboard
 
 - [ ] 7.1 Replace verda-named series with provider-labeled ones (design D9): `ollama_router_cloud_instances{provider}`, `ollama_router_cloud_events_total{provider,event}`, `ollama_router_cloud_price_per_hour{provider}`; `node_info` origin gains `runpod`; no model-name labels; metrics test asserts per-provider attribution (spec: "Scale decisions are visible per provider")
-- [ ] 7.2 Update the compose Grafana fleet overview dashboard (`ollama-router.json`) panels to the new metric names/labels; keep it the home dashboard
+- [ ] 7.2 Update fleet home `deploy/observability/grafana/dashboards/ollama-router.json`: retitle the "cpu / gpu / verda" row; instance, price, idle, and demand panels use the new series split by `provider`; keep it the home dashboard (`GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` unchanged)
+- [ ] 7.3 Retitle `ollama-router-verda.json` to Cloud; keep UID `ollama-router-verda`; add `$provider` (`verda`/`runpod`); rewrite panels and `origin="verda"` filters; update cross-link titles that say "Verda" to "Cloud" on this and sibling dashboards
+- [ ] 7.4 Update `ollama-router-nodes.json` Verda instance/price/events section to the new series split by provider (and accept `origin=runpod`)
+- [ ] 7.5 Rewrite alert `VerdaEnsureFailed` in `deploy/observability/rules/ollama-router.yml` to `CloudEnsureFailed` on `ollama_router_cloud_events_total{event="ensure_failed"}`; update the nodes-dashboard `ALERTS{alertname=...}` matcher (spec: "Compose dashboards and the ensure-failed alert follow provider labels")
 
 ## 8. Docs, rules, skills
 
 - [ ] 8.1 Amend `AGENTS.md`, `.cursor/rules/fleet-invariants.mdc`, `.cursor/rules/testing.mdc`, and `openspec/config.yaml` (context + rules): RunPod is now a supported provider; Thunder stays forbidden; tunnel/loopback-only and never-destroy-fleet.yaml invariants unchanged; `RUNPOD_API_KEY` joins the never-log list
 - [ ] 8.2 Update `.opencode/wiki/concepts/` (product, idle-scale-down, node-tunnel) for the two-provider model and RunPod container bootstrap
-- [ ] 8.3 Update `verda-spot-fleet` skill scope note and add a RunPod pod-fleet skill under `.cursor/skills/` + `.opencode/skills/`
+- [ ] 8.3 Update `verda-spot-fleet` skill scope note, add a RunPod pod-fleet skill under `.cursor/skills/` + `.opencode/skills/`, and retitle the Verda row in the `grafana-mcp` skill dashboard table to Cloud (same UID)
 - [ ] 8.4 Update `.opencode/wiki/index.md` and any docs referencing "Verda-only" wording found via repo grep for `runpod`/`thunder`
 
 ## 9. Gate

@@ -112,9 +112,16 @@ Each tick lists managed pods; a managed pod not `RUNNING` (interrupted spot → 
 
 ### D9: Metrics go provider-labeled; Verda-named series are replaced
 
-Replace `ollama_router_verda_instances` → `ollama_router_cloud_instances{provider}`, `ollama_router_verda_events_total{event}` → `ollama_router_cloud_events_total{provider,event}`, `ollama_router_verda_spot_price_per_hour` → `ollama_router_cloud_price_per_hour{provider}`. `FleetEvents::verda_event(event)` becomes `cloud_event(provider, event)`. `ollama_router_tunnel_up{node}` and `node_info{node,origin,role}` are unchanged (origin gains the `runpod` value). The compose Grafana fleet dashboard is updated in the same change (metric renames must not orphan panels). No model-name labels anywhere.
+Replace `ollama_router_verda_instances` → `ollama_router_cloud_instances{provider}`, `ollama_router_verda_events_total{event}` → `ollama_router_cloud_events_total{provider,event}`, `ollama_router_verda_spot_price_per_hour` → `ollama_router_cloud_price_per_hour{provider}`. `FleetEvents::verda_event(event)` becomes `cloud_event(provider, event)`. `ollama_router_tunnel_up{node}` and `node_info{node,origin,role}` are unchanged (origin gains the `runpod` value). No model-name labels anywhere.
 
-*Alternative rejected:* keeping verda-named series alongside new generic ones — two diverging metric families and permanent dashboard debt.
+Compose Grafana (GitOps JSON under `deploy/observability/grafana/dashboards/`) must move in the same change:
+
+- `ollama-router.json` (home, UID `ollama-router`): retitle the "cpu / gpu / verda" row; instance, price, idle, and demand panels query the new series and split by `provider`. `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH` stays this file.
+- `ollama-router-verda.json`: retitle to **Cloud**; keep UID `ollama-router-verda` so existing `/d/ollama-router-verda/...` links keep working. Add a `$provider` variable (`verda` / `runpod`, default all). Fleet gauges use `{provider=~"$provider"}`; the node table uses `origin=~"$provider"` (origin values match provider ids). Cross-link titles that say "Verda" become "Cloud".
+- `ollama-router-nodes.json`: the Verda instance/price/events section uses the new series split by provider; `origin="verda"` filters also accept `runpod`.
+- Alert `VerdaEnsureFailed` in `deploy/observability/rules/ollama-router.yml` becomes `CloudEnsureFailed` on `increase(ollama_router_cloud_events_total{event="ensure_failed"}[10m]) > 0` (fires per `provider` label). Nodes-dashboard `ALERTS{alertname=...}` matcher updates to the new name.
+
+*Alternative rejected:* keeping verda-named series alongside new generic ones — two diverging metric families and permanent dashboard debt. *Alternative rejected:* a second home dashboard or a new UID for Cloud — that would replace the fleet overview or break existing links.
 
 ### D10: Admin surface mirrors Verda
 
@@ -134,7 +141,7 @@ Add `/router/v1/runpod/{status,ensure,destroy}` with the same fail-closed bearer
 
 1. Land config additively: `runpod:` disabled by default; existing deployments are unaffected except Verda's default `selection_strategy` flips to `best_value` (set `cheapest` explicitly to keep the old ranking). New `min_lifetime_seconds` defaults 0.
 2. FleetState columns are additive; old state files load unchanged. Rollback = set `runpod.enabled: false`; managed pods can be drained via `POST /router/v1/runpod/destroy` or reclaimed by `destroy_on_shutdown`/orphan logic.
-3. Metrics rename ships together with the Grafana dashboard update (single change, per repo rule).
+3. Metrics rename ships together with the three Grafana dashboards and `CloudEnsureFailed` (single change, per repo rule).
 4. Docs/rules/tests that encode "no RunPod" flip in the same change (see proposal Impact) so `task check` stays green at every commit.
 
 ## Open Questions

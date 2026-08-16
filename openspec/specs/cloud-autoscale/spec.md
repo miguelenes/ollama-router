@@ -1,8 +1,9 @@
-## Purpose
+# cloud-autoscale Specification
 
+## Purpose
 Provider-agnostic contract for growing and shrinking the cloud slice of the fleet: per-provider min/max envelopes, scale-up only under real client load, idle scale-down, billing-aware teardown timing, best value-for-money instance selection with a user-defined hourly price cap, and provider isolation — independent of which GPU marketplace supplies the instance.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Per-provider autoscale envelope
 The system SHALL maintain, for each enabled cloud provider, at least `min_instances` and at most `max_instances` router-managed instances. The floor SHALL be satisfied by the reconcile loop without requiring client load; the ceiling MUST NOT be exceeded even under sustained demand. Envelope counts include only provider-managed instances — never `fleet.yaml` hosts.
