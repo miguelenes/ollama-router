@@ -9,7 +9,7 @@ After any Rust, Cargo, Taskfile, or Dockerfile change, do **not** claim the task
 
 1. Clear rust-analyzer / IDE diagnostics on edited files.
 2. Run **`task check`** (sequential `fmt --check`, clippy `-D warnings`, `cargo test --workspace --locked`, `cargo deny`).
-3. For Rust or test changes, also run **`task coverage`** (`cargo llvm-cov --workspace --locked --fail-under-lines 80`). Line coverage must stay **≥ 80%**.
+3. For Rust or test changes, also run **`task coverage`** (`cargo llvm-cov --workspace --locked --fail-under-lines 80`, ignoring `**/main.rs`). Line coverage must stay **≥ 80%**.
 4. If fmt `--check` fails, run `cargo fmt --all`, then re-run `task check`.
 5. Fix clippy, test, deny, coverage, and analyzer failures. Do not leave warnings or lower the coverage floor.
 

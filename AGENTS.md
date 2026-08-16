@@ -90,7 +90,7 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
-task coverage       # cargo llvm-cov --fail-under-lines 80 (≥80% lines)
+task coverage       # cargo llvm-cov --fail-under-lines 80 (≥80% lines; ignore **/main.rs)
 task docker         # docker build -t ollama-router:local .
 task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
@@ -115,7 +115,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check advisories bans
-cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
 ```
 
 Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.

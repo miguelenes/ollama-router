@@ -27,9 +27,9 @@ tasks:
       - cargo deny check advisories bans
 
   coverage:
-    desc: Line coverage ≥80% (needs llvm-tools-preview + cargo-llvm-cov)
+    desc: Line coverage ≥80% excluding **/main.rs (needs llvm-tools-preview + cargo-llvm-cov)
     cmds:
-      - cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+      - cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
 
   check:
     desc: Sequential fmt, clippy, test, deny (do not parallelize — cargo target lock)

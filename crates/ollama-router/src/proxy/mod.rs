@@ -24,17 +24,17 @@ use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
 use ollama_router_core::fleet::{
-    normalize_model, AggregatedTag, InflightAdmit, NodeId, NodeSnapshot, Registry,
+    normalize_model, AggregatedPs, AggregatedTag, InflightAdmit, NodeId, NodeSnapshot, Registry,
 };
 use ollama_router_core::http_util::reqwest_error_for_log;
-use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
+use ollama_router_core::jobs::{Job, JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify_with_size_hint, estimate_request_ram_gb,
     estimate_request_vram_gb, is_inference_path, placement_eligible_node_ids, rank_nodes,
     size_hint_from_catalog, RankOutcome, RequestClass, RoutingError, TargetSpec,
 };
 use serde_json::{json, Value};
-use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::{mpsc, OwnedSemaphorePermit};
 
 pub use telemetry::{IncrementalCollector, MAX_INCOMPLETE_FRAME_BYTES};
 
@@ -62,6 +62,12 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
 
     if clean == "/api/tags" && method == Method::GET {
         return aggregated_tags(state);
+    }
+    if clean == "/api/ps" && method == Method::GET {
+        return aggregated_ps(state);
+    }
+    if clean == "/api/version" && method == Method::GET {
+        return router_version(state);
     }
     if clean == "/v1/models" && method == Method::GET {
         return aggregated_openai_models(state);
@@ -221,7 +227,10 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
 
     if !outcome.ok() {
         let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
-        if reason == RoutingError::ModelMissing && policy.auto_pull_on_miss {
+        if reason == RoutingError::ModelMissing
+            && policy.auto_pull_on_miss
+            && is_inference_path(path)
+        {
             if let Some(model_name) = model {
                 match auto_pull_on_miss(state, path, request_class, model_name, start).await {
                     AutoPullResult::Forward(next) => {
@@ -814,6 +823,61 @@ fn aggregated_tags(state: &AppState) -> Response {
     res
 }
 
+fn aggregated_ps(state: &AppState) -> Response {
+    let models: Vec<Value> = state
+        .registry
+        .aggregated_ps()
+        .into_iter()
+        .map(ollama_ps_json)
+        .collect();
+    let mut res = json_error(StatusCode::OK, json!({ "models": models }), None);
+    if state.config.debug_headers {
+        res.headers_mut().insert(
+            HeaderName::from_static("x-ollama-router-aggregated"),
+            HeaderValue::from_static("true"),
+        );
+    }
+    state.metrics.observe_discovery("ps");
+    res
+}
+
+fn router_version(state: &AppState) -> Response {
+    let res = json_error(
+        StatusCode::OK,
+        json!({ "version": env!("CARGO_PKG_VERSION") }),
+        None,
+    );
+    state.metrics.observe_discovery("version");
+    res
+}
+
+fn ollama_ps_json(row: AggregatedPs) -> Value {
+    let mut details = match row.details {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => json!({}),
+    };
+    details["router_node"] = json!(row.node);
+    let mut obj = json!({
+        "name": row.name,
+        "model": row.name,
+        "digest": row.digest,
+        "details": details,
+    });
+    if let Some(size) = row.size {
+        obj["size"] = json!(size);
+    }
+    if let Some(size_vram) = row.size_vram {
+        obj["size_vram"] = json!(size_vram);
+    }
+    if let Some(expires_at) = row.expires_at {
+        obj["expires_at"] = json!(expires_at);
+    }
+    if let Some(context_length) = row.context_length {
+        obj["context_length"] = json!(context_length);
+    }
+    obj
+}
+
 fn ollama_tag_json(row: AggregatedTag) -> Value {
     let mut details = match row.details {
         Some(Value::Object(map)) => Value::Object(map),
@@ -877,42 +941,142 @@ async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
             None,
         );
     };
-    match state.orchestrator.ensure(model).await {
-        Ok(job) if job.status == JobStatus::Success => {
-            json_error(StatusCode::OK, json!({"status": "success"}), None)
+    let job = match state
+        .orchestrator
+        .start_ensure(&[model.to_string()], TargetSpec::Placement, false, false)
+        .await
+    {
+        Ok(job) => job,
+        Err(OrchestratorError::NoPlacementTargets) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({
+                    "error": format!(
+                        "ollama-router: no placement-eligible target nodes for the requested models (model: {model}) [reason: {}]",
+                        RoutingError::Capacity.as_reason_code()
+                    )
+                }),
+                Some(state.config.policy.provision_retry_after_seconds),
+            );
         }
-        Ok(job) => json_error(
-            StatusCode::BAD_GATEWAY,
-            json!({
-                "error": format!(
-                    "ollama-router: pull partial failure for model {model}; see admin /router/v1/jobs/{}",
-                    job.id
-                ),
-                "job_id": job.id,
-            }),
-            None,
-        ),
-        Err(OrchestratorError::NoPlacementTargets) => json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({
-                "error": format!(
-                    "ollama-router: no placement-eligible target nodes for the requested models (model: {model}) [reason: {}]",
-                    RoutingError::Capacity.as_reason_code()
-                )
-            }),
-            Some(state.config.policy.provision_retry_after_seconds),
-        ),
-        Err(OrchestratorError::NotConfigured) => json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "ollama-router: job orchestrator is not configured"}),
-            Some(state.config.policy.provision_retry_after_seconds),
-        ),
-        Err(other) => json_error(
-            StatusCode::BAD_GATEWAY,
-            json!({"error": format!("ollama-router: {other}")}),
-            None,
-        ),
-    }
+        Err(OrchestratorError::NotConfigured) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "ollama-router: job orchestrator is not configured"}),
+                Some(state.config.policy.provision_retry_after_seconds),
+            );
+        }
+        Err(other) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                json!({"error": format!("ollama-router: {other}")}),
+                None,
+            );
+        }
+    };
+
+    let watch_rx = state.orchestrator.subscribe_job(&job.id);
+    let snapshot = state
+        .orchestrator
+        .get_job(&job.id)
+        .unwrap_or_else(|| job.clone());
+    let stream = pull_job_ndjson_stream(watch_rx, snapshot, model.to_string());
+    let mut res = Response::new(Body::from_stream(stream));
+    *res.status_mut() = StatusCode::OK;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    res
+}
+
+fn pull_job_ndjson_stream(
+    watch_rx: Option<tokio::sync::watch::Receiver<Job>>,
+    initial: Job,
+    model: String,
+) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
+    tokio::spawn(async move {
+        let mut watch_rx = watch_rx;
+        let mut last_completed: Option<usize> = None;
+        loop {
+            let job = match watch_rx.as_mut() {
+                Some(rx) => rx.borrow_and_update().clone(),
+                None => initial.clone(),
+            };
+            let completed = job
+                .targets
+                .values()
+                .filter(|t| !t.status.is_incomplete())
+                .count();
+            let terminal = !job.status.is_incomplete();
+            if last_completed != Some(completed) || terminal {
+                let progress = pull_progress_line(&job);
+                if send_ndjson_line(&tx, &progress).await.is_err() {
+                    return;
+                }
+                last_completed = Some(completed);
+            }
+            if terminal {
+                let terminal_line = match job.status {
+                    JobStatus::Success => json!({"status": "success"}),
+                    _ => json!({
+                        "error": format!(
+                            "ollama-router: pull partial failure for model {model} [reason: partial_failure]"
+                        )
+                    }),
+                };
+                let _ = send_ndjson_line(&tx, &terminal_line).await;
+                return;
+            }
+            let Some(rx) = watch_rx.as_mut() else {
+                return;
+            };
+            if rx.changed().await.is_err() {
+                let job = rx.borrow().clone();
+                if !job.status.is_incomplete() {
+                    let terminal_line = match job.status {
+                        JobStatus::Success => json!({"status": "success"}),
+                        _ => json!({
+                            "error": format!(
+                                "ollama-router: pull partial failure for model {model} [reason: partial_failure]"
+                            )
+                        }),
+                    };
+                    let _ = send_ndjson_line(&tx, &terminal_line).await;
+                }
+                return;
+            }
+        }
+    });
+    futures_util::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+async fn send_ndjson_line(
+    tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
+    value: &Value,
+) -> Result<(), ()> {
+    let line = format!(
+        "{}\n",
+        serde_json::to_string(value).unwrap_or_else(|_| "{}".into())
+    );
+    tx.send(Ok(Bytes::from(line))).await.map_err(|_| ())
+}
+
+fn pull_progress_line(job: &Job) -> Value {
+    let total = job.targets.len();
+    let completed = job
+        .targets
+        .values()
+        .filter(|t| !t.status.is_incomplete())
+        .count();
+    json!({
+        "status": "pulling",
+        "total": total,
+        "completed": completed,
+    })
 }
 
 async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {

@@ -24,10 +24,10 @@ pub use config::{
 };
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
-    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, AggregatedTag,
-    EnrollPersist, FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId, NodeOrigin,
-    NodeSnapshot, PressureLevel, Registry, RouterId, TagRecord, VerdaInstanceId, VerdaNodePersist,
-    DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, AggregatedPs,
+    AggregatedTag, EnrollPersist, FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId,
+    NodeOrigin, NodeSnapshot, PressureLevel, PsRecord, Registry, RouterId, TagRecord,
+    VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 pub use jobs::{
@@ -35,8 +35,9 @@ pub use jobs::{
     ModelOrchestrator, OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
 };
 pub use routing::{
-    classify, classify_with_size_hint, parse_model_size_b, parse_parameter_size_b, placement_class,
-    placement_eligible_node_ids, ram_pressure_blocks_placement, rank_nodes, resolve_target_nodes,
-    size_hint_from_catalog, size_hint_from_tag_details, PlacementError, RankOutcome, RequestClass,
-    RoutingError, TargetSpec, TARGET_ALL,
+    classify, classify_with_size_hint, disk_blocks_placement, parse_model_size_b,
+    parse_parameter_size_b, placement_class, placement_eligible_node_ids, pull_size_bytes,
+    ram_pressure_blocks_placement, rank_nodes, resolve_target_nodes, size_hint_from_catalog,
+    size_hint_from_tag_details, PlacementError, RankOutcome, RequestClass, RoutingError,
+    TargetSpec, TARGET_ALL,
 };

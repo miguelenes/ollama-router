@@ -19,6 +19,7 @@ use ollama_router_core::jobs::{Job, OrchestratorError};
 use ollama_router_core::routing::{
     placement_eligible_node_ids, size_hint_from_catalog, TargetSpec,
 };
+use tokio_util::sync::CancellationToken;
 
 use super::{json_status, AppState};
 
@@ -803,7 +804,15 @@ pub async fn reload(State(state): State<AppState>, headers: HeaderMap) -> Respon
         return resp;
     }
     match crate::health::reload_permanent_inventory(&state).await {
-        Ok(()) => json_status(StatusCode::OK, json!({"ok": true})),
+        Ok(()) => {
+            if state.config.bootstrap_desired_models {
+                let boot = state.clone();
+                tokio::spawn(async move {
+                    crate::bootstrap::run(boot, CancellationToken::new()).await;
+                });
+            }
+            json_status(StatusCode::OK, json!({"ok": true}))
+        }
         Err(err) => json_status(StatusCode::BAD_GATEWAY, json!({"error": err.to_string()})),
     }
 }

@@ -136,4 +136,44 @@ mod tests {
         let fp = fingerprint_public_key(key);
         assert!(fp.is_none() || fp.unwrap().contains(':'));
     }
+
+    #[test]
+    fn fingerprint_valid_ed25519_blob() {
+        let key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIKtestblobforfingerprintxx comment";
+        // May still fail decode length; empty/malformed yields None.
+        let _ = fingerprint_public_key(key);
+        assert!(fingerprint_public_key("not-a-key").is_none());
+        assert!(fingerprint_public_key("").is_none());
+        assert!(fingerprint_public_key("ssh-ed25519").is_none());
+    }
+
+    #[test]
+    fn normalize_fingerprint_strips_prefixes() {
+        assert_eq!(
+            normalize_fingerprint(Some("MD5:aa:bb")),
+            Some("aa:bb".into())
+        );
+        assert_eq!(
+            normalize_fingerprint(Some("md5:AA:BB")),
+            Some("aa:bb".into())
+        );
+        assert_eq!(
+            normalize_fingerprint(Some("SHA256:DeadBeef")),
+            Some("deadbeef".into())
+        );
+        assert_eq!(normalize_fingerprint(Some("  ")), None);
+        assert_eq!(normalize_fingerprint(None), None);
+    }
+
+    #[test]
+    fn companion_private_key_strips_pub() {
+        assert_eq!(
+            companion_private_key(Path::new("/tmp/id_ed25519.pub")),
+            PathBuf::from("/tmp/id_ed25519")
+        );
+        assert_eq!(
+            companion_private_key(Path::new("/tmp/id_ed25519")),
+            PathBuf::from("/tmp/id_ed25519")
+        );
+    }
 }

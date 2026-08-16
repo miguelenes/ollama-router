@@ -78,19 +78,16 @@ async fn maybe_warm_one(
     if cap > 0 && f64::from(node.inflight) / f64::from(cap) > policy.model_warm_max_inflight_ratio {
         return;
     }
-    let free_vram = node.vram_free_gb.or_else(|| {
-        if node.vram_gb() > 0.0 {
-            Some(node.vram_gb() - node.loaded_vram_gb.unwrap_or(0.0))
-        } else {
-            Some(node.vram_gb())
-        }
-    });
-    if let Some(free) = free_vram {
-        if free < policy.model_warm_min_free_vram_gb {
-            return;
+    if node.vram_free_known {
+        if let Some(free) = node.vram_free_gb {
+            if free < policy.model_warm_min_free_vram_gb {
+                return;
+            }
         }
     }
-    let expected = state.config.tier_models_for_vram(node.vram_gb());
+    // Known VRAM gates tiers; unknown VRAM only sees min_vram_gb == 0 (via 0.0).
+    let vram_for_tiers = node.known_vram_gb().unwrap_or(0.0);
+    let expected = state.config.tier_models_for_vram(vram_for_tiers);
     if expected.is_empty() {
         return;
     }

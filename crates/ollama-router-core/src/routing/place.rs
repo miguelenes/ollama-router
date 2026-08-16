@@ -92,6 +92,31 @@ pub fn size_hint_from_catalog(tags: &[AggregatedTag], model: &str) -> Option<f64
         .and_then(|tag| size_hint_from_tag_details(tag.details.as_ref()))
 }
 
+/// GiB = bytes / 1024³.
+pub fn bytes_to_gib(bytes: u64) -> f64 {
+    bytes as f64 / (1024.0 * 1024.0 * 1024.0)
+}
+
+/// Prefer the target node's tags-probe `size`, else the catalog `size` (when > 0).
+pub fn pull_size_bytes(node_tag_size: Option<u64>, catalog_size: Option<u64>) -> Option<u64> {
+    node_tag_size
+        .filter(|&s| s > 0)
+        .or_else(|| catalog_size.filter(|&s| s > 0))
+}
+
+/// Skip a pull target only when disk free is known and below the size estimate.
+///
+/// Unknown disk (`None`) and missing/`0` size MUST NOT skip.
+pub fn disk_blocks_placement(disk_available_gb: Option<f64>, size_bytes: Option<u64>) -> bool {
+    let Some(disk) = disk_available_gb else {
+        return false;
+    };
+    let Some(size) = size_bytes.filter(|&s| s > 0) else {
+        return false;
+    };
+    disk < bytes_to_gib(size)
+}
+
 /// Whether transient RAM pressure should block a model pull.
 ///
 /// Trusts the agent's `pressure_level`. Critical blocks when
@@ -364,5 +389,23 @@ mod tests {
             ids.iter().map(NodeId::as_str).collect::<Vec<_>>(),
             vec!["gpu24"]
         );
+    }
+
+    #[test]
+    fn disk_blocks_only_when_known_and_below_estimate() {
+        let five_gib = 5 * 1024u64 * 1024 * 1024;
+        assert!(disk_blocks_placement(Some(1.0), Some(five_gib)));
+        assert!(!disk_blocks_placement(None, Some(five_gib)));
+        assert!(!disk_blocks_placement(Some(1.0), None));
+        assert!(!disk_blocks_placement(Some(1.0), Some(0)));
+        assert!(!disk_blocks_placement(Some(10.0), Some(five_gib)));
+        assert_eq!(
+            pull_size_bytes(Some(100), Some(200)),
+            Some(100),
+            "node tag size wins"
+        );
+        assert_eq!(pull_size_bytes(None, Some(200)), Some(200));
+        assert_eq!(pull_size_bytes(Some(0), Some(200)), Some(200));
+        assert!((bytes_to_gib(five_gib) - 5.0).abs() < 1e-9);
     }
 }

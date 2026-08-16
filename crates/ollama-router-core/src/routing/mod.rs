@@ -12,8 +12,9 @@ pub use classify::{
 };
 pub use error::RoutingError;
 pub use place::{
-    placement_class, placement_eligible_node_ids, ram_pressure_blocks_placement,
-    resolve_target_nodes, size_hint_from_catalog, PlacementError, TargetSpec, TARGET_ALL,
+    bytes_to_gib, disk_blocks_placement, placement_class, placement_eligible_node_ids,
+    pull_size_bytes, ram_pressure_blocks_placement, resolve_target_nodes, size_hint_from_catalog,
+    PlacementError, TargetSpec, TARGET_ALL,
 };
 pub use rank::{
     blocked_only_by_reservations, capacity_fits, estimate_large_vram_gb, estimate_request_ram_gb,

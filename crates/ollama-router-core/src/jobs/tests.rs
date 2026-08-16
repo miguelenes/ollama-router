@@ -603,3 +603,167 @@ async fn running_job_dedupes_to_existing_id() {
     let done = orch.wait_job(&first.id).await;
     assert_eq!(done.status, JobStatus::Success);
 }
+
+#[tokio::test]
+async fn known_low_disk_skips_pull_target() {
+    use crate::capacity::CapacityReport;
+    use crate::fleet::TagRecord;
+
+    let gpu = MockServer::start();
+    gpu.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    let pull = gpu.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200).body("{\"status\":\"success\"}\n");
+    });
+
+    let five_gib = 5 * 1024u64 * 1024 * 1024;
+    let config = RouterConfig {
+        nodes: vec![
+            node("gpu", &gpu.base_url(), 24.0, 1),
+            node("catalog", "http://127.0.0.1:9", 24.0, 1),
+        ],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    registry.set_healthy(&nid("catalog"));
+    registry.update_models_from_records(
+        &nid("catalog"),
+        [(
+            "qwen3:8b",
+            TagRecord {
+                digest: "aaaaaaaaaaaa".into(),
+                size: Some(five_gib),
+                ..TagRecord::default()
+            },
+        )],
+    );
+    let report = CapacityReport {
+        vram_gb: 24.0,
+        gpus: 1,
+        ram_gb: 32.0,
+        disk_available_gb: Some(1.0),
+        ..CapacityReport::default()
+    };
+    registry.apply_capacity_report(&nid("gpu"), &report, None);
+
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let job = orch
+        .start_ensure(
+            &["qwen3:8b".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let done = orch.wait_job(&job.id).await;
+    assert_eq!(done.status, JobStatus::Success);
+    assert_eq!(
+        done.targets["gpu:qwen3:8b"].status,
+        TargetStatus::SkippedDisk
+    );
+    assert!(done.targets["gpu:qwen3:8b"].detail.is_none());
+    assert_eq!(pull.calls(), 0);
+}
+
+#[tokio::test]
+async fn unknown_disk_stays_pull_eligible() {
+    use crate::fleet::TagRecord;
+
+    let gpu = MockServer::start();
+    gpu.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    let pull = gpu.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200).body("{\"status\":\"success\"}\n");
+    });
+
+    let five_gib = 5 * 1024u64 * 1024 * 1024;
+    let config = RouterConfig {
+        nodes: vec![
+            node("gpu", &gpu.base_url(), 24.0, 1),
+            node("catalog", "http://127.0.0.1:9", 24.0, 1),
+        ],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    registry.set_healthy(&nid("catalog"));
+    registry.update_models_from_records(
+        &nid("catalog"),
+        [(
+            "qwen3:8b",
+            TagRecord {
+                digest: "aaaaaaaaaaaa".into(),
+                size: Some(five_gib),
+                ..TagRecord::default()
+            },
+        )],
+    );
+    // disk_available_gb stays None (unknown)
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let job = orch
+        .start_ensure(
+            &["qwen3:8b".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let done = orch.wait_job(&job.id).await;
+    assert_eq!(done.status, JobStatus::Success);
+    assert_eq!(done.targets["gpu:qwen3:8b"].status, TargetStatus::Success);
+    assert_eq!(pull.calls(), 1);
+}
+
+#[tokio::test]
+async fn subscribe_job_receives_terminal_update() {
+    let server = MockServer::start();
+    let _tags = server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&["tiny:1b"]));
+    });
+    let _pull = server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .header("content-type", "application/x-ndjson")
+            .body("{\"status\":\"success\"}\n");
+    });
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let job = orch
+        .start_ensure(
+            &["tiny:1b".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    let mut rx = orch.subscribe_job(&job.id).expect("waiter");
+    let done = orch.wait_job(&job.id).await;
+    assert_eq!(done.status, JobStatus::Success);
+    let _ = rx.changed().await;
+    assert!(!rx.borrow().status.is_incomplete());
+    assert!(orch
+        .subscribe_job(&JobId::parse("00000000-0000-0000-0000-000000000000").expect("id"))
+        .is_none());
+}

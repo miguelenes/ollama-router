@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ollama_router_core::capacity::{bytes_to_gib, capacity_target, CapacityClient};
 use ollama_router_core::config::HealthConfig;
 use ollama_router_core::fleet::{
-    routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel, TagRecord,
+    routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel, PsRecord, TagRecord,
 };
 use ollama_router_core::http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 use serde::Deserialize;
@@ -285,15 +285,20 @@ async fn probe_ps(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) 
         return;
     };
     let models = body.models.unwrap_or_default();
-    let names: Vec<String> = models
-        .iter()
-        .filter_map(|m| m.name.as_deref())
-        .filter(|n| !n.trim().is_empty())
-        .map(str::to_string)
-        .collect();
+    let mut records: Vec<(String, PsRecord)> = Vec::new();
     let mut vram_bytes: u64 = 0;
     let mut any_vram = false;
     for entry in &models {
+        let Some(name) = entry
+            .name
+            .as_deref()
+            .or(entry.model.as_deref())
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .map(str::to_string)
+        else {
+            continue;
+        };
         if let Some(size) = entry.size_vram {
             vram_bytes = vram_bytes.saturating_add(size);
             any_vram = true;
@@ -301,9 +306,22 @@ async fn probe_ps(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) 
             vram_bytes = vram_bytes.saturating_add(size);
             any_vram = true;
         }
+        records.push((
+            name,
+            PsRecord {
+                digest: entry.digest.clone().unwrap_or_default(),
+                size: entry.size,
+                size_vram: entry.size_vram,
+                details: entry.details.clone(),
+                expires_at: entry.expires_at.clone().filter(|s| !s.trim().is_empty()),
+                context_length: entry.context_length,
+            },
+        ));
     }
     let loaded_vram = any_vram.then_some(bytes_to_gib(vram_bytes));
-    state.registry.update_ps_state(&node.id, names, loaded_vram);
+    state
+        .registry
+        .update_ps_from_records(&node.id, records, loaded_vram);
 }
 
 async fn probe_capacity(state: &AppState, health: &HealthConfig, node: &NodeSnapshot) {
@@ -429,9 +447,19 @@ struct PsResponse {
 struct PsModel {
     name: Option<String>,
     #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
     size: Option<u64>,
     #[serde(default)]
     size_vram: Option<u64>,
+    #[serde(default)]
+    details: Option<serde_json::Value>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    context_length: Option<u64>,
 }
 
 fn seed() -> u64 {

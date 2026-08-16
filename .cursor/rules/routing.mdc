@@ -16,10 +16,11 @@ Saturation is a hard filter. All saturated → `all_nodes_saturated` → 503.
 
 1. `inflight / base_cap` × `inflight_weight`
 2. RAM pressure penalty (elevated +2, critical +8)
-3. Class `capacity_preference` (bias only)
-4. Warm score (loaded 0 / cold 1) + RAM-available-ratio tie-break
+3. Known GPU util (busy ≥ 50%; unknown is middle, not `0`)
+4. Class `capacity_preference` (bias only)
+5. Warm score (loaded 0 / cold 1) + RAM-available-ratio tie-break
 
-Utilization **dominates** preference. Sticky affinity promotes only when the owner's
+Utilization **dominates** GPU-util bias and preference. Sticky affinity promotes only when the owner's
 **full load key equals** the best candidate. Retries re-rank and exclude attempted ids.
 
 | Class | Preference |

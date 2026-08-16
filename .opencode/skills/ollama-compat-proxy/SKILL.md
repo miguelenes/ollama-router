@@ -25,11 +25,13 @@ auto Hub-pull); create/copy/push/blobs = 501.
 | `GET /api/tags` | CLI-compatible **union** of healthy nodes (not names-only). Each row has `name`, `model`, `digest` (≥12 chars; SHA-256 hex of the normalized name when the probe omitted digest), plus probe `size` / `modified_at` / native `details` / `capabilities`. `details.router_nodes` lists holders. Not a passthrough. Not idle. |
 | `GET /v1/models` | Same union in OpenAI list format (`id` / `object` / `created` from `modified_at` Unix seconds else `0` / `owned_by: library`). |
 | `GET /v1/models/{id}` | Retrieve from that union (404 OpenAI-shaped if absent). Not a client forward. |
-| `POST /api/show` | Metadata passthrough (`model` or `name`). Forced Generic class. Not idle. |
-| `GET /api/ps`, `/api/version` | Diagnostic single-node passthrough. Not idle. |
+| `POST /api/show` | Holder-only (`model` or `name`). GENERIC class (not LARGE-gated). Miss → 503 `model_missing`. Stream upstream body. Not idle. |
+| `GET /api/ps` | Process-list **union** of healthy loaded models (one row per node × model, `details.router_node`, digest ≥ 12). Not a passthrough. Not idle. |
+| `GET /api/version` | Router-owned `{"version": "<router>"}` (same as `/healthz`). Not a ranked Ollama. Not idle. |
 | `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation`. Use admin ensure / `POST /api/pull`. |
 | Other `/v1/*` | **404** OpenAI-shaped. Allowlist only. |
-| `POST /api/pull`, `/api/delete` | Always fleet orchestrator (placement job). Prefer admin. |
+| `POST /api/pull` | Fleet placement job; streams NDJSON (`application/x-ndjson`) with `total`/`completed` from targets and final `success`. Not a one-node Hub-pull. Not idle. |
+| `POST /api/delete` | Fleet orchestrator (JSON today). Prefer admin. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
 | `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
@@ -68,7 +70,10 @@ that lacks the model (Ollama would native-pull). Never `unsafe_single_node_mutat
 
 Persist jobs in SQLite (see durable-model-operations wiki). Recover via live
 `/api/tags`. Default pull places on every healthy generate-class-eligible node.
-Do not log upstream bodies. Pull is not a stub NDJSON passthrough.
+HTTP pull streams placement-job NDJSON; known insufficient disk skips a target
+(`skipped_disk`); unknown disk does not. Opt-in `bootstrap_desired_models`
+background-ensures desired tiers (known VRAM ∩ `min_vram_gb`). Do not log
+upstream bodies. Pull is not a stub NDJSON Hub-pull through one node.
 
 ## Never
 

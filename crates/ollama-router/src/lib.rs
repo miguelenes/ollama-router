@@ -1,5 +1,6 @@
 //! Ollama-compatible fleet proxy binary and HTTP surface.
 
+pub mod bootstrap;
 pub mod cli;
 pub mod health;
 pub mod http;

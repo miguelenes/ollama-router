@@ -14,7 +14,9 @@ use crate::capacity::{
 };
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
-use crate::fleet::tags::{merge_catalog, AggregatedTag, CatalogNode, TagRecord};
+use crate::fleet::tags::{
+    merge_catalog, merge_ps, AggregatedPs, AggregatedTag, CatalogNode, PsNode, PsRecord, TagRecord,
+};
 
 /// Where a live registry row came from. Reload never drops `Verda` rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -355,6 +357,7 @@ struct Cold {
     models: Arc<HashSet<String>>,
     tag_records: Arc<HashMap<String, TagRecord>>,
     loaded_models: Arc<HashSet<String>>,
+    ps_records: Arc<HashMap<String, PsRecord>>,
     loaded_vram_gb: Option<f64>,
     ram_available_gb: Option<f64>,
     ram_available_ratio: Option<f64>,
@@ -423,6 +426,7 @@ impl Node {
                 models: Arc::new(HashSet::new()),
                 tag_records: Arc::new(HashMap::new()),
                 loaded_models: Arc::new(HashSet::new()),
+                ps_records: Arc::new(HashMap::new()),
                 loaded_vram_gb: None,
                 ram_available_gb: None,
                 ram_available_ratio: None,
@@ -884,25 +888,45 @@ impl Registry {
         cold.tag_records = Arc::new(map);
     }
 
-    /// Record live `/api/ps` state (tests inject warmth).
+    /// Record live `/api/ps` state (tests inject warmth with default records).
     pub fn update_ps_state(
         &self,
         id: &NodeId,
         loaded_models: impl IntoIterator<Item = impl AsRef<str>>,
         loaded_vram_gb: Option<f64>,
     ) {
+        self.update_ps_from_records(
+            id,
+            loaded_models.into_iter().map(|m| (m, PsRecord::default())),
+            loaded_vram_gb,
+        );
+    }
+
+    /// Replace loaded names and per-model `/api/ps` probe records for a node.
+    pub fn update_ps_from_records(
+        &self,
+        id: &NodeId,
+        records: impl IntoIterator<Item = (impl AsRef<str>, PsRecord)>,
+        loaded_vram_gb: Option<f64>,
+    ) {
         let Some(node) = self.node(id) else {
             return;
         };
-        let loaded = Arc::new(
-            loaded_models
-                .into_iter()
-                .map(|m| normalize_model(m.as_ref()))
-                .collect::<HashSet<_>>(),
-        );
+        let mut names = HashSet::new();
+        let mut map = HashMap::new();
+        for (name, record) in records {
+            let name = normalize_model(name.as_ref());
+            if name.is_empty() {
+                continue;
+            }
+            names.insert(name.clone());
+            map.insert(name, record);
+        }
+        let loaded = Arc::new(names);
         {
             let mut cold = node.cold_write();
             cold.loaded_models = Arc::clone(&loaded);
+            cold.ps_records = Arc::new(map);
             cold.loaded_vram_gb = loaded_vram_gb;
             remarge(&mut cold);
         }
@@ -1337,6 +1361,46 @@ impl Registry {
             records,
         }))
     }
+
+    /// Healthy nodes' loaded models for `/api/ps` (one row per node × model).
+    pub fn aggregated_ps(&self) -> Vec<AggregatedPs> {
+        let inner = self.read();
+        let mut owned: Vec<(NodeId, HashMap<String, PsRecord>)> = Vec::new();
+        for node in inner.nodes.values() {
+            let draining = node.draining.load(Ordering::Acquire);
+            let cold = node.cold_read();
+            if !cold.healthy || draining {
+                continue;
+            }
+            owned.push((node.id.clone(), (*cold.ps_records).clone()));
+        }
+        drop(inner);
+        merge_ps(owned.iter().map(|(id, records)| PsNode { id, records }))
+    }
+
+    /// Pull size estimate in bytes: target node's tags-probe `size`, else catalog.
+    ///
+    /// Missing or `0` size yields `None` (do not skip for disk).
+    pub fn pull_size_estimate_bytes(&self, node_id: &NodeId, model: &str) -> Option<u64> {
+        let model = normalize_model(model);
+        if model.is_empty() {
+            return None;
+        }
+        let node_size = self.node(node_id).and_then(|node| {
+            let cold = node.cold_read();
+            cold.tag_records
+                .get(&model)
+                .and_then(|rec| rec.size)
+                .filter(|&s| s > 0)
+        });
+        let catalog_size = self
+            .aggregated_tags()
+            .into_iter()
+            .find(|tag| tag.name == model)
+            .and_then(|tag| tag.size)
+            .filter(|&s| s > 0);
+        crate::routing::pull_size_bytes(node_size, catalog_size)
+    }
 }
 
 fn remarge(cold: &mut Cold) {
@@ -1464,6 +1528,60 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].nodes, vec!["a".to_string()]);
         assert!(rows[0].digest.len() >= 12);
+    }
+
+    #[test]
+    fn aggregated_ps_one_row_per_healthy_node_model() {
+        let registry = two_node_registry();
+        registry.set_healthy(&nid("a"));
+        registry.set_healthy(&nid("b"));
+        registry.update_ps_from_records(
+            &nid("a"),
+            [(
+                "qwen3:8b",
+                crate::fleet::PsRecord {
+                    digest: "aaaaaaaaaaaa".into(),
+                    size: Some(100),
+                    size_vram: Some(80),
+                    details: None,
+                    expires_at: None,
+                    context_length: Some(8192),
+                },
+            )],
+            Some(1.0),
+        );
+        registry.update_ps_from_records(
+            &nid("b"),
+            [(
+                "qwen3:8b",
+                crate::fleet::PsRecord {
+                    digest: "bbbbbbbbbbbb".into(),
+                    size: Some(100),
+                    size_vram: Some(90),
+                    details: None,
+                    expires_at: None,
+                    context_length: None,
+                },
+            )],
+            Some(2.0),
+        );
+        let rows = registry.aggregated_ps();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].name, "qwen3:8b");
+        assert_eq!(rows[0].node, "a");
+        assert_eq!(rows[1].node, "b");
+        assert!(rows.iter().all(|r| r.digest.len() >= 12));
+    }
+
+    #[test]
+    fn aggregated_ps_omits_unhealthy_nodes() {
+        let registry = two_node_registry();
+        registry.set_healthy(&nid("a"));
+        registry.update_ps_state(&nid("a"), ["llama3.2:1b"], Some(1.0));
+        registry.update_ps_state(&nid("b"), ["llama3.2:1b"], Some(1.0));
+        let rows = registry.aggregated_ps();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].node, "a");
     }
 
     #[test]

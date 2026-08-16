@@ -14,7 +14,8 @@ use crate::config::RouterConfig;
 use crate::fleet::ids::NodeId;
 use crate::fleet::registry::{normalize_model, NodeSnapshot, Registry};
 use crate::routing::{
-    placement_eligible_node_ids, ram_pressure_blocks_placement, resolve_target_nodes, TargetSpec,
+    disk_blocks_placement, placement_eligible_node_ids, ram_pressure_blocks_placement,
+    resolve_target_nodes, TargetSpec,
 };
 
 use super::store::{unix_now, JobStore};
@@ -148,6 +149,14 @@ impl PullOrchestrator {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// Subscribe to live job updates (proxy NDJSON pull stream).
+    ///
+    /// Returns `None` when the job is unknown or already removed from waiters.
+    pub fn subscribe_job(&self, id: &JobId) -> Option<watch::Receiver<Job>> {
+        let state = self.lock();
+        state.waiters.get(id).map(watch::Sender::subscribe)
+    }
+
     /// In-memory jobs, newest first (admin GET /jobs).
     pub fn list_jobs(&self) -> Vec<Job> {
         let mut jobs: Vec<Job> = self.lock().jobs.values().cloned().collect();
@@ -184,8 +193,16 @@ impl PullOrchestrator {
         }
         let ineligible = self.capacity_ineligible(&models, &targets);
         let ram_blocked = self.ram_pressure_ineligible(&models, &targets, avoid_ram_pressure);
-        self.register_and_spawn(JobKind::Pull, models, targets, ineligible, ram_blocked)
-            .await
+        let disk_blocked = self.disk_ineligible(&models, &targets);
+        self.register_and_spawn(
+            JobKind::Pull,
+            models,
+            targets,
+            ineligible,
+            ram_blocked,
+            disk_blocked,
+        )
+        .await
     }
 
     /// Ensure with an already-resolved per-model node map (CLI tier fan-out).
@@ -200,8 +217,16 @@ impl PullOrchestrator {
         let models = normalize_models(&models)?;
         let ineligible = self.capacity_ineligible(&models, &targets);
         let ram_blocked = self.ram_pressure_ineligible(&models, &targets, false);
-        self.register_and_spawn(JobKind::Pull, models, targets, ineligible, ram_blocked)
-            .await
+        let disk_blocked = self.disk_ineligible(&models, &targets);
+        self.register_and_spawn(
+            JobKind::Pull,
+            models,
+            targets,
+            ineligible,
+            ram_blocked,
+            disk_blocked,
+        )
+        .await
     }
 
     /// Register + spawn a delete.
@@ -220,6 +245,7 @@ impl PullOrchestrator {
             JobKind::Delete,
             models,
             targets,
+            HashSet::new(),
             HashSet::new(),
             HashSet::new(),
         )
@@ -424,6 +450,29 @@ impl PullOrchestrator {
         blocked
     }
 
+    fn disk_ineligible(
+        &self,
+        models: &[String],
+        targets: &BTreeMap<String, Vec<NodeId>>,
+    ) -> HashSet<(String, String)> {
+        let Some(reg) = &self.inner.registry else {
+            return HashSet::new();
+        };
+        let mut blocked = HashSet::new();
+        for model in models {
+            for node_id in targets.get(model).into_iter().flatten() {
+                let Some(node) = reg.get(node_id) else {
+                    continue;
+                };
+                let size = reg.pull_size_estimate_bytes(node_id, model);
+                if disk_blocks_placement(node.disk_available_gb, size) {
+                    blocked.insert((node_id.as_str().to_string(), model.clone()));
+                }
+            }
+        }
+        blocked
+    }
+
     fn start_recovery(&self) {
         let ids: Vec<JobId> = {
             let state = self.lock();
@@ -452,7 +501,12 @@ impl PullOrchestrator {
             } else {
                 HashSet::new()
             };
-            self.spawn_run(id, ineligible, HashSet::new());
+            let disk_blocked = if job.kind == JobKind::Pull {
+                self.disk_ineligible(&models, &targets)
+            } else {
+                HashSet::new()
+            };
+            self.spawn_run(id, ineligible, HashSet::new(), disk_blocked);
         }
     }
 
@@ -463,6 +517,7 @@ impl PullOrchestrator {
         targets: BTreeMap<String, Vec<NodeId>>,
         ineligible: HashSet<(String, String)>,
         ram_blocked: HashSet<(String, String)>,
+        disk_blocked: HashSet<(String, String)>,
     ) -> Result<Job, OrchestratorError> {
         self.start_recovery();
         let key = dedupe_key(kind, &models, &pairs_from_map(&targets));
@@ -494,7 +549,7 @@ impl PullOrchestrator {
             state.inflight.insert(key, id);
         }
         self.persist(&job).await;
-        self.spawn_run(id, ineligible, ram_blocked);
+        self.spawn_run(id, ineligible, ram_blocked, disk_blocked);
         Ok(job)
     }
 
@@ -503,11 +558,13 @@ impl PullOrchestrator {
         id: JobId,
         ineligible: HashSet<(String, String)>,
         ram_blocked: HashSet<(String, String)>,
+        disk_blocked: HashSet<(String, String)>,
     ) {
         let orch = self.clone();
         let mut state = self.lock();
         let handle = tokio::spawn(async move {
-            orch.run_job(id, ineligible, ram_blocked).await;
+            orch.run_job(id, ineligible, ram_blocked, disk_blocked)
+                .await;
         });
         state.tasks.insert(id, handle);
     }
@@ -522,6 +579,7 @@ impl PullOrchestrator {
         id: JobId,
         ineligible: HashSet<(String, String)>,
         ram_blocked: HashSet<(String, String)>,
+        disk_blocked: HashSet<(String, String)>,
     ) {
         let job = match self.get_job(&id) {
             Some(job) => job,
@@ -567,6 +625,18 @@ impl PullOrchestrator {
                 .await;
             }
         }
+        let job = self.get_job(&id).unwrap_or(job);
+        for (node_id, model) in &pairs {
+            if disk_blocked.contains(&(node_id.clone(), model.clone()))
+                && !ineligible.contains(&(node_id.clone(), model.clone()))
+                && !ram_blocked.contains(&(node_id.clone(), model.clone()))
+                && target_incomplete(&job, node_id, model)
+            {
+                // No detail string — disk skip metadata only (sensitivity).
+                self.set_target(&id, node_id, model, TargetStatus::SkippedDisk, None)
+                    .await;
+            }
+        }
 
         let mut set = JoinSet::new();
         let mut keys: HashMap<tokio::task::Id, (String, String)> = HashMap::new();
@@ -574,6 +644,7 @@ impl PullOrchestrator {
         for (node_id, model) in pairs {
             if ineligible.contains(&(node_id.clone(), model.clone()))
                 || ram_blocked.contains(&(node_id.clone(), model.clone()))
+                || disk_blocked.contains(&(node_id.clone(), model.clone()))
             {
                 continue;
             }
@@ -670,6 +741,18 @@ impl PullOrchestrator {
             )
             .await;
             return;
+        }
+        if let Some(reg) = &self.inner.registry {
+            if let Ok(nid) = NodeId::parse(&node_id) {
+                if let Some(node) = reg.get(&nid) {
+                    let size = reg.pull_size_estimate_bytes(&nid, &model);
+                    if disk_blocks_placement(node.disk_available_gb, size) {
+                        self.set_target(&job_id, &node_id, &model, TargetStatus::SkippedDisk, None)
+                            .await;
+                        return;
+                    }
+                }
+            }
         }
         let (url, err) = self.resolve_url(&node_id);
         if let Some(err) = err {

@@ -274,13 +274,29 @@ pub(crate) fn capacity_preference(node: &NodeSnapshot, request_class: RequestCla
     }
 }
 
+/// Busy threshold for the known-GPU-util soft band (no YAML knob).
+const GPU_UTIL_BUSY_PCT: f64 = 50.0;
+
+/// Soft sort term for known GPU util. Unknown sits in the middle band — not `0`.
+fn gpu_util_key(node: &NodeSnapshot) -> f64 {
+    if !node.gpu_util_known {
+        return 1.0;
+    }
+    let pct = node.gpu_util_pct.unwrap_or(0.0).clamp(0.0, 100.0);
+    if pct < GPU_UTIL_BUSY_PCT {
+        pct / 1000.0
+    } else {
+        2.0 + pct / 1000.0
+    }
+}
+
 /// Sort key (lower is better). Sticky affinity may promote only on exact equality.
 pub fn load_key(
     node: &NodeSnapshot,
     request_class: RequestClass,
     model: Option<&str>,
     policy: &PolicyConfig,
-) -> (f64, f64, f64, f64) {
+) -> (f64, f64, f64, f64, f64) {
     let warm = if policy.prefer_warm_models {
         if let Some(model) = model {
             if node.has_model_loaded(model) {
@@ -307,6 +323,7 @@ pub fn load_key(
     (
         utilization * policy.inflight_weight,
         pressure_penalty,
+        gpu_util_key(node),
         preference,
         warm + available * 0.001,
     )
@@ -1077,6 +1094,140 @@ nodes:
         assert!(outcome.ok());
         assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
         assert!(outcome.ranked[0].known_vram_gb().is_none());
+    }
+
+    fn set_gpu_util(snap: &mut [NodeSnapshot], id: &str, pct: Option<f64>) {
+        let node = snap.iter_mut().find(|n| n.id.as_str() == id).expect("node");
+        match pct {
+            Some(v) => {
+                node.gpu_util_pct = Some(v);
+                node.gpu_util_known = true;
+            }
+            None => {
+                node.gpu_util_pct = None;
+                node.gpu_util_known = false;
+            }
+        }
+    }
+
+    #[test]
+    fn known_lower_gpu_util_beats_known_higher() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("gpu-a", 24.0, 1, Some(8)),
+                node("gpu-b", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["gpu-a", "gpu-b"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_gpu_util(&mut snap, "gpu-a", Some(10.0));
+        set_gpu_util(&mut snap, "gpu-b", Some(80.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "gpu-a");
+    }
+
+    #[test]
+    fn inflight_dominates_gpu_util() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("busy-idle-gpu", 24.0, 1, Some(8)),
+                node("quiet-busy-gpu", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["busy-idle-gpu", "quiet-busy-gpu"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        for _ in 0..2 {
+            registry.inflight_inc(&nid("busy-idle-gpu"));
+        }
+        registry.inflight_inc(&nid("quiet-busy-gpu"));
+        let mut snap = registry.snapshot();
+        set_gpu_util(&mut snap, "busy-idle-gpu", Some(10.0));
+        set_gpu_util(&mut snap, "quiet-busy-gpu", Some(90.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "quiet-busy-gpu");
+    }
+
+    #[test]
+    fn known_gpu_util_beats_unknown() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("known", 24.0, 1, Some(8)),
+                node("unknown", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["known", "unknown"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_gpu_util(&mut snap, "known", Some(10.0));
+        set_gpu_util(&mut snap, "unknown", None);
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "known");
+    }
+
+    #[test]
+    fn unknown_gpu_util_beats_known_busy() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("unknown", 24.0, 1, Some(8)),
+                node("busy", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["unknown", "busy"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_gpu_util(&mut snap, "unknown", None);
+        set_gpu_util(&mut snap, "busy", Some(90.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
     }
 
     proptest! {

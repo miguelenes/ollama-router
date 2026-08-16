@@ -39,11 +39,14 @@ path (do not treat metrics `vram_gb()` → 0 as “CPU” for gates or preferenc
 
 1. `(inflight / base_cap) * inflight_weight`
 2. Pressure penalty: elevated +2, critical +8
-3. `capacity_preference` (class bias over **known** VRAM/GPU)
-4. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
+3. Known GPU util (busy band ≥ 50%; unknown is middle, **not** `0`)
+4. `capacity_preference` (class bias over **known** VRAM/GPU)
+5. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
 
 `base_cap` is the ceiling **before** pressure derating. Utilization **dominates**
-preference: a 48 GiB GPU at 2/8 (25%) beats a CPU at 1/2 (50%) for EMBED.
+GPU-util bias and preference: a 48 GiB GPU at 2/8 (25%) beats a CPU at 1/2 (50%)
+for EMBED. Do not treat metrics `gpu_util_pct.unwrap_or(0)` as idle on the rank
+path.
 
 ## Class preference
 
@@ -64,7 +67,9 @@ candidate. Retries re-rank and exclude attempted node ids.
 
 Default pull/ensure uses generate-class gates (`placement_class`), not
 `RequestClass::Pull`. Targets every healthy label-ok node that
-`static_capacity_fits`. `#all` may widen; capacity skips still apply at run.
+`static_capacity_fits`. `#all` may widen; capacity / known-disk skips still
+apply at run. Warm-keeper stays on-disk only; tier pick and free-VRAM skips use
+**known** values (omitted MUST NOT encode as `0`).
 
 ## Tests
 

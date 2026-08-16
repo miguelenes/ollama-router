@@ -75,8 +75,11 @@ This product is an **honest fleet proxy**, not a fake single daemon:
 | Client action | Behavior |
 |---------------|----------|
 | List (`/api/tags`, `/v1/models`) | Union of healthy holders |
+| Process list (`GET /api/ps`) | Union of loaded models (one row per healthy node × model, `details.router_node`) — not a single-node passthrough |
+| Show (`POST /api/show`) | Forward only to a healthy holder; miss → 503 `model_missing` (GENERIC; not LARGE-gated) |
+| Version (`GET /api/version`) | Router-owned `{"version": "<router>"}` (same as `/healthz`), not a ranked Ollama build |
 | Infer (generate/chat/embed + OpenAI) | Rank among nodes that **already have** the model (holders-only WLC) |
-| Pull | Fleet **placement job** (not native NDJSON pull through one node) |
+| Pull | Fleet **placement job** that streams NDJSON progress (`total`/`completed` from targets) — not a native Hub-pull through one node |
 | Miss | **503** `model_missing` (not native Hub 404/pull); `auto_pull_on_miss` default **false** |
 | create/copy/push/blobs | **501** `not_a_fleet_operation` |
 
@@ -84,8 +87,11 @@ Pull/delete metadata persists to SQLite and recovers via live `/api/tags`; see
 [[concepts/ollama-router-durable-model-operations]]. `POST /api/pull` and
 `/api/delete` always go through the fleet orchestrator. Default placement
 targets every **healthy** node that fits the model's **generate** size class
-(static VRAM). LARGE/MEDIUM skip known CPUs and **unknown** VRAM. There is no
-single-node mutate passthrough.
+(static VRAM). LARGE/MEDIUM skip known CPUs and **unknown** VRAM. Known
+insufficient disk free skips a pull target (`skipped_disk`); unknown disk does
+not. Opt-in `bootstrap_desired_models` background-ensures `desired_model_tiers`
+onto generate-class-eligible nodes (known VRAM ∩ `min_vram_gb`); default
+**false**. There is no single-node mutate passthrough.
 
 **Capacity honesty:** omitted `capacity.vram_gb` / `gpus` is **unknown**, not a
 measured CPU. YAML `0` / `gpus: 0` is a known CPU. MEDIUM and LARGE inference

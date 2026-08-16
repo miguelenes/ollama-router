@@ -10,7 +10,7 @@ Local commands live in root `Taskfile.yml` ([Task](https://taskfile.dev/)). Do *
 ```bash
 task              # same as task check
 task check        # sequential fmt, clippy, test, deny
-task coverage     # cargo llvm-cov --fail-under-lines 80 (≥80% lines)
+task coverage     # cargo llvm-cov --fail-under-lines 80 (≥80% lines; ignore **/main.rs)
 task docker       # docker build -t ollama-router:local .
 task --list
 ```

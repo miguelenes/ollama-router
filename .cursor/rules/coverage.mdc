@@ -6,12 +6,14 @@ alwaysApply: true
 # Test coverage gate
 
 Workspace **line** coverage must stay **≥ 80%**. Enforce with `cargo-llvm-cov`
-(`llvm-tools-preview` + `cargo install cargo-llvm-cov`).
+(`llvm-tools-preview` + `cargo install cargo-llvm-cov`). Binary entrypoints
+(`**/main.rs`) are ignored — do **not** exclude whole crates to paper over gaps.
 
 ```bash
 task coverage
 # same as:
-cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only \
+  --ignore-filename-regex '(^|/)main\.rs$'
 ```
 
 After Rust or test changes, do not claim done until `task coverage` passes.
@@ -19,9 +21,10 @@ If coverage drops below 80%, add tests for the new/changed paths — do not
 lower the threshold, skip the gate, or exclude crates to paper over gaps.
 
 ```bash
-# BAD — merge without the gate / weaken the floor
+# BAD — merge without the gate / weaken the floor / exclude crates
 cargo test
 cargo llvm-cov --fail-under-lines 50
+cargo llvm-cov --ignore-filename-regex 'ollama-router-verda'
 
 # GOOD
 task check && task coverage

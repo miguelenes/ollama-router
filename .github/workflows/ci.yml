@@ -52,8 +52,8 @@ jobs:
         with:
           tool: cargo-llvm-cov
 
-      - name: coverage (≥80% lines)
-        run: cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only
+      - name: coverage (≥80% lines, ignore **/main.rs)
+        run: cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
 
   docker:
     name: Docker

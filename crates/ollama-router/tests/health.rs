@@ -350,6 +350,98 @@ async fn warm_skips_cpu_for_gpu_class_tier() {
 }
 
 #[tokio::test]
+async fn warm_unknown_free_and_vram_with_min_zero_may_warm() {
+    let server = MockServer::start();
+    let generate = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"model":"tiny:1b","done":true}"#);
+    });
+    let mut config = RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("unknown"),
+            url: Some(server.base_url()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        desired_model_tiers: vec![ModelTier {
+            models: vec!["tiny:1b".into()],
+            min_vram_gb: 0.0,
+        }],
+        policy: PolicyConfig {
+            model_warm_enabled: true,
+            model_warm_interval_seconds: 0.05,
+            model_warm_cooldown_seconds: 0.05,
+            model_warm_min_free_vram_gb: 4.0,
+            ..PolicyConfig::default()
+        },
+        ..RouterConfig::default()
+    };
+    config.health = fast_health();
+    let state = AppState::from_config(config).expect("state");
+    state.registry.set_healthy(&nid("unknown"));
+    state.registry.update_models(&nid("unknown"), ["tiny:1b"]);
+    // unknown free: do not apply capacity; vram_free_known stays false
+    let warm = spawn_warm(state.clone());
+    wait_until(Duration::from_secs(3), || generate.calls() >= 1).await;
+    warm.abort();
+}
+
+#[tokio::test]
+async fn warm_unknown_vram_skips_gpu_only_tier() {
+    let server = MockServer::start();
+    let generate = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body("{}");
+    });
+    let mut config = RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("unknown"),
+            url: Some(server.base_url()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        desired_model_tiers: vec![ModelTier {
+            models: vec!["mistral:7b".into()],
+            min_vram_gb: 24.0,
+        }],
+        policy: PolicyConfig {
+            model_warm_enabled: true,
+            model_warm_interval_seconds: 0.05,
+            model_warm_cooldown_seconds: 0.05,
+            model_warm_min_free_vram_gb: 0.0,
+            ..PolicyConfig::default()
+        },
+        ..RouterConfig::default()
+    };
+    config.health = fast_health();
+    let state = AppState::from_config(config).expect("state");
+    state.registry.set_healthy(&nid("unknown"));
+    state
+        .registry
+        .update_models(&nid("unknown"), ["mistral:7b"]);
+    let warm = spawn_warm(state.clone());
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(generate.calls(), 0);
+    warm.abort();
+}
+
+#[tokio::test]
 async fn oversized_tags_does_not_empty_models() {
     let server = MockServer::start();
     let tags = server.mock(|when, then| {

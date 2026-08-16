@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::Parser;
+use ollama_router::bootstrap::run as run_bootstrap;
 use ollama_router::cli::{inventory_lines, Cli, Commands};
 use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{build_upstream_client, make_app, AppState};
@@ -156,6 +157,9 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     supervisor.spawn(run_health(state.clone(), shutdown.clone()));
     if state.config.policy.model_warm_enabled {
         supervisor.spawn(run_warm(state.clone(), shutdown.clone()));
+    }
+    if state.config.bootstrap_desired_models {
+        supervisor.spawn(run_bootstrap(state.clone(), shutdown.clone()));
     }
     #[cfg(unix)]
     supervisor.spawn(run_sighup_reloader(state.clone(), shutdown.clone()));
@@ -309,6 +313,12 @@ async fn run_sighup_reloader(state: AppState, shutdown: CancellationToken) {
                 };
                 if let Err(error) = reload_permanent_inventory(&state).await {
                     tracing::error!(%error, "SIGHUP fleet reload failed");
+                } else if state.config.bootstrap_desired_models {
+                    let boot = state.clone();
+                    let token = shutdown.clone();
+                    tokio::spawn(async move {
+                        run_bootstrap(boot, token).await;
+                    });
                 }
             }
         }

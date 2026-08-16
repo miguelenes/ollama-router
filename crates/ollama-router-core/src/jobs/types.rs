@@ -146,6 +146,7 @@ pub enum TargetStatus {
     SkippedUnhealthy,
     SkippedCapacity,
     SkippedRamPressure,
+    SkippedDisk,
     Deleted,
 }
 
@@ -161,6 +162,7 @@ impl TargetStatus {
             Self::SkippedUnhealthy => "skipped_unhealthy",
             Self::SkippedCapacity => "skipped_capacity",
             Self::SkippedRamPressure => "skipped_ram_pressure",
+            Self::SkippedDisk => "skipped_disk",
             Self::Deleted => "deleted",
         }
     }
@@ -178,6 +180,7 @@ impl TargetStatus {
                 | Self::SkippedUnhealthy
                 | Self::SkippedCapacity
                 | Self::SkippedRamPressure
+                | Self::SkippedDisk
                 | Self::Deleted
         )
     }
@@ -203,6 +206,7 @@ impl FromStr for TargetStatus {
             "skipped_unhealthy" => Ok(Self::SkippedUnhealthy),
             "skipped_capacity" => Ok(Self::SkippedCapacity),
             "skipped_ram_pressure" => Ok(Self::SkippedRamPressure),
+            "skipped_disk" => Ok(Self::SkippedDisk),
             "deleted" => Ok(Self::Deleted),
             _ => Err(()),
         }
@@ -273,5 +277,27 @@ impl Job {
             return JobStatus::Running;
         }
         JobStatus::Failed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skipped_disk_roundtrip_and_success_like() {
+        let s = TargetStatus::SkippedDisk;
+        assert_eq!(s.as_str(), "skipped_disk");
+        assert_eq!(s.to_string(), "skipped_disk");
+        assert_eq!("skipped_disk".parse::<TargetStatus>(), Ok(s));
+        assert!(s.is_success_like());
+        assert!(!s.is_incomplete());
+    }
+
+    #[test]
+    fn job_kind_provision_roundtrip() {
+        assert_eq!(JobKind::Provision.as_str(), "provision");
+        assert_eq!("provision".parse::<JobKind>(), Ok(JobKind::Provision));
+        assert!("nope".parse::<JobKind>().is_err());
     }
 }

@@ -19,6 +19,57 @@ pub struct TagRecord {
     pub capabilities: Option<Vec<String>>,
 }
 
+/// Fields retained from one node's `/api/ps` entry (CLI-safe; ignore extras on parse).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PsRecord {
+    pub digest: String,
+    pub size: Option<u64>,
+    pub size_vram: Option<u64>,
+    pub details: Option<Value>,
+    pub expires_at: Option<String>,
+    pub context_length: Option<u64>,
+}
+
+/// One row of the aggregated `/api/ps` union (per healthy node × loaded model).
+#[derive(Clone, Debug, PartialEq)]
+pub struct AggregatedPs {
+    pub name: String,
+    pub node: String,
+    pub digest: String,
+    pub size: Option<u64>,
+    pub size_vram: Option<u64>,
+    pub details: Option<Value>,
+    pub expires_at: Option<String>,
+    pub context_length: Option<u64>,
+}
+
+/// Build fleet-union ps rows from healthy nodes' probe records.
+pub(crate) fn merge_ps<'a>(nodes: impl IntoIterator<Item = PsNode<'a>>) -> Vec<AggregatedPs> {
+    let mut out = Vec::new();
+    for node in nodes {
+        for (name, record) in node.records {
+            let digest = effective_digest(name, &record.digest);
+            out.push(AggregatedPs {
+                name: name.clone(),
+                node: node.id.as_str().to_string(),
+                digest,
+                size: record.size,
+                size_vram: record.size_vram,
+                details: record.details.clone(),
+                expires_at: record.expires_at.clone(),
+                context_length: record.context_length,
+            });
+        }
+    }
+    out.sort_by(|a, b| (&a.name, &a.node).cmp(&(&b.name, &b.node)));
+    out
+}
+
+pub(crate) struct PsNode<'a> {
+    pub id: &'a NodeId,
+    pub records: &'a HashMap<String, PsRecord>,
+}
+
 /// One row of the aggregated `/api/tags` union.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AggregatedTag {

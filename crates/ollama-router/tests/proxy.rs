@@ -15,7 +15,7 @@ use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{
     Capacity, NodeConfig, PolicyConfig, RouterConfig, TimeoutsConfig, UpstreamPoolConfig,
 };
-use ollama_router_core::fleet::{NodeId, TagRecord};
+use ollama_router_core::fleet::{NodeId, PsRecord, TagRecord};
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -894,14 +894,28 @@ async fn fleet_pull_succeeds_when_upstream_has_model() {
         None,
     )]));
     mark_ready(&state, "gpu", &["llama3.2:3b"]);
-    let (status, _, body) = send(
+    let (status, headers, body) = send(
         state,
         json_req(Method::POST, "/api/pull", json!({"model": "llama3.2:3b"})),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    let parsed: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(parsed["status"], "success");
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).expect("ndjson"))
+        .collect();
+    assert!(
+        lines.iter().any(|l| l["status"] == "success"),
+        "expected success line in {lines:?}"
+    );
 }
 
 #[tokio::test]
@@ -1903,7 +1917,7 @@ async fn openai_get_chat_and_ps_do_not_set_last_client() {
     assert!(state.registry.last_client_request_at(&gpu).is_none());
     assert_eq!(chat.calls(), 0);
 
-    let (ps_status, _, _) = send(
+    let (ps_status, _, body) = send(
         state.clone(),
         Request::builder()
             .uri("/api/ps")
@@ -1912,8 +1926,10 @@ async fn openai_get_chat_and_ps_do_not_set_last_client() {
     )
     .await;
     assert_eq!(ps_status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["models"], json!([]));
     assert!(state.registry.last_client_request_at(&gpu).is_none());
-    ps.assert();
+    assert_eq!(ps.calls(), 0, "client GET /api/ps must not hit upstream");
 }
 
 #[tokio::test]
@@ -2452,4 +2468,324 @@ async fn unknown_openai_path_is_404_without_inflight() {
     assert_eq!(parsed["error"]["type"], "invalid_request_error");
     assert!(state.registry.last_client_request_at(&gpu).is_none());
     assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn aggregated_ps_two_holders_two_rows() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let state = state_from(fleet_config(vec![
+        node("a", &a.base_url(), 8.0, 1, None),
+        node("b", &b.base_url(), 8.0, 1, None),
+    ]));
+    mark_ready(&state, "a", &["qwen3:8b"]);
+    mark_ready(&state, "b", &["qwen3:8b"]);
+    state.registry.update_ps_from_records(
+        &nid("a"),
+        [(
+            "qwen3:8b",
+            PsRecord {
+                digest: "aaaaaaaaaaaa".into(),
+                size: Some(100),
+                size_vram: Some(80),
+                details: None,
+                expires_at: None,
+                context_length: None,
+            },
+        )],
+        Some(1.0),
+    );
+    state.registry.update_ps_from_records(
+        &nid("b"),
+        [(
+            "qwen3:8b",
+            PsRecord {
+                digest: "bbbbbbbbbbbb".into(),
+                size: Some(100),
+                size_vram: Some(90),
+                details: None,
+                expires_at: None,
+                context_length: None,
+            },
+        )],
+        Some(1.0),
+    );
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/api/ps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let models = parsed["models"].as_array().unwrap();
+    assert_eq!(models.len(), 2);
+    let nodes: Vec<&str> = models
+        .iter()
+        .map(|m| m["details"]["router_node"].as_str().unwrap())
+        .collect();
+    assert!(nodes.contains(&"a"));
+    assert!(nodes.contains(&"b"));
+    assert!(models
+        .iter()
+        .all(|m| m["digest"].as_str().unwrap().len() >= 12));
+}
+
+#[tokio::test]
+async fn aggregated_ps_omits_unhealthy() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let state = state_from(fleet_config(vec![
+        node("a", &a.base_url(), 8.0, 1, None),
+        node("b", &b.base_url(), 8.0, 1, None),
+    ]));
+    mark_ready(&state, "a", &["llama3.2:1b"]);
+    state.registry.update_models(&nid("b"), ["llama3.2:1b"]);
+    state
+        .registry
+        .update_ps_state(&nid("a"), ["llama3.2:1b"], Some(1.0));
+    state
+        .registry
+        .update_ps_state(&nid("b"), ["llama3.2:1b"], Some(1.0));
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/api/ps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let models = parsed["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["details"]["router_node"], "a");
+}
+
+#[tokio::test]
+async fn api_show_hits_holder_not_non_holder() {
+    let gpu = MockServer::start();
+    let cpu = MockServer::start();
+    let gpu_show = gpu.mock(|when, then| {
+        when.method(POST).path("/api/show");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"modelfile":"FROM llama"}"#);
+    });
+    let cpu_show = cpu.mock(|when, then| {
+        when.method(POST).path("/api/show");
+        then.status(200).body(r#"{"modelfile":"wrong"}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("gpu", &gpu.base_url(), 80.0, 1, None),
+        node("cpu", &cpu.base_url(), 0.0, 0, None),
+    ]));
+    mark_ready(&state, "gpu", &["llama3.1:70b"]);
+    mark_ready(&state, "cpu", &["llama3.2:1b"]);
+    let (status, headers, _) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/show", json!({"name": "llama3.1:70b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("generic")
+    );
+    assert_eq!(gpu_show.calls(), 1);
+    assert_eq!(cpu_show.calls(), 0);
+    assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
+    assert_eq!(state.registry.inflight(&nid("gpu")), 0);
+}
+
+#[tokio::test]
+async fn api_show_miss_is_model_missing() {
+    let server = MockServer::start();
+    let show = server.mock(|when, then| {
+        when.method(POST).path("/api/show");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:1b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(Method::POST, "/api/show", json!({"name": "missing:7b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let err = parsed["error"].as_str().unwrap_or("");
+    assert!(err.contains("model_missing"), "{err}");
+    assert_eq!(show.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_show_unknown_vram_holder_not_capacity_gated() {
+    let server = MockServer::start();
+    let show = server.mock(|when, then| {
+        when.method(POST).path("/api/show");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"modelfile":"FROM llama"}"#);
+    });
+    let state = state_from(fleet_config(vec![NodeConfig {
+        id: nid("unknown"),
+        url: Some(server.base_url()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity {
+            vram_gb: None,
+            ram_gb: Some(32.0),
+            gpus: None,
+            cpu_cores: Some(8),
+        },
+        max_inflight: None,
+    }]));
+    mark_ready(&state, "unknown", &["llama3.1:70b"]);
+    let (status, headers, _) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/show", json!({"model": "llama3.1:70b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-class")
+            .and_then(|v| v.to_str().ok()),
+        Some("generic")
+    );
+    show.assert();
+    assert!(state
+        .registry
+        .last_client_request_at(&nid("unknown"))
+        .is_none());
+}
+
+#[tokio::test]
+async fn fleet_pull_targets_both_eligible_gpus() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let pull_a = mock_pull(&a, Duration::ZERO, 200, "{\"status\":\"success\"}\n");
+    let pull_b = mock_pull(&b, Duration::ZERO, 200, "{\"status\":\"success\"}\n");
+    mock_empty_tags(&a);
+    mock_empty_tags(&b);
+    let state = state_from(fleet_config(vec![
+        node("gpu-a", &a.base_url(), 24.0, 1, None),
+        node("gpu-b", &b.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "gpu-a", &[]);
+    mark_ready(&state, "gpu-b", &[]);
+    let gpu = nid("gpu-a");
+    let (status, headers, body) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/pull", json!({"model": "qwen3:8b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.lines().any(|l| l.contains("\"status\":\"success\"")));
+    assert_eq!(pull_a.calls(), 1);
+    assert_eq!(pull_b.calls(), 1);
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+}
+
+#[tokio::test]
+async fn fleet_pull_large_against_cpu_and_unknown_is_503() {
+    let cpu = MockServer::start();
+    let unknown = MockServer::start();
+    let cpu_pull = mock_pull(&cpu, Duration::ZERO, 200, "{\"status\":\"success\"}\n");
+    let unknown_pull = mock_pull(&unknown, Duration::ZERO, 200, "{\"status\":\"success\"}\n");
+    let state = state_from(fleet_config(vec![
+        node("cpu", &cpu.base_url(), 0.0, 0, None),
+        NodeConfig {
+            id: nid("unknown"),
+            url: Some(unknown.base_url()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        },
+    ]));
+    mark_ready(&state, "cpu", &[]);
+    mark_ready(&state, "unknown", &[]);
+    let (status, _, body) = send(
+        state,
+        json_req(Method::POST, "/api/pull", json!({"model": "llama3.1:70b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let err = parsed["error"].as_str().unwrap_or("");
+    assert!(err.contains("insufficient_capacity"), "{err}");
+    assert!(!err.contains("\"status\":\"success\""));
+    assert_eq!(cpu_pull.calls(), 0);
+    assert_eq!(unknown_pull.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_version_is_router_owned() {
+    let server = MockServer::start();
+    let version = server.mock(|when, then| {
+        when.method(GET).path("/api/version");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"version":"ollama-upstream-9.9.9"}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:1b"]);
+    let gpu = nid("gpu");
+
+    let (hz_status, _, hz_body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(hz_status, StatusCode::OK);
+    let hz: Value = serde_json::from_slice(&hz_body).unwrap();
+
+    let (status, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/api/version")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["version"], hz["version"]);
+    assert_eq!(parsed["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(version.calls(), 0);
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    assert_eq!(state.registry.inflight(&gpu), 0);
 }
