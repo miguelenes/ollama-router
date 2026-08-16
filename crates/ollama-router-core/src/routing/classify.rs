@@ -91,6 +91,55 @@ pub fn parse_model_size_b(model: &str) -> Option<f64> {
     None
 }
 
+/// Parameter count in billions from Ollama `details.parameter_size` (`1B`, `1.2B`, `8.0B`).
+pub fn parse_parameter_size_b(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lowered = trimmed.to_ascii_lowercase();
+    let bytes = lowered.as_bytes();
+    let mut num_end = 0;
+    while num_end < bytes.len() && bytes[num_end].is_ascii_digit() {
+        num_end += 1;
+    }
+    if num_end > 0 && num_end < bytes.len() && bytes[num_end] == b'.' {
+        let mut frac = num_end + 1;
+        let frac_start = frac;
+        while frac < bytes.len() && bytes[frac].is_ascii_digit() {
+            frac += 1;
+        }
+        if frac > frac_start {
+            num_end = frac;
+        }
+    }
+    if num_end == 0 || num_end >= bytes.len() || bytes[num_end] != b'b' {
+        return None;
+    }
+    if num_end + 1 != bytes.len() {
+        return None;
+    }
+    lowered[..num_end].parse().ok()
+}
+
+/// Size hint from a tags-probe `details` object (`parameter_size` only).
+pub fn size_hint_from_tag_details(details: Option<&serde_json::Value>) -> Option<f64> {
+    details
+        .and_then(|d| d.get("parameter_size"))
+        .and_then(|v| v.as_str())
+        .and_then(parse_parameter_size_b)
+}
+
+fn class_from_size_b(size: f64, policy: &PolicyConfig) -> RequestClass {
+    if size <= policy.small_max_b {
+        RequestClass::Small
+    } else if size <= policy.medium_max_b {
+        RequestClass::Medium
+    } else {
+        RequestClass::Large
+    }
+}
+
 /// Whether `model` looks like an embedding model.
 pub fn looks_like_embedding(model: &str, markers: &[&str]) -> bool {
     let lowered = model.trim().to_ascii_lowercase();
@@ -133,7 +182,20 @@ pub fn classify_path(path: &str) -> Option<RequestClass> {
 
 /// Full request-class decision from path + model name + policy.
 pub fn classify(path: &str, model: Option<&str>, policy: &PolicyConfig) -> RequestClass {
-    classify_with_markers(path, model, policy, DEFAULT_EMBED_MARKERS)
+    classify_with_size_hint(path, model, policy, None)
+}
+
+/// [`classify`] with an optional catalog `parameter_size` hint (billions).
+///
+/// The hint is used only when the model name has no parseable `:Nb` suffix
+/// (after embed markers and known-small bases).
+pub fn classify_with_size_hint(
+    path: &str,
+    model: Option<&str>,
+    policy: &PolicyConfig,
+    size_hint_b: Option<f64>,
+) -> RequestClass {
+    classify_with_markers(path, model, policy, DEFAULT_EMBED_MARKERS, size_hint_b)
 }
 
 /// [`classify`] with injectable embedding markers.
@@ -142,6 +204,7 @@ pub fn classify_with_markers(
     model: Option<&str>,
     policy: &PolicyConfig,
     embed_markers: &[&str],
+    size_hint_b: Option<f64>,
 ) -> RequestClass {
     if let Some(path_class) = classify_path(path) {
         return path_class;
@@ -153,12 +216,13 @@ pub fn classify_with_markers(
         if is_known_small_base(model, DEFAULT_SMALL_MODEL_BASES) {
             return RequestClass::Small;
         }
-        match parse_model_size_b(model) {
-            None => RequestClass::Medium,
-            Some(size) if size <= policy.small_max_b => RequestClass::Small,
-            Some(size) if size <= policy.medium_max_b => RequestClass::Medium,
-            Some(_) => RequestClass::Large,
+        if let Some(size) = parse_model_size_b(model) {
+            return class_from_size_b(size, policy);
         }
+        if let Some(size) = size_hint_b {
+            return class_from_size_b(size, policy);
+        }
+        RequestClass::Medium
     } else {
         RequestClass::Generic
     }
@@ -214,6 +278,65 @@ mod tests {
         }
         assert!(!looks_like_embedding("llama3.2:3b", DEFAULT_EMBED_MARKERS));
         assert!(!looks_like_embedding("moondream", DEFAULT_EMBED_MARKERS));
+    }
+
+    #[test]
+    fn parse_parameter_size_b_table() {
+        let cases = [
+            ("1B", Some(1.0)),
+            ("1b", Some(1.0)),
+            ("1.2B", Some(1.2)),
+            ("8.0B", Some(8.0)),
+            ("70B", Some(70.0)),
+            ("", None),
+            ("B", None),
+            ("1.2", None),
+            ("1.2BB", None),
+            ("13B-instruct", None),
+        ];
+        for (raw, size) in cases {
+            assert_eq!(parse_parameter_size_b(raw), size, "{raw}");
+        }
+    }
+
+    #[test]
+    fn size_hint_from_details() {
+        let details = serde_json::json!({"family": "minicpm", "parameter_size": "1B"});
+        assert_eq!(size_hint_from_tag_details(Some(&details)), Some(1.0));
+        assert_eq!(size_hint_from_tag_details(None), None);
+        assert_eq!(
+            size_hint_from_tag_details(Some(&serde_json::json!({"family": "llama"}))),
+            None
+        );
+    }
+
+    #[test]
+    fn classify_uses_parameter_size_hint_when_no_nb() {
+        let p = policy();
+        assert_eq!(
+            classify_with_size_hint("/api/chat", Some("minicpm-v4.6:latest"), &p, Some(1.0)),
+            RequestClass::Small
+        );
+        assert_eq!(
+            classify_with_size_hint("/api/chat", Some("custom-modelfile:latest"), &p, None),
+            RequestClass::Medium
+        );
+        assert_eq!(
+            classify_with_size_hint("/api/chat", Some("llama3.1:70b"), &p, Some(1.0)),
+            RequestClass::Large
+        );
+        assert_eq!(
+            classify("/api/chat", Some("qwen3:30b-a3b"), &p),
+            RequestClass::Large
+        );
+        assert_eq!(
+            classify("/api/show", Some("llama3.1:70b"), &p),
+            RequestClass::Generic
+        );
+        assert_eq!(
+            classify("/v1/completions", Some("llama3.2:3b"), &p),
+            RequestClass::Small
+        );
     }
 
     #[test]

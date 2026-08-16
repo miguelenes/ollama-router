@@ -11,9 +11,14 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 
 ## Surface
 
+Honest fleet contract: **list** = union of holders; **infer** = holders-only WLC;
+**pull** = placement job on healthy generate-class-eligible nodes (not a native
+NDJSON stub through one daemon); **miss** = 503 `model_missing` (default, no
+auto Hub-pull); create/copy/push/blobs = 501.
+
 | Path | Behavior |
 |------|----------|
-| `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). |
+| `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). Size class may use catalog `details.parameter_size` when `:Nb` is absent. |
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Passthrough to Ollama's OpenAI shim on the ranked node. Same `inflight_inc` / reservation / class ranking as native chat/embed. Do **not** rewrite `/v1/embeddings` to `/api/embed`. |
@@ -24,7 +29,7 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 | `GET /api/ps`, `/api/version` | Diagnostic single-node passthrough. Not idle. |
 | `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation`. Use admin ensure / `POST /api/pull`. |
 | Other `/v1/*` | **404** OpenAI-shaped. Allowlist only. |
-| `POST /api/pull`, `/api/delete` | Always fleet orchestrator. Prefer admin. |
+| `POST /api/pull`, `/api/delete` | Always fleet orchestrator (placement job). Prefer admin. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
 | `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
@@ -39,10 +44,13 @@ request path: Ollama `{"error": "…"}` on `/api/*`, OpenAI
 Kick coalesced async Verda demand-scale (`create_additional`) for those
 reasons. Never block the client on provision.
 
+Omitted node VRAM is **unknown** (not a CPU). LARGE/MEDIUM against unknown-only
+holders → `insufficient_capacity`. SMALL/EMBED may still forward to unknown.
+
 `model_missing` has **no** Retry-After when `auto_pull_on_miss` is false (default).
 When the flag is on, the proxy enqueues `start_ensure(Placement)` on
 `placement_eligible_node_ids` only (static VRAM/class — LARGE never lands on
-CPU). Empty placement → `insufficient_capacity` + provision Retry-After + demand
+CPU or unknown VRAM). Empty placement → `insufficient_capacity` + provision Retry-After + demand
 scale. Else 503 JSON `reason=pull_enqueued` + `Retry-After` from
 `pull_miss_retry_after_seconds`. Optional `auto_pull_wait_seconds` may re-rank
 and forward; `inflight_inc` only on that forward. Never forward a miss to a node
@@ -59,10 +67,12 @@ that lacks the model (Ollama would native-pull). Never `unsafe_single_node_mutat
 ## Pull / delete
 
 Persist jobs in SQLite (see durable-model-operations wiki). Recover via live
-`/api/tags`. Do not log upstream bodies.
+`/api/tags`. Default pull places on every healthy generate-class-eligible node.
+Do not log upstream bodies. Pull is not a stub NDJSON passthrough.
 
 ## Never
 
 - Log prompts, bodies, embeddings, or tokens.
 - Count health / `/api/tags` / `/v1/models` / `/api/ps` / admin / warm-keeper as client activity.
 - Add Thunder or RunPod routes.
+- Treat omitted VRAM as a measured CPU for ranking or placement.

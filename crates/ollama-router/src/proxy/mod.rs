@@ -29,9 +29,9 @@ use ollama_router_core::fleet::{
 use ollama_router_core::http_util::reqwest_error_for_log;
 use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
-    blocked_only_by_reservations, classify, estimate_request_ram_gb, estimate_request_vram_gb,
-    is_inference_path, placement_eligible_node_ids, rank_nodes, RankOutcome, RequestClass,
-    RoutingError, TargetSpec,
+    blocked_only_by_reservations, classify_with_size_hint, estimate_request_ram_gb,
+    estimate_request_vram_gb, is_inference_path, placement_eligible_node_ids, rank_nodes,
+    size_hint_from_catalog, RankOutcome, RequestClass, RoutingError, TargetSpec,
 };
 use serde_json::{json, Value};
 use tokio::sync::OwnedSemaphorePermit;
@@ -148,7 +148,11 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
         return fleet_delete(state, model.as_deref()).await;
     }
 
-    let request_class = classify(&path, model.as_deref(), &state.config.policy);
+    let size_hint = model
+        .as_deref()
+        .and_then(|m| size_hint_from_catalog(&state.registry.aggregated_tags(), m));
+    let request_class =
+        classify_with_size_hint(&path, model.as_deref(), &state.config.policy, size_hint);
     proxy_ranked(
         state,
         ProxyCall {
@@ -1021,8 +1025,15 @@ async fn auto_pull_on_miss(
     start: Instant,
 ) -> AutoPullResult {
     let policy = &state.config.policy;
-    let eligible =
-        placement_eligible_node_ids(&state.registry.snapshot(), model, policy, false, false);
+    let size_hint = size_hint_from_catalog(&state.registry.aggregated_tags(), model);
+    let eligible = placement_eligible_node_ids(
+        &state.registry.snapshot(),
+        model,
+        policy,
+        false,
+        false,
+        size_hint,
+    );
     if eligible.is_empty() {
         tracing::warn!(
             model,
@@ -1141,7 +1152,15 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
         }
 
         let snap = state.registry.snapshot();
-        let holders = placement_eligible_node_ids(&snap, model, &state.config.policy, false, false);
+        let size_hint = size_hint_from_catalog(&state.registry.aggregated_tags(), model);
+        let holders = placement_eligible_node_ids(
+            &snap,
+            model,
+            &state.config.policy,
+            false,
+            false,
+            size_hint,
+        );
         let present = holders.iter().any(|id| {
             snap.iter()
                 .any(|node| node.id == *id && node.healthy && node.has_model(model))

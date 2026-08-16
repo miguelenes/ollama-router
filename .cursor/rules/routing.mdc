@@ -24,10 +24,12 @@ Utilization **dominates** preference. Sticky affinity promotes only when the own
 
 | Class | Preference |
 |-------|------------|
-| EMBED | lower `vram_gb`; +100 if free VRAM < 2 GiB |
-| SMALL | GPU `vram_gb`; CPU `vram_gb + 100` |
-| MEDIUM | lower `vram_gb` |
-| LARGE | higher `vram_gb` (`-vram_gb`) |
-| GENERIC | `vram_gb` |
+| EMBED | lower **known** `vram_gb`; unknown after known; +100 if free VRAM < 2 GiB |
+| SMALL | known GPU, then unknown, then known CPU |
+| MEDIUM | lower **known** `vram_gb` (omitted ≠ 0) |
+| LARGE | higher known VRAM (`-vram_gb`); unknown hard-gated |
+| GENERIC | known `vram_gb` |
+
+Omitted VRAM/GPU is unknown, not a CPU. MEDIUM/LARGE need known sufficient VRAM.
 
 See `.opencode/wiki/concepts/ollama-router-load-share.md`. Skill: `routing-wlc`.

@@ -4,7 +4,7 @@ tags: [ollama, router, routing, load-share, utilization, wlc]
 sourceRefs:
   - crates/ollama-router-core/src/routing
   - crates/ollama-router-core/src/fleet
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-16
 ---
 
 # Ollama Router Load-Share Model
@@ -30,13 +30,18 @@ utilization ratio.
 
 ## Class preference (`capacity_preference`)
 
+Omitted VRAM/GPU count is **unknown**, not a measured CPU (`0` / `gpus: 0`).
+Preference uses **known** values only; EMBED/MEDIUM must not sort omitted as `0`.
+
 | Class | Preference | Intent |
 |---|---|---|
-| EMBED | `cap.vram_gb` (lower wins), +100 when free VRAM < 2 GiB | Reserve big GPUs; soft-penalize tight nodes |
-| SMALL | `cap.vram_gb` (GPU), `vram_gb + 100` (CPU) | Smaller GPU first, CPU last |
-| MEDIUM | `cap.vram_gb` (lower wins) | Keep big GPUs free for LARGE |
-| LARGE | `-cap.vram_gb` (higher wins) | Biggest GPU first |
-| GENERIC | `cap.vram_gb` | Neutral |
+| EMBED | known `vram_gb` (lower wins); unknown after known; +100 when free VRAM < 2 GiB | Reserve big GPUs; soft-penalize tight nodes |
+| SMALL | known GPU, then unknown, then known CPU | GPU-first; CPU overflow |
+| MEDIUM | known `vram_gb` (lower wins); unknown after known | Keep big GPUs free for LARGE |
+| LARGE | `-known vram` (higher wins); unknown hard-gated out | Biggest GPU first |
+| GENERIC | known `vram_gb` | Neutral |
+
+MEDIUM/LARGE static gates require known sufficient VRAM (unknown does not fit).
 
 Class preference steers *which* node within a similar utilization band receives
 a request class. It never overrides a genuine utilization difference.

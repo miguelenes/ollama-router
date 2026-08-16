@@ -148,8 +148,12 @@ pub fn static_capacity_fits(
         RequestClass::Embed | RequestClass::Small | RequestClass::Generic | RequestClass::Pull => {
             true
         }
-        RequestClass::Medium => node.vram_gb() >= policy.medium_min_vram_gb,
-        RequestClass::Large => node.vram_gb() >= estimate_large_vram_gb(model),
+        RequestClass::Medium => node
+            .known_vram_gb()
+            .is_some_and(|v| v >= policy.medium_min_vram_gb),
+        RequestClass::Large => node
+            .known_vram_gb()
+            .is_some_and(|v| v >= estimate_large_vram_gb(model)),
     }
 }
 
@@ -169,11 +173,17 @@ pub fn vram_fits(
     if request_class == RequestClass::Small && policy.small_reserve_vram_gb <= 0.0 {
         return true;
     }
-    if request_class == RequestClass::Medium && node.vram_gb() < policy.medium_min_vram_gb {
-        return false;
+    if request_class == RequestClass::Medium {
+        match node.known_vram_gb() {
+            Some(v) if v >= policy.medium_min_vram_gb => {}
+            _ => return false,
+        }
     }
-    if request_class == RequestClass::Large && node.vram_gb() < estimate_large_vram_gb(model) {
-        return false;
+    if request_class == RequestClass::Large {
+        match node.known_vram_gb() {
+            Some(v) if v >= estimate_large_vram_gb(model) => {}
+            _ => return false,
+        }
     }
 
     let request_estimate = estimate_request_vram_gb(request_class, model, policy);
@@ -181,18 +191,20 @@ pub fn vram_fits(
         return true;
     }
 
-    if node.vram_gb() > 0.0 {
-        if let Some(loaded) = node.loaded_vram_gb {
-            let projected = loaded + node.reserved_vram_gb + request_estimate;
-            let limit = node.vram_gb() * policy.vram_headroom;
-            if projected > limit {
-                return false;
-            }
-        } else if node.reserved_vram_gb > 0.0 {
-            let projected = node.reserved_vram_gb + request_estimate;
-            let limit = node.vram_gb() * policy.vram_headroom;
-            if projected > limit {
-                return false;
+    if let Some(vram) = node.known_vram_gb() {
+        if vram > 0.0 {
+            if let Some(loaded) = node.loaded_vram_gb {
+                let projected = loaded + node.reserved_vram_gb + request_estimate;
+                let limit = vram * policy.vram_headroom;
+                if projected > limit {
+                    return false;
+                }
+            } else if node.reserved_vram_gb > 0.0 {
+                let projected = node.reserved_vram_gb + request_estimate;
+                let limit = vram * policy.vram_headroom;
+                if projected > limit {
+                    return false;
+                }
             }
         }
     }
@@ -235,26 +247,30 @@ pub(crate) fn label_ok(labels: &[String], policy: &PolicyConfig) -> bool {
     true
 }
 
+/// Preference for unknown VRAM so it sorts after any known card but before CPU.
+const UNKNOWN_VRAM_PREFERENCE: f64 = 1_000.0;
+const KNOWN_CPU_PREFERENCE_BASE: f64 = 2_000.0;
+
 pub(crate) fn capacity_preference(node: &NodeSnapshot, request_class: RequestClass) -> f64 {
     match request_class {
         RequestClass::Embed => {
-            let mut base = node.vram_gb();
-            if let Some(loaded) = node.loaded_vram_gb {
-                if node.vram_gb() > 0.0 && node.vram_gb() - loaded < 2.0 {
+            let mut base = node.known_vram_gb().unwrap_or(UNKNOWN_VRAM_PREFERENCE);
+            if let (Some(vram), Some(loaded)) = (node.known_vram_gb(), node.loaded_vram_gb) {
+                if vram > 0.0 && vram - loaded < 2.0 {
                     base += 100.0;
                 }
             }
             base
         }
-        RequestClass::Large => -node.vram_gb(),
-        RequestClass::Small => {
-            if node.gpus() > 0 {
-                node.vram_gb()
-            } else {
-                node.vram_gb() + 100.0
-            }
+        RequestClass::Large => -node.known_vram_gb().unwrap_or(0.0),
+        RequestClass::Small => match node.known_gpus() {
+            Some(gpus) if gpus >= 1 => node.known_vram_gb().unwrap_or(0.0),
+            None => UNKNOWN_VRAM_PREFERENCE,
+            Some(_) => KNOWN_CPU_PREFERENCE_BASE + node.known_vram_gb().unwrap_or(0.0),
+        },
+        RequestClass::Medium | RequestClass::Generic | RequestClass::Pull => {
+            node.known_vram_gb().unwrap_or(UNKNOWN_VRAM_PREFERENCE)
         }
-        RequestClass::Medium | RequestClass::Generic | RequestClass::Pull => node.vram_gb(),
     }
 }
 
@@ -496,6 +512,22 @@ mod tests {
                 vram_gb: Some(vram),
                 ram_gb: Some(32.0),
                 gpus: Some(gpus),
+                cpu_cores: Some(8),
+            },
+            max_inflight,
+        }
+    }
+
+    fn node_unknown(id: &str, max_inflight: Option<u32>) -> NodeConfig {
+        NodeConfig {
+            id: nid(id),
+            url: Some(format!("http://{id}:11434")),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
                 cpu_cores: Some(8),
             },
             max_inflight,
@@ -922,6 +954,129 @@ nodes:
             0,
         );
         assert_eq!(outcome.ranked[0].id.as_str(), "gpu48");
+    }
+
+    #[test]
+    fn small_prefers_known_gpu_then_unknown_then_cpu() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("gpu", 8.0, 1, None),
+                node_unknown("unknown", None),
+                node("cpu", 0.0, 0, None),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["gpu", "unknown", "cpu"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["llama3.2:3b"]);
+        }
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Small,
+            Some("llama3.2:3b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        let ids: Vec<&str> = outcome.ranked.iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, vec!["gpu", "unknown", "cpu"]);
+    }
+
+    #[test]
+    fn embed_prefers_known_8gib_over_unknown() {
+        let config = RouterConfig {
+            nodes: vec![node("gpu8", 8.0, 1, None), node_unknown("unknown", None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["gpu8", "unknown"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3-embedding:8b"]);
+        }
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Embed,
+            Some("qwen3-embedding:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "gpu8");
+    }
+
+    #[test]
+    fn medium_prefers_known_8gib_over_unknown() {
+        let config = RouterConfig {
+            nodes: vec![node("gpu8", 8.0, 1, None), node_unknown("unknown", None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["gpu8", "unknown"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["llama3.1:8b"]);
+        }
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Medium,
+            Some("llama3.1:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "gpu8");
+        assert!(outcome.ranked.iter().all(|n| n.id.as_str() != "unknown"));
+    }
+
+    #[test]
+    fn large_unknown_vram_does_not_fit() {
+        let config = RouterConfig {
+            nodes: vec![node_unknown("unknown", None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&nid("unknown"));
+        registry.update_models(&nid("unknown"), ["llama3.1:70b"]);
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Large,
+            Some("llama3.1:70b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(!outcome.ok());
+        assert_eq!(outcome.reason, Some(RoutingError::Capacity));
+    }
+
+    #[test]
+    fn small_still_forwards_to_unknown_vram() {
+        let config = RouterConfig {
+            nodes: vec![node_unknown("unknown", None)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&nid("unknown"));
+        registry.update_models(&nid("unknown"), ["llama3.2:3b"]);
+        let outcome = rank_nodes(
+            &registry.snapshot(),
+            RequestClass::Small,
+            Some("llama3.2:3b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(outcome.ok());
+        assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
+        assert!(outcome.ranked[0].known_vram_gb().is_none());
     }
 
     proptest! {

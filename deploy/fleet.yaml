@@ -10,3 +10,4 @@ nodes:
     labels: [gpu]
     capacity:
       vram_gb: 24
+      gpus: 1

@@ -1690,6 +1690,89 @@ async fn loaded_vram_capacity_miss_skips_admission_wait() {
 }
 
 #[tokio::test]
+async fn large_generate_unknown_vram_returns_insufficient_capacity() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"response":"nope"}"#);
+    });
+    let state = state_from(RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("unknown"),
+            url: Some(server.base_url().trim_end_matches('/').to_string()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        ..RouterConfig::default()
+    });
+    mark_ready(&state, "unknown", &["llama3.1:70b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "llama3.1:70b", "prompt": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_str().unwrap();
+    assert!(error.contains("insufficient_capacity"), "{error}");
+    hit.assert_calls(0);
+}
+
+#[tokio::test]
+async fn small_generate_still_forwards_to_unknown_vram() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"response":"ok"}"#);
+    });
+    let state = state_from(RouterConfig {
+        nodes: vec![NodeConfig {
+            id: nid("unknown"),
+            url: Some(server.base_url().trim_end_matches('/').to_string()),
+            capacity_url: None,
+            labels: Vec::new(),
+            static_capacity: Capacity {
+                vram_gb: None,
+                ram_gb: Some(32.0),
+                gpus: None,
+                cpu_cores: Some(8),
+            },
+            max_inflight: None,
+        }],
+        ..RouterConfig::default()
+    });
+    mark_ready(&state, "unknown", &["llama3.2:3b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "llama3.2:3b", "prompt": "x"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["response"], "ok");
+    hit.assert_calls(1);
+}
+
+#[tokio::test]
 async fn inflight_cas_does_not_overshoot_cap() {
     let a_srv = MockServer::start();
     let b_srv = MockServer::start();

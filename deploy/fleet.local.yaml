@@ -1,6 +1,14 @@
 # Native local-dev inventory. Host Ollama is a service on loopback :11434.
 # The router listens on :11435 so it does not collide with that daemon.
+#
+# capacity.vram_gb / gpus:
+#   0 / 0  = known CPU (measured/declared zero)
+#   omit   = unknown (not a silent CPU — MEDIUM/LARGE will not place here)
+#   N / 1+ = known GPU; set to match this host when you have one
 version: 1
 nodes:
   - id: local
     url: http://127.0.0.1:11434
+    capacity:
+      vram_gb: 0
+      gpus: 0

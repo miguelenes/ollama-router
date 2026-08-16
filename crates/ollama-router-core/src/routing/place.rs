@@ -4,8 +4,10 @@ use std::collections::{BTreeMap, HashSet};
 
 use crate::config::PolicyConfig;
 use crate::fleet::ids::NodeId;
+use crate::fleet::normalize_model;
 use crate::fleet::registry::{NodeSnapshot, PressureLevel};
-use crate::routing::classify::{classify, RequestClass};
+use crate::fleet::tags::AggregatedTag;
+use crate::routing::classify::{classify_with_size_hint, size_hint_from_tag_details, RequestClass};
 use crate::routing::rank::{capacity_preference, label_ok, static_capacity_fits};
 
 /// Bypass placement and target every configured node.
@@ -74,8 +76,20 @@ impl TargetSpec {
 }
 
 /// Request class a pull/placement decision should honour for `model`.
-pub fn placement_class(model: &str, policy: &PolicyConfig) -> RequestClass {
-    classify("/api/generate", Some(model), policy)
+pub fn placement_class(
+    model: &str,
+    policy: &PolicyConfig,
+    size_hint_b: Option<f64>,
+) -> RequestClass {
+    classify_with_size_hint("/api/generate", Some(model), policy, size_hint_b)
+}
+
+/// Catalog `parameter_size` hint for `model` from aggregated tags (winner details).
+pub fn size_hint_from_catalog(tags: &[AggregatedTag], model: &str) -> Option<f64> {
+    let target = normalize_model(model);
+    tags.iter()
+        .find(|tag| tag.name == target)
+        .and_then(|tag| size_hint_from_tag_details(tag.details.as_ref()))
 }
 
 /// Whether transient RAM pressure should block a model pull.
@@ -108,8 +122,9 @@ pub fn placement_eligible_node_ids(
     policy: &PolicyConfig,
     include_unhealthy: bool,
     avoid_ram_pressure: bool,
+    size_hint_b: Option<f64>,
 ) -> Vec<NodeId> {
-    let request_class = placement_class(model, policy);
+    let request_class = placement_class(model, policy, size_hint_b);
     let mut candidates: Vec<&NodeSnapshot> = nodes
         .iter()
         .filter(|node| include_unhealthy || node.healthy)
@@ -140,6 +155,7 @@ pub fn resolve_target_nodes(
     policy: &PolicyConfig,
     include_unhealthy: bool,
     avoid_ram_pressure: bool,
+    size_hint_for: &dyn Fn(&str) -> Option<f64>,
 ) -> Result<BTreeMap<String, Vec<NodeId>>, PlacementError> {
     match spec {
         TargetSpec::Placement => Ok(models
@@ -153,6 +169,7 @@ pub fn resolve_target_nodes(
                         policy,
                         include_unhealthy,
                         avoid_ram_pressure,
+                        size_hint_for(model),
                     ),
                 )
             })
@@ -220,7 +237,8 @@ mod tests {
     fn star_places_embed_on_cpu() {
         let (registry, policy) = fleet();
         let nodes = registry.snapshot();
-        let ids = placement_eligible_node_ids(&nodes, "qwen3-embedding:8b", &policy, false, false);
+        let ids =
+            placement_eligible_node_ids(&nodes, "qwen3-embedding:8b", &policy, false, false, None);
         assert!(ids.iter().any(|id| id.as_str() == "cpu"));
         assert!(ids.iter().any(|id| id.as_str() == "gpu"));
     }
@@ -229,7 +247,7 @@ mod tests {
     fn star_skips_large_on_cpu() {
         let (registry, policy) = fleet();
         let nodes = registry.snapshot();
-        let ids = placement_eligible_node_ids(&nodes, "llama3.1:70b", &policy, false, false);
+        let ids = placement_eligible_node_ids(&nodes, "llama3.1:70b", &policy, false, false, None);
         assert_eq!(
             ids.iter().map(NodeId::as_str).collect::<Vec<_>>(),
             vec!["gpu"]
@@ -247,6 +265,7 @@ mod tests {
             &policy,
             false,
             false,
+            &|_| None,
         )
         .expect("resolve");
         let ids = &resolved["llama3.1:70b"];
@@ -259,8 +278,16 @@ mod tests {
         let (registry, policy) = fleet();
         let nodes = registry.snapshot();
         let spec = TargetSpec::Nodes(vec![nid("nope")]);
-        let err = resolve_target_nodes(&nodes, &["moondream".into()], &spec, &policy, false, false)
-            .expect_err("unknown");
+        let err = resolve_target_nodes(
+            &nodes,
+            &["moondream".into()],
+            &spec,
+            &policy,
+            false,
+            false,
+            &|_| None,
+        )
+        .expect_err("unknown");
         assert!(matches!(err, PlacementError::UnknownNode(id) if id == "nope"));
     }
 
@@ -269,10 +296,73 @@ mod tests {
         let (registry, policy) = fleet();
         let mut node = registry.get(&nid("cpu")).expect("cpu");
         node.pressure_level = PressureLevel::Critical;
-        let class = placement_class("qwen3-embedding:8b", &policy);
+        let class = placement_class("qwen3-embedding:8b", &policy, None);
         assert!(ram_pressure_blocks_placement(&node, class, &policy, false));
         node.pressure_level = PressureLevel::Elevated;
         assert!(!ram_pressure_blocks_placement(&node, class, &policy, false));
         assert!(ram_pressure_blocks_placement(&node, class, &policy, true));
+    }
+
+    #[test]
+    fn large_placement_skips_cpu_and_unknown_vram() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("cpu", 0.0, 0),
+                node("gpu80", 80.0, 1),
+                NodeConfig {
+                    id: nid("unknown"),
+                    url: Some("http://unknown:11434".into()),
+                    capacity_url: None,
+                    labels: Vec::new(),
+                    static_capacity: Capacity {
+                        vram_gb: None,
+                        ram_gb: Some(32.0),
+                        gpus: None,
+                        cpu_cores: Some(8),
+                    },
+                    max_inflight: None,
+                },
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["cpu", "gpu80", "unknown"] {
+            registry.set_healthy(&nid(id));
+        }
+        let ids = placement_eligible_node_ids(
+            &registry.snapshot(),
+            "llama3.1:70b",
+            &config.policy,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(
+            ids.iter().map(NodeId::as_str).collect::<Vec<_>>(),
+            vec!["gpu80"]
+        );
+    }
+
+    #[test]
+    fn medium_placement_skips_known_cpu() {
+        let config = RouterConfig {
+            nodes: vec![node("cpu", 0.0, 0), node("gpu24", 24.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        registry.set_healthy(&nid("cpu"));
+        registry.set_healthy(&nid("gpu24"));
+        let ids = placement_eligible_node_ids(
+            &registry.snapshot(),
+            "qwen3:8b",
+            &config.policy,
+            false,
+            false,
+            None,
+        );
+        assert_eq!(
+            ids.iter().map(NodeId::as_str).collect::<Vec<_>>(),
+            vec!["gpu24"]
+        );
     }
 }

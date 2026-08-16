@@ -16,7 +16,9 @@ use ollama_router_core::fleet::{
     FleetState, NodeId, NodeOrigin,
 };
 use ollama_router_core::jobs::{Job, OrchestratorError};
-use ollama_router_core::routing::{placement_eligible_node_ids, TargetSpec};
+use ollama_router_core::routing::{
+    placement_eligible_node_ids, size_hint_from_catalog, TargetSpec,
+};
 
 use super::{json_status, AppState};
 
@@ -749,11 +751,13 @@ pub async fn list_models(State(state): State<AppState>, headers: HeaderMap) -> R
     let mut placement = serde_json::Map::new();
     let mut eligible_including_unhealthy = serde_json::Map::new();
     for model in &desired {
-        let ids: Vec<String> = placement_eligible_node_ids(&snap, model, policy, false, false)
-            .into_iter()
-            .map(|id| id.as_str().to_string())
-            .collect();
-        let all: Vec<String> = placement_eligible_node_ids(&snap, model, policy, true, false)
+        let hint = size_hint_from_catalog(&state.registry.aggregated_tags(), model);
+        let ids: Vec<String> =
+            placement_eligible_node_ids(&snap, model, policy, false, false, hint)
+                .into_iter()
+                .map(|id| id.as_str().to_string())
+                .collect();
+        let all: Vec<String> = placement_eligible_node_ids(&snap, model, policy, true, false, hint)
             .into_iter()
             .map(|id| id.as_str().to_string())
             .collect();

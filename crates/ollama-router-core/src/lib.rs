@@ -35,7 +35,8 @@ pub use jobs::{
     ModelOrchestrator, OrchestratorError, PullOrchestrator, StubOrchestrator, TargetStatus,
 };
 pub use routing::{
-    classify, parse_model_size_b, placement_class, placement_eligible_node_ids,
-    ram_pressure_blocks_placement, rank_nodes, resolve_target_nodes, PlacementError, RankOutcome,
-    RequestClass, RoutingError, TargetSpec, TARGET_ALL,
+    classify, classify_with_size_hint, parse_model_size_b, parse_parameter_size_b, placement_class,
+    placement_eligible_node_ids, ram_pressure_blocks_placement, rank_nodes, resolve_target_nodes,
+    size_hint_from_catalog, size_hint_from_tag_details, PlacementError, RankOutcome, RequestClass,
+    RoutingError, TargetSpec, TARGET_ALL,
 };

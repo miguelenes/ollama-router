@@ -70,10 +70,27 @@ and merge policy; it does not install Ollama or reclassify `pressure_level`.
 
 ## Model operations
 
+This product is an **honest fleet proxy**, not a fake single daemon:
+
+| Client action | Behavior |
+|---------------|----------|
+| List (`/api/tags`, `/v1/models`) | Union of healthy holders |
+| Infer (generate/chat/embed + OpenAI) | Rank among nodes that **already have** the model (holders-only WLC) |
+| Pull | Fleet **placement job** (not native NDJSON pull through one node) |
+| Miss | **503** `model_missing` (not native Hub 404/pull); `auto_pull_on_miss` default **false** |
+| create/copy/push/blobs | **501** `not_a_fleet_operation` |
+
 Pull/delete metadata persists to SQLite and recovers via live `/api/tags`; see
 [[concepts/ollama-router-durable-model-operations]]. `POST /api/pull` and
-`/api/delete` always go through the fleet orchestrator (stub → 503 until jobs
-land). There is no single-node mutate passthrough.
+`/api/delete` always go through the fleet orchestrator. Default placement
+targets every **healthy** node that fits the model's **generate** size class
+(static VRAM). LARGE/MEDIUM skip known CPUs and **unknown** VRAM. There is no
+single-node mutate passthrough.
+
+**Capacity honesty:** omitted `capacity.vram_gb` / `gpus` is **unknown**, not a
+measured CPU. YAML `0` / `gpus: 0` is a known CPU. MEDIUM and LARGE inference
+and placement require known sufficient VRAM; unknown fails those gates
+(`insufficient_capacity`). EMBED/SMALL/GENERIC may still use unknown holders.
 
 `/api/embeddings` → `/api/embed` is Ollama ≤0.32 protocol compatibility, not debt.
 
@@ -87,7 +104,8 @@ idle activity.
 
 OpenAI `POST /v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` are
 passthrough to the ranked node's Ollama shim (same idle / reservation / class
-ranking as native inference). `GET /v1/models` and `GET /v1/models/{id}` use the
+ranking as native inference). Size class may use catalog `details.parameter_size`
+when the name has no `:Nb` tag. `GET /v1/models` and `GET /v1/models/{id}` use the
 same union; `created` is Unix seconds from the winning `modified_at` when
 parseable, else `0`. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
 `/api/create`, and `/api/blobs*` are rejected (`not_a_fleet_operation`).

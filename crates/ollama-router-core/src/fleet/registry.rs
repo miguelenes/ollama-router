@@ -247,9 +247,14 @@ impl NodeSnapshot {
         models_match(&self.loaded_models, model)
     }
 
-    /// Effective VRAM (0 when unset).
+    /// Effective VRAM (0 when unset). Prefer [`Self::known_vram_gb`] for ranking gates.
     pub fn vram_gb(&self) -> f64 {
         self.capacity.vram_gb()
+    }
+
+    /// Measured/declared VRAM, or `None` when omitted (unknown — not a CPU).
+    pub fn known_vram_gb(&self) -> Option<f64> {
+        self.capacity.known_vram_gb()
     }
 
     /// Effective RAM (0 when unset).
@@ -257,9 +262,14 @@ impl NodeSnapshot {
         self.capacity.ram_gb()
     }
 
-    /// Effective GPU count.
+    /// Effective GPU count (0 when unset). Prefer [`Self::known_gpus`] for ranking.
     pub fn gpus(&self) -> u32 {
         self.capacity.gpus()
+    }
+
+    /// Measured/declared GPU count, or `None` when omitted (unknown).
+    pub fn known_gpus(&self) -> Option<u32> {
+        self.capacity.known_gpus()
     }
 
     /// Concurrency ceiling before pressure derating.

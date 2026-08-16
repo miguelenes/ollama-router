@@ -335,8 +335,16 @@ impl PullOrchestrator {
             &self.inner.config.policy,
             include_unhealthy,
             avoid_ram_pressure,
+            &|model| self.size_hint_for(model),
         )
         .map_err(OrchestratorError::from)
+    }
+
+    fn size_hint_for(&self, model: &str) -> Option<f64> {
+        let Some(reg) = &self.inner.registry else {
+            return None;
+        };
+        crate::routing::size_hint_from_catalog(&reg.aggregated_tags(), model)
     }
 
     fn delete_targets(
@@ -372,11 +380,17 @@ impl PullOrchestrator {
         let policy = &self.inner.config.policy;
         let mut ineligible = HashSet::new();
         for model in models {
-            let eligible: HashSet<String> =
-                placement_eligible_node_ids(&nodes, model, policy, true, false)
-                    .into_iter()
-                    .map(|id| id.as_str().to_string())
-                    .collect();
+            let eligible: HashSet<String> = placement_eligible_node_ids(
+                &nodes,
+                model,
+                policy,
+                true,
+                false,
+                self.size_hint_for(model),
+            )
+            .into_iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
             for node_id in targets.get(model).into_iter().flatten() {
                 if !eligible.contains(node_id.as_str()) {
                     ineligible.insert((node_id.as_str().to_string(), model.clone()));
@@ -398,7 +412,7 @@ impl PullOrchestrator {
         let policy = &self.inner.config.policy;
         let mut blocked = HashSet::new();
         for model in models {
-            let class = crate::routing::placement_class(model, policy);
+            let class = crate::routing::placement_class(model, policy, self.size_hint_for(model));
             for node_id in targets.get(model).into_iter().flatten() {
                 if let Some(node) = reg.get(node_id) {
                     if ram_pressure_blocks_placement(&node, class, policy, strict) {

@@ -85,9 +85,14 @@ pub struct Capacity {
 }
 
 impl Capacity {
-    /// Effective VRAM (0 when unset).
+    /// Effective VRAM (0 when unset). Prefer [`Self::known_vram_gb`] for ranking gates.
     pub fn vram_gb(&self) -> f64 {
         self.vram_gb.unwrap_or(0.0)
+    }
+
+    /// Measured/declared VRAM, or `None` when omitted (unknown — not a CPU).
+    pub fn known_vram_gb(&self) -> Option<f64> {
+        self.vram_gb
     }
 
     /// Effective RAM (0 when unset).
@@ -95,9 +100,14 @@ impl Capacity {
         self.ram_gb.unwrap_or(0.0)
     }
 
-    /// Effective GPU count (0 when unset).
+    /// Effective GPU count (0 when unset). Prefer [`Self::known_gpus`] for ranking.
     pub fn gpus(&self) -> u32 {
         self.gpus.unwrap_or(0)
+    }
+
+    /// Measured/declared GPU count, or `None` when omitted (unknown).
+    pub fn known_gpus(&self) -> Option<u32> {
+        self.gpus
     }
 
     /// Effective CPU cores (0 when unset).
