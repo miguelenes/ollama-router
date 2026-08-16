@@ -442,5 +442,5 @@
   "timezone": "utc",
   "title": "Alloy / Loki Components",
   "uid": "73e5f8ebc2c6a45cee18dc2a0066c125",
-  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin Loki pipeline ingest (not a log explorer). Compose grafana/alloy:v1.9.2. Additive stack dashboard — not the fleet home."
+  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin Loki pipeline ingest (not a log explorer). Compose grafana/alloy:v1.18.1. Additive stack dashboard — not the fleet home."
 }

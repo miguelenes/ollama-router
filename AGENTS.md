@@ -79,7 +79,7 @@ Workspace root: committed `Cargo.lock`, edition **2021**, rustc pin **1.97**.
 
 ## Stack lock
 
-- Axum **0.8** + Tokio + tower-http + reqwest `rustls-tls`
+- Axum **0.8** + Tokio + tower-http + reqwest `rustls`
 - **No** `native-tls`, **no** `openssl` / `openssl-sys`
 - tracing JSON (not `println!`, not Python structlog)
 - Verda/RunPod DTOs: serde **ignore unknown fields** (`deny_unknown_fields` is wrong)
@@ -99,7 +99,7 @@ task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
 task compose:mock   # optional canned CPU+GPU mock fleet on host :11435
 task agent:doctor   # read-only node-agent report for this machine
-task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97-slim-bookworm; GHA never installs task)
+task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97.1-slim-bookworm; GHA never installs task)
 ```
 
 Before finishing a coding task, run `task check` and (for Rust/test changes) `task coverage`; do not stop while either fails. Line coverage must stay **≥ 80%**.
@@ -122,7 +122,7 @@ cargo deny check advisories bans
 cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
 ```
 
-Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.
+Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.
 
 ## Learned User Preferences
 

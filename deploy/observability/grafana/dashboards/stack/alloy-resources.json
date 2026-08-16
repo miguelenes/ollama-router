@@ -359,5 +359,5 @@
   "timezone": "utc",
   "title": "Alloy / Resources",
   "uid": "d6a8574c31f3d7cb8f1345ec84d15a67",
-  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin rendered (compose runs grafana/alloy:v1.9.2). Additive stack dashboard — not the fleet home."
+  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin rendered (compose runs grafana/alloy:v1.18.1). Additive stack dashboard — not the fleet home."
 }

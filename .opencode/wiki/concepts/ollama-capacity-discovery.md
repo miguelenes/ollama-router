@@ -94,11 +94,11 @@ Release workflow [`.github/workflows/release-agent.yml`](../../../.github/workfl
 `task agent:release:github` dispatches that workflow and downloads artifacts
 into `dist/agent/` (`gh auth login` with repo + workflow scopes, or `GH_TOKEN`;
 push the branch/tag first; Darwin/Windows packages). Linux local
-recipes run in Docker `rust:1.97-slim-bookworm` (musl static-pie tarball via
+recipes run in Docker `rust:1.97.1-slim-bookworm` (musl static-pie tarball via
 `RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes`; gnu `.deb`
 is bookworm glibc). GHA compiles on native
 `ubuntu-latest` / `ubuntu-24.04-arm` and packages in the same job; the `.deb`
-job uses a `rust:1.97-slim-bookworm` container. GHA never installs Task.
+job uses a `rust:1.97.1-slim-bookworm` container. GHA never installs Task.
 `SHA256SUMS.txt` is an Actions artifact on every run, including
 `workflow_dispatch`; GitHub Release assets are `v*` tags only.
 

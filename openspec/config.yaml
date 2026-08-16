@@ -54,7 +54,7 @@ context: |
   is opt-in (`saturation_wait_seconds`, default 0).
 
   Stack: workspace Cargo.lock, thiserror in libraries, anyhow in the binary,
-  reqwest rustls-tls, no native-tls/openssl, tracing JSON, no unwrap/expect
+  reqwest rustls, no native-tls/openssl, tracing JSON, no unwrap/expect
   in non-test lib code. Admin bearer unset → 403, no default. Local runner
   is Task (Taskfile.yml); finish gate is sequential task check. Sensitivity:
   never log bodies, prompts, embeddings, zrok share tokens, Verda
@@ -105,7 +105,7 @@ operations:
       - "Never log request/response bodies, prompts, embeddings, zrok share tokens, Verda tokens/secrets, RUNPOD_API_KEY, SSH keys, or the admin bearer. Allowlist: node id, model name, request class, status, latency, reason codes, instance type, location, spot price, VRAM GiB."
       - "Do not add Thunder, public :11434 as healthy, enroll writes to fleet.yaml, Redis, HA replicas, or a Prometheus scrape of node-agent :11436."
       - "Hot Prometheus metrics must not label by model name; /metrics and /healthz stay unauthenticated."
-      - "thiserror in libraries, anyhow only in the binary, rustls-tls, serde ignore extras on Verda/RunPod/capacity JSON, deny_unknown_fields only on our YAML."
+      - "thiserror in libraries, anyhow only in the binary, rustls, serde ignore extras on Verda/RunPod/capacity JSON, deny_unknown_fields only on our YAML."
       - "Update .opencode/wiki and ollama-compat-proxy / routing-wlc / verda-spot-fleet / runpod-pod-fleet skills when tasks say so; update opencode-rag.json only if indexing include/exclude changes."
   archive:
     guidance:

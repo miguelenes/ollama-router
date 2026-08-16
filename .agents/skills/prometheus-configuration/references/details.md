@@ -39,7 +39,7 @@ helm install prometheus prometheus-community/kube-prometheus-stack \
 version: "3.8"
 services:
   prometheus:
-    image: prom/prometheus:v3.2
+    image: prom/prometheus:v3.13
     ports:
       - "9090:9090"
     volumes:

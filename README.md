@@ -187,7 +187,7 @@ task agent:build
 
 ### Node agent packages
 
-Release artifacts (`.github/workflows/release-agent.yml`; locally `task agent:release`, which on Linux uses Docker `rust:1.97-slim-bookworm`; `task agent:release:github` dispatches that workflow via `gh` for Darwin/Windows into `dist/agent/`):
+Release artifacts (`.github/workflows/release-agent.yml`; locally `task agent:release`, which on Linux uses Docker `rust:1.97.1-slim-bookworm`; `task agent:release:github` dispatches that workflow via `gh` for Darwin/Windows into `dist/agent/`):
 
 | OS | Install path | Portable |
 | --- | --- | --- |

@@ -31,7 +31,7 @@ Call `GetMcpTools` for this server before invoking if the schema is not already 
 
 ## This workspace (ollama-router)
 
-Stack lock: Axum **0.8**, Tokio, reqwest `rustls-tls`, tower-http, tracing, serde (ignore unknown fields), thiserror. No Axum 0.7 GraphQL/WS guides.
+Stack lock: Axum **0.8**, Tokio, reqwest `rustls`, tower-http, tracing, serde (ignore unknown fields), thiserror. No Axum 0.7 GraphQL/WS guides.
 
 Context7 IDs when using guides:
 

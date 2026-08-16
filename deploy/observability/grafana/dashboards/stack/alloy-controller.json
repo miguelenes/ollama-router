@@ -572,5 +572,5 @@
   "timezone": "utc",
   "title": "Alloy / Controller",
   "uid": "bf9f456aad7108b2c808dbd9973e386f",
-  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin rendered (compose runs grafana/alloy:v1.9.2). Additive stack dashboard — not the fleet home."
+  "description": "Vendored grafana/alloy v1.13.0 alloy-mixin rendered (compose runs grafana/alloy:v1.18.1). Additive stack dashboard — not the fleet home."
 }

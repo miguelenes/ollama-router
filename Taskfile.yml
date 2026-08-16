@@ -162,7 +162,7 @@ tasks:
         platforms: [windows]
 
   agent:release:linux:
-    desc: musl tarball for this host via Docker rust:1.97-slim-bookworm
+    desc: musl tarball for this host via Docker rust:1.97.1-slim-bookworm
     cmds:
       - cmd: |
           case "$(uname -m)" in
@@ -175,7 +175,7 @@ tasks:
         sh: [bash, -euo, pipefail, -c]
 
   agent:release:deb:
-    desc: gnu bookworm .deb for this host via Docker rust:1.97-slim-bookworm
+    desc: gnu bookworm .deb for this host via Docker rust:1.97.1-slim-bookworm
     cmds:
       - cmd: |
           case "$(uname -m)" in

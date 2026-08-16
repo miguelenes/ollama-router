@@ -5,7 +5,7 @@
 #     -t ollama-node-agent-release:local \
 #     crates/ollama-node-agent/packaging/linux
 
-FROM rust:1.97-slim-bookworm
+FROM rust:1.97.1-slim-bookworm
 
 ARG NFPM_VERSION=2.47.0
 

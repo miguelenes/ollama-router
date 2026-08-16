@@ -327,5 +327,5 @@
   "timezone": "utc",
   "title": "Alertmanager / Overview",
   "uid": "alertmanager-overview",
-  "description": "Vendored alertmanager-mixin Overview (monitoring-mixins). Compose prom/alertmanager:v0.28.1. Additive stack dashboard — not the fleet home."
+  "description": "Vendored alertmanager-mixin Overview (monitoring-mixins). Compose prom/alertmanager:v0.34.0. Additive stack dashboard — not the fleet home."
 }

@@ -96,7 +96,7 @@ jobs:
     name: deb-${{ matrix.arch }}
     needs: meta
     runs-on: ${{ matrix.runner }}
-    container: rust:1.97-slim-bookworm
+    container: rust:1.97.1-slim-bookworm
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -307,7 +307,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
@@ -338,6 +338,6 @@ jobs:
 
       - name: Attach to GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: artifacts/*

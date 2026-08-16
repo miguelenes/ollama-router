@@ -9,7 +9,7 @@ alwaysApply: true
 - `cargo fmt --all`. Local gate: `task check`. CI: `cargo clippy --workspace --all-targets -- -D warnings`.
 - Workspace `[workspace.lints.clippy] all = "deny"` matches that CI flag for rust-analyzer. Also deny `redundant_clone`, `large_enum_variant`, `needless_collect`. Do not enable `clippy::pedantic`. Use `#[expect(clippy::…, reason = "…")]` rather than `#[allow]`.
 - Libraries: `thiserror`. Binary only: `anyhow`. No `unwrap`/`expect` in non-test lib code.
-- TLS: reqwest `rustls-tls`. Never `native-tls` or `openssl` / `openssl-sys` (`deny.toml` bans them).
+- TLS: reqwest `rustls` feature (formerly `rustls-tls`). Never `native-tls` or `openssl` / `openssl-sys` (`deny.toml` bans them).
 - Logs: `tracing` JSON. Never `println!` in services.
 - Verda DTOs: serde **ignore extras**. Do not use `deny_unknown_fields`.
 - **Context7** before Axum / Tokio / reqwest / tower-http API work. Prefer docs.rs IDs for coverage, GitHub IDs when pinning a version. No Axum 0.8 skill exists — do not follow Axum 0.7 GraphQL/WS guides.
@@ -18,7 +18,7 @@ alwaysApply: true
   - reqwest: `/seanmonstar/reqwest` or `/websites/rs_reqwest`
   - tower-http: `/websites/rs_tower-http`
 - **docsrs MCP** for rustdoc JSON (signatures, fields, trait impls). Follow skill `docsrs-mcp`. Fallback when Context7 is quota-limited.
-- Dockerfile: multi-stage `rust:1.97-slim-bookworm` → `debian:bookworm-slim`, non-root. **HEALTHCHECK** `curl` to `/healthz` (never Python).
+- Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, non-root. **HEALTHCHECK** `curl` to `/healthz` (never Python).
 
 ```rust
 // BAD — panic in a library path

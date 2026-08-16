@@ -7,7 +7,7 @@
 # Listen :11434 inside the container. Compose publishes host 11435 → 11434.
 # rust-toolchain.toml is dockerignored; this image tag is the rustc pin.
 
-FROM rust:1.97-slim-bookworm AS chef
+FROM rust:1.97.1-slim-bookworm AS chef
 WORKDIR /app
 RUN cargo install cargo-chef --locked --version 0.1.78
 
