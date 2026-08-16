@@ -4,7 +4,7 @@ tags: [ollama-router, sqlite, operations, recovery]
 sourceRefs:
   - crates/ollama-router-core/src/jobs
   - crates/ollama-router-core/src/config
-lastReviewed: 2026-08-13
+lastReviewed: 2026-08-16
 ---
 
 # Durable Ollama router model operations
@@ -25,8 +25,11 @@ an identical request receives the existing job rather than duplicating work.
 
 When `policy.auto_pull_on_miss` is true, generate/chat/embed `model_missing`
 calls `PullOrchestrator::start_ensure` (fire-and-forget, same stampede key as
-admin ensure). Native `POST /api/pull` still waits via `ModelOrchestrator::ensure`.
-SQLite still stores metadata only — never pull error text or bodies.
+admin ensure). Native `POST /api/pull` and `DELETE /api/delete` stream fleet-job
+NDJSON (`application/x-ndjson`) via `start_ensure` / `start_delete` + a job
+watcher (`total`/`completed` from targets; final `success`). Already-absent
+delete is a success stream (`NoTargetNodes`). Admin ensure/delete stay JSON.
+SQLite still stores metadata only — never pull/delete error text or bodies.
 
 Terminal jobs remain queryable across restarts and use TTL/count retention.
 Pruning deletes both the in-memory view and the SQLite row. Call

@@ -386,7 +386,7 @@ impl PullOrchestrator {
                 for model in models {
                     let holders: Vec<NodeId> = snap
                         .iter()
-                        .filter(|n| n.healthy && n.has_model(model))
+                        .filter(|n| n.healthy && !n.draining && n.has_model(model))
                         .map(|n| n.id.clone())
                         .collect();
                     map.insert(model.clone(), holders);

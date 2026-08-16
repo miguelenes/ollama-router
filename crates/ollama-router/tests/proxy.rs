@@ -2789,3 +2789,148 @@ async fn api_version_is_router_owned() {
     assert!(state.registry.last_client_request_at(&gpu).is_none());
     assert_eq!(state.registry.inflight(&gpu), 0);
 }
+
+fn mock_delete<'a>(server: &'a MockServer, status: u16, body: &str) -> httpmock::Mock<'a> {
+    let body = body.to_string();
+    server.mock(|when, then| {
+        when.method(DELETE).path("/api/delete");
+        then.status(status)
+            .header("content-type", "application/json")
+            .body(body);
+    })
+}
+
+#[tokio::test]
+async fn fleet_delete_succeeds_when_upstream_holds_model() {
+    let server = MockServer::start();
+    let delete = mock_delete(&server, 200, r#"{"status":"success"}"#);
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[{"name":"llama3.2:3b"}]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let gpu = nid("gpu");
+    let (status, headers, body) = send(
+        state.clone(),
+        json_req(
+            Method::DELETE,
+            "/api/delete",
+            json!({"model": "llama3.2:3b"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).expect("ndjson"))
+        .collect();
+    assert!(
+        lines.iter().any(|l| l["status"] == "success"),
+        "expected success line in {lines:?}"
+    );
+    assert_eq!(delete.calls(), 1);
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+}
+
+#[tokio::test]
+async fn fleet_delete_already_absent_is_success_ndjson() {
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &[]);
+    let (status, headers, body) = send(
+        state,
+        json_req(Method::DELETE, "/api/delete", json!({"model": "gone:1b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.contains("\"status\":\"success\""));
+    assert!(!text.contains("\"error\""));
+}
+
+#[tokio::test]
+async fn fleet_delete_targets_both_holders() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let delete_a = mock_delete(&a, 200, r#"{"status":"success"}"#);
+    let delete_b = mock_delete(&b, 200, r#"{"status":"success"}"#);
+    for server in [&a, &b] {
+        server.mock(|when, then| {
+            when.method(GET).path("/api/tags");
+            then.status(200)
+                .header("content-type", "application/json")
+                .body(r#"{"models":[{"name":"qwen3:8b"}]}"#);
+        });
+    }
+    let state = state_from(fleet_config(vec![
+        node("gpu-a", &a.base_url(), 24.0, 1, None),
+        node("gpu-b", &b.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "gpu-a", &["qwen3:8b"]);
+    mark_ready(&state, "gpu-b", &["qwen3:8b"]);
+    let gpu = nid("gpu-a");
+    let (status, headers, body) = send(
+        state.clone(),
+        json_req(Method::DELETE, "/api/delete", json!({"model": "qwen3:8b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    assert!(text.lines().any(|l| l.contains("\"status\":\"success\"")));
+    assert_eq!(delete_a.calls(), 1);
+    assert_eq!(delete_b.calls(), 1);
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+}
+
+#[tokio::test]
+async fn delete_missing_model_is_400() {
+    let state = state_from(RouterConfig::default());
+    let (status, headers, body) =
+        send(state, json_req(Method::DELETE, "/api/delete", json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_ne!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("model is required"));
+}

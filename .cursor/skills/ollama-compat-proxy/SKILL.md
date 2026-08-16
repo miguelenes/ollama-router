@@ -31,7 +31,7 @@ auto Hub-pull); create/copy/push/blobs = 501.
 | `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation`. Use admin ensure / `POST /api/pull`. |
 | Other `/v1/*` | **404** OpenAI-shaped. Allowlist only. |
 | `POST /api/pull` | Fleet placement job; streams NDJSON (`application/x-ndjson`) with `total`/`completed` from targets and final `success`. Not a one-node Hub-pull. Not idle. |
-| `POST /api/delete` | Fleet orchestrator (JSON today). Prefer admin. |
+| `DELETE /api/delete` | Fleet delete job on healthy non-draining holders; streams NDJSON like pull (`total`/`completed`, final `success`). Already-absent is success. Not idle. Prefer admin for JSON. |
 | `GET /healthz` | Process up. |
 | `GET /readyz` | Healthy capacity (optional embedding-model gate). |
 | `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
@@ -70,10 +70,12 @@ that lacks the model (Ollama would native-pull). Never `unsafe_single_node_mutat
 
 Persist jobs in SQLite (see durable-model-operations wiki). Recover via live
 `/api/tags`. Default pull places on every healthy generate-class-eligible node.
-HTTP pull streams placement-job NDJSON; known insufficient disk skips a target
-(`skipped_disk`); unknown disk does not. Opt-in `bootstrap_desired_models`
-background-ensures desired tiers (known VRAM ∩ `min_vram_gb`). Do not log
-upstream bodies. Pull is not a stub NDJSON Hub-pull through one node.
+HTTP pull and delete stream fleet-job NDJSON; known insufficient disk skips a
+pull target (`skipped_disk`); unknown disk does not. Delete targets healthy
+non-draining holders; already-absent is a success stream. Opt-in
+`bootstrap_desired_models` background-ensures desired tiers (known VRAM ∩
+`min_vram_gb`). Do not log upstream bodies. Pull is not a stub NDJSON Hub-pull
+through one node.
 
 ## Never
 

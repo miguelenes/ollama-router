@@ -37,7 +37,8 @@ context: |
   pressure_level; do not reclassify RAM in the router.
 
   Ranking is utilization-first WLC, then RAM pressure, then known GPU util
-  (unknown util is not 0), then class preference. GPU-first: CPU is overflow
+  (unknown util is not 0), then known free VRAM (unknown free is not 0 full),
+  then class preference. GPU-first: CPU is overflow
   when the GPU is saturated or busier — do not invert SMALL/embed toward
   CPU-home. Omitted VRAM/GPU is unknown, not a measured CPU (YAML 0 /
   gpus: 0 is known CPU). MEDIUM/LARGE need known sufficient VRAM. EMBED
@@ -61,7 +62,7 @@ rules:
   proposal:
     - "Lead with the user-visible gap (CLI, list/infer/pull contract, ranking lie), not an internal refactor."
     - "State whether the change keeps the honest-fleet contract (list = union, infer = holders, pull = placement, miss = 503, 501 mutates) or explicitly reverses it."
-    - "Non-goals must name out-of-scope A-features unless reversing B: native Hub-pull through one node, default auto_pull_on_miss, 404-on-miss, agent-down unhealthy, public tunnels, Thunder/RunPod, vram_free/CPU util in the sort key, operator drain API."
+    - "Non-goals must name out-of-scope A-features unless reversing B: native Hub-pull through one node, default auto_pull_on_miss, 404-on-miss, agent-down unhealthy, public tunnels, Thunder/RunPod, CPU util in the sort key, operator drain API."
     - "Distinguish unknown VRAM from measured CPU (vram_gb = 0, gpus = 0) whenever ranking, placement, or inflight caps are in scope."
     - "Impact lists crates, deploy YAML, tests, and wiki/skills actually touched; mention sensitivity when HTTP, jobs, or health parse bodies."
     - "Keep Why short; put algorithm and Option-vs-zero in design, not the proposal."

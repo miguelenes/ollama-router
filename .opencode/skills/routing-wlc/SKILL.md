@@ -40,13 +40,14 @@ path (do not treat metrics `vram_gb()` → 0 as “CPU” for gates or preferenc
 1. `(inflight / base_cap) * inflight_weight`
 2. Pressure penalty: elevated +2, critical +8
 3. Known GPU util (busy band ≥ 50%; unknown is middle, **not** `0`)
-4. `capacity_preference` (class bias over **known** VRAM/GPU)
-5. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
+4. Known free VRAM (tight band < 2 GiB; unknown is middle, **not** `0` full)
+5. `capacity_preference` (class bias over **known** VRAM/GPU)
+6. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
 
 `base_cap` is the ceiling **before** pressure derating. Utilization **dominates**
-GPU-util bias and preference: a 48 GiB GPU at 2/8 (25%) beats a CPU at 1/2 (50%)
-for EMBED. Do not treat metrics `gpu_util_pct.unwrap_or(0)` as idle on the rank
-path.
+GPU-util / free-VRAM bias and preference: a 48 GiB GPU at 2/8 (25%) beats a CPU
+at 1/2 (50%) for EMBED. Do not treat metrics `gpu_util_pct.unwrap_or(0)` or
+`vram_free_gb.unwrap_or(0)` as idle/full on the rank path.
 
 ## Class preference
 

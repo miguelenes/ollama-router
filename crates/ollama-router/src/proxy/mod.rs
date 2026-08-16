@@ -27,7 +27,7 @@ use ollama_router_core::fleet::{
     normalize_model, AggregatedPs, AggregatedTag, InflightAdmit, NodeId, NodeSnapshot, Registry,
 };
 use ollama_router_core::http_util::reqwest_error_for_log;
-use ollama_router_core::jobs::{Job, JobId, JobStatus, ModelOrchestrator, OrchestratorError};
+use ollama_router_core::jobs::{Job, JobId, JobStatus, OrchestratorError};
 use ollama_router_core::routing::{
     blocked_only_by_reservations, classify_with_size_hint, estimate_request_ram_gb,
     estimate_request_vram_gb, is_inference_path, placement_eligible_node_ids, rank_nodes,
@@ -980,20 +980,16 @@ async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
         .orchestrator
         .get_job(&job.id)
         .unwrap_or_else(|| job.clone());
-    let stream = pull_job_ndjson_stream(watch_rx, snapshot, model.to_string());
-    let mut res = Response::new(Body::from_stream(stream));
-    *res.status_mut() = StatusCode::OK;
-    res.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/x-ndjson"),
-    );
-    res
+    let stream = job_ndjson_stream(watch_rx, snapshot, model.to_string(), "pulling", "pull");
+    ndjson_stream_response(stream)
 }
 
-fn pull_job_ndjson_stream(
+fn job_ndjson_stream(
     watch_rx: Option<tokio::sync::watch::Receiver<Job>>,
     initial: Job,
     model: String,
+    progress_status: &'static str,
+    kind_label: &'static str,
 ) -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
     let (tx, rx) = mpsc::channel::<Result<Bytes, std::io::Error>>(16);
     tokio::spawn(async move {
@@ -1011,7 +1007,7 @@ fn pull_job_ndjson_stream(
                 .count();
             let terminal = !job.status.is_incomplete();
             if last_completed != Some(completed) || terminal {
-                let progress = pull_progress_line(&job);
+                let progress = job_progress_line(&job, progress_status);
                 if send_ndjson_line(&tx, &progress).await.is_err() {
                     return;
                 }
@@ -1022,7 +1018,7 @@ fn pull_job_ndjson_stream(
                     JobStatus::Success => json!({"status": "success"}),
                     _ => json!({
                         "error": format!(
-                            "ollama-router: pull partial failure for model {model} [reason: partial_failure]"
+                            "ollama-router: {kind_label} partial failure for model {model} [reason: partial_failure]"
                         )
                     }),
                 };
@@ -1039,7 +1035,7 @@ fn pull_job_ndjson_stream(
                         JobStatus::Success => json!({"status": "success"}),
                         _ => json!({
                             "error": format!(
-                                "ollama-router: pull partial failure for model {model} [reason: partial_failure]"
+                                "ollama-router: {kind_label} partial failure for model {model} [reason: partial_failure]"
                             )
                         }),
                     };
@@ -1054,6 +1050,22 @@ fn pull_job_ndjson_stream(
     })
 }
 
+fn immediate_success_ndjson_stream() -> impl Stream<Item = Result<Bytes, std::io::Error>> + Send {
+    futures_util::stream::once(async { Ok(Bytes::from("{\"status\":\"success\"}\n")) })
+}
+
+fn ndjson_stream_response(
+    stream: impl Stream<Item = Result<Bytes, std::io::Error>> + Send + 'static,
+) -> Response {
+    let mut res = Response::new(Body::from_stream(stream));
+    *res.status_mut() = StatusCode::OK;
+    res.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/x-ndjson"),
+    );
+    res
+}
+
 async fn send_ndjson_line(
     tx: &mpsc::Sender<Result<Bytes, std::io::Error>>,
     value: &Value,
@@ -1065,7 +1077,7 @@ async fn send_ndjson_line(
     tx.send(Ok(Bytes::from(line))).await.map_err(|_| ())
 }
 
-fn pull_progress_line(job: &Job) -> Value {
+fn job_progress_line(job: &Job, status: &str) -> Value {
     let total = job.targets.len();
     let completed = job
         .targets
@@ -1073,7 +1085,7 @@ fn pull_progress_line(job: &Job) -> Value {
         .filter(|t| !t.status.is_incomplete())
         .count();
     json!({
-        "status": "pulling",
+        "status": status,
         "total": total,
         "completed": completed,
     })
@@ -1087,32 +1099,38 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
             None,
         );
     };
-    match state.orchestrator.delete(model).await {
-        Ok(job) if job.status == JobStatus::Success => {
-            json_error(StatusCode::OK, json!({"status": "success"}), None)
-        }
-        Ok(job) => json_error(
-            StatusCode::BAD_GATEWAY,
-            json!({
-                "error": format!("ollama-router: delete partial failure for model {model}"),
-                "job_id": job.id,
-            }),
-            None,
-        ),
+    let job = match state
+        .orchestrator
+        .start_delete(&[model.to_string()], TargetSpec::Placement, false)
+        .await
+    {
+        Ok(job) => job,
         Err(OrchestratorError::NoTargetNodes) => {
-            json_error(StatusCode::OK, json!({"status": "success"}), None)
+            return ndjson_stream_response(immediate_success_ndjson_stream());
         }
-        Err(OrchestratorError::NotConfigured) => json_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"error": "ollama-router: job orchestrator is not configured"}),
-            Some(state.config.policy.provision_retry_after_seconds),
-        ),
-        Err(other) => json_error(
-            StatusCode::BAD_GATEWAY,
-            json!({"error": format!("ollama-router: {other}")}),
-            None,
-        ),
-    }
+        Err(OrchestratorError::NotConfigured) => {
+            return json_error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({"error": "ollama-router: job orchestrator is not configured"}),
+                Some(state.config.policy.provision_retry_after_seconds),
+            );
+        }
+        Err(other) => {
+            return json_error(
+                StatusCode::BAD_GATEWAY,
+                json!({"error": format!("ollama-router: {other}")}),
+                None,
+            );
+        }
+    };
+
+    let watch_rx = state.orchestrator.subscribe_job(&job.id);
+    let snapshot = state
+        .orchestrator
+        .get_job(&job.id)
+        .unwrap_or_else(|| job.clone());
+    let stream = job_ndjson_stream(watch_rx, snapshot, model.to_string(), "deleting", "delete");
+    ndjson_stream_response(stream)
 }
 
 enum AutoPullResult {

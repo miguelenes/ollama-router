@@ -21,15 +21,17 @@ concurrency capacity (VRAM tier). The primary sort key is **utilization**
 | 1 | Utilization × weight | `inflight / base_cap` × `inflight_weight` |
 | 2 | Pressure penalty | RAM pressure: elevated +2, critical +8 |
 | 3 | Known GPU util | Soft band (busy ≥ 50%); unknown util is middle, **not** `0` |
-| 4 | Capacity preference | Class-aware VRAM affinity (see below) |
-| 5 | Warm score + RAM bias | 0 if loaded, 1 if cold; RAM available ratio tie-break |
+| 4 | Known free VRAM | Soft band (tight < 2 GiB); unknown free is middle, **not** `0` full |
+| 5 | Capacity preference | Class-aware VRAM affinity (see below) |
+| 6 | Warm score + RAM bias | 0 if loaded, 1 if cold; RAM available ratio tie-break |
 
 `base_inflight_cap` is the concurrency ceiling **before** pressure derating:
 explicit per-node `max_inflight`, fleet-wide `default_max_inflight`, or the
 VRAM-tier suggestion. Pressure is a scoring penalty — it does not inflate the
-utilization ratio. Inflight utilization **dominates** GPU-util bias and class
-preference. Metrics may still publish `gpu_util_pct=0` when `gpu_util_known` is
-false; ranking must not treat that as idle.
+utilization ratio. Inflight utilization **dominates** GPU-util and free-VRAM
+bias and class preference. Metrics may still publish `gpu_util_pct=0` /
+`vram_free_gb=0` when the matching `*_known` flag is false; ranking must not
+treat those as idle or full.
 
 ## Class preference (`capacity_preference`)
 

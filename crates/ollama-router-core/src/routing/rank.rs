@@ -277,6 +277,9 @@ pub(crate) fn capacity_preference(node: &NodeSnapshot, request_class: RequestCla
 /// Busy threshold for the known-GPU-util soft band (no YAML knob).
 const GPU_UTIL_BUSY_PCT: f64 = 50.0;
 
+/// Tight free-VRAM band (GiB); matches EMBED's existing headroom soft penalty.
+const VRAM_FREE_TIGHT_GIB: f64 = 2.0;
+
 /// Soft sort term for known GPU util. Unknown sits in the middle band — not `0`.
 fn gpu_util_key(node: &NodeSnapshot) -> f64 {
     if !node.gpu_util_known {
@@ -290,13 +293,26 @@ fn gpu_util_key(node: &NodeSnapshot) -> f64 {
     }
 }
 
+/// Soft sort term for known free VRAM. Unknown sits in the middle band — not `0` full.
+fn vram_free_key(node: &NodeSnapshot) -> f64 {
+    if !node.vram_free_known {
+        return 1.0;
+    }
+    let free = node.vram_free_gb.unwrap_or(0.0);
+    if free >= VRAM_FREE_TIGHT_GIB {
+        -free / 1000.0
+    } else {
+        2.0 - free / 1000.0
+    }
+}
+
 /// Sort key (lower is better). Sticky affinity may promote only on exact equality.
 pub fn load_key(
     node: &NodeSnapshot,
     request_class: RequestClass,
     model: Option<&str>,
     policy: &PolicyConfig,
-) -> (f64, f64, f64, f64, f64) {
+) -> (f64, f64, f64, f64, f64, f64) {
     let warm = if policy.prefer_warm_models {
         if let Some(model) = model {
             if node.has_model_loaded(model) {
@@ -324,6 +340,7 @@ pub fn load_key(
         utilization * policy.inflight_weight,
         pressure_penalty,
         gpu_util_key(node),
+        vram_free_key(node),
         preference,
         warm + available * 0.001,
     )
@@ -1218,6 +1235,171 @@ nodes:
         let mut snap = registry.snapshot();
         set_gpu_util(&mut snap, "unknown", None);
         set_gpu_util(&mut snap, "busy", Some(90.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
+    }
+
+    fn set_vram_free(snap: &mut [NodeSnapshot], id: &str, free_gb: Option<f64>) {
+        let node = snap.iter_mut().find(|n| n.id.as_str() == id).expect("node");
+        match free_gb {
+            Some(v) => {
+                node.vram_free_gb = Some(v);
+                node.vram_free_known = true;
+            }
+            None => {
+                node.vram_free_gb = None;
+                node.vram_free_known = false;
+            }
+        }
+    }
+
+    #[test]
+    fn known_higher_free_vram_beats_known_lower() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("roomy", 24.0, 1, Some(8)),
+                node("tight", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["roomy", "tight"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_vram_free(&mut snap, "roomy", Some(8.0));
+        set_vram_free(&mut snap, "tight", Some(0.5));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "roomy");
+    }
+
+    #[test]
+    fn inflight_dominates_free_vram() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("busy-roomy", 24.0, 1, Some(8)),
+                node("quiet-tight", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["busy-roomy", "quiet-tight"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        for _ in 0..2 {
+            registry.inflight_inc(&nid("busy-roomy"));
+        }
+        registry.inflight_inc(&nid("quiet-tight"));
+        let mut snap = registry.snapshot();
+        set_vram_free(&mut snap, "busy-roomy", Some(20.0));
+        set_vram_free(&mut snap, "quiet-tight", Some(0.5));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "quiet-tight");
+    }
+
+    #[test]
+    fn gpu_util_dominates_free_vram() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("idle-tight", 24.0, 1, Some(8)),
+                node("busy-roomy", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["idle-tight", "busy-roomy"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_gpu_util(&mut snap, "idle-tight", Some(10.0));
+        set_gpu_util(&mut snap, "busy-roomy", Some(80.0));
+        set_vram_free(&mut snap, "idle-tight", Some(1.0));
+        set_vram_free(&mut snap, "busy-roomy", Some(20.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "idle-tight");
+    }
+
+    #[test]
+    fn known_free_vram_beats_unknown() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("known", 24.0, 1, Some(8)),
+                node("unknown", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["known", "unknown"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_vram_free(&mut snap, "known", Some(8.0));
+        set_vram_free(&mut snap, "unknown", None);
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "known");
+    }
+
+    #[test]
+    fn unknown_free_vram_beats_known_zero() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("unknown", 24.0, 1, Some(8)),
+                node("full", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["unknown", "full"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_vram_free(&mut snap, "unknown", None);
+        set_vram_free(&mut snap, "full", Some(0.0));
         let outcome = rank_nodes(
             &snap,
             RequestClass::Medium,
