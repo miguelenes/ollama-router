@@ -11,7 +11,8 @@ use ollama_router::http::{make_app, AppState};
 use ollama_router::tunnel::TunnelFrontends;
 use ollama_router_core::config::{Capacity, HealthConfig, NodeConfig, RouterConfig};
 use ollama_router_core::fleet::{
-    routing_url_blocked_reason, FleetState, NodeId, VerdaInstanceId, VerdaNodePersist,
+    routing_url_blocked_reason, CloudInstanceId, FleetState, NodeId, RunpodNodePersist,
+    VerdaNodePersist,
 };
 use serde_json::{json, Value};
 use tokio_util::sync::CancellationToken;
@@ -232,6 +233,36 @@ async fn verda_routes_503_when_disabled() {
 }
 
 #[tokio::test]
+async fn runpod_routes_503_when_disabled() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    for path in [
+        "/router/v1/runpod/status",
+        "/router/v1/runpod/ensure",
+        "/router/v1/runpod/destroy",
+    ] {
+        let method = if path.ends_with("status") {
+            Method::GET
+        } else {
+            Method::POST
+        };
+        let (status, body) = send(
+            state.clone(),
+            json_req(method, path, json!({}), Some("secret")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{path}");
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("not enabled"),
+            "{path}: {parsed}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn verda_routes_forbidden_without_token() {
     let state = state_with_token(RouterConfig::default(), None);
     let (status, _) = send(
@@ -239,6 +270,22 @@ async fn verda_routes_forbidden_without_token() {
         json_req(
             Method::GET,
             "/router/v1/verda/status",
+            json!({}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn runpod_routes_forbidden_without_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    let (status, _) = send(
+        state,
+        json_req(
+            Method::GET,
+            "/router/v1/runpod/status",
             json!({}),
             Some("secret"),
         ),
@@ -403,19 +450,13 @@ async fn metrics_and_healthz_need_no_bearer() {
 }
 
 #[tokio::test]
-async fn no_thunder_or_runpod_admin_paths() {
+async fn no_thunder_admin_paths() {
     let state = state_with_token(RouterConfig::default(), Some("secret"));
-    for path in [
-        "/router/v1/thunder/status",
-        "/router/v1/runpod/status",
-        "/thunder",
-        "/runpod",
-    ] {
+    for path in ["/router/v1/thunder/status", "/thunder"] {
         let (status, body) = send(state.clone(), get_req(path, Some("secret"))).await;
         let text = String::from_utf8_lossy(&body);
         assert!(
-            !text.to_ascii_lowercase().contains("thundercompute")
-                && !text.to_ascii_lowercase().contains("runpod not enabled"),
+            !text.to_ascii_lowercase().contains("thundercompute"),
             "{path}: {text}"
         );
         assert_ne!(status, StatusCode::OK, "{path}");
@@ -571,7 +612,7 @@ async fn enroll_verda_updates_existing_row_not_duplicate() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state_path = dir.path().join("fleet-state.json");
     let fs = FleetState::new(&state_path);
-    let instance = VerdaInstanceId::parse("i-1").unwrap();
+    let instance = CloudInstanceId::parse("i-1").unwrap();
     fs.persist_verda_node(
         "verda-i-1",
         VerdaNodePersist {
@@ -647,11 +688,134 @@ async fn enroll_verda_unknown_is_404() {
 }
 
 #[tokio::test]
+async fn enroll_runpod_updates_existing_row_not_duplicate() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("fleet-state.json");
+    let fs = FleetState::new(&state_path);
+    let pod = CloudInstanceId::parse("pod-1").unwrap();
+    fs.persist_runpod_node(
+        "runpod-pod-1",
+        RunpodNodePersist {
+            url: "",
+            pod_id: &pod,
+            gpu_type: "NVIDIA L4",
+            data_center: Some("US-CA-2"),
+            cost_per_hour: None,
+            hostname: None,
+        },
+    )
+    .unwrap();
+    let config = RouterConfig {
+        state_path: state_path.clone(),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "runpod-pod-1",
+                "origin": "runpod",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let loaded = fs.load().unwrap();
+    assert_eq!(loaded.len(), 1);
+    let entry = &loaded["runpod-pod-1"];
+    assert_eq!(entry.managed_by.as_deref(), Some("runpod"));
+    assert_eq!(entry.runpod_pod_id.as_deref(), Some("pod-1"));
+    assert_eq!(entry.tunnel_backend.as_deref(), Some("zrok"));
+    assert!(entry
+        .url
+        .as_deref()
+        .is_some_and(|u| u.starts_with("http://127.0.0.1:")));
+}
+
+#[tokio::test]
+async fn enroll_runpod_unknown_is_404() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "runpod-missing",
+                "origin": "runpod",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["reason"], "unknown_runpod_node");
+}
+
+#[tokio::test]
+async fn enroll_runpod_not_owned() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state_path = dir.path().join("fleet-state.json");
+    let fs = FleetState::new(&state_path);
+    let instance = CloudInstanceId::parse("i-1").unwrap();
+    fs.persist_verda_node(
+        "verda-i-1",
+        VerdaNodePersist {
+            url: "",
+            instance_id: &instance,
+            location: "HEL1",
+            instance_type: "gpu",
+            os_volume_id: None,
+            spot_price_per_hour: None,
+            hostname: None,
+        },
+    )
+    .unwrap();
+    let config = RouterConfig {
+        state_path: state_path.clone(),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "verda-i-1",
+                "origin": "runpod",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["reason"], "runpod_not_owned");
+}
+
+#[tokio::test]
 async fn enroll_verda_matches_guest_hostname() {
     let dir = tempfile::tempdir().expect("tempdir");
     let state_path = dir.path().join("fleet-state.json");
     let fs = FleetState::new(&state_path);
-    let instance = VerdaInstanceId::parse("i-host").unwrap();
+    let instance = CloudInstanceId::parse("i-host").unwrap();
     fs.persist_verda_node(
         "verda-i-host",
         VerdaNodePersist {

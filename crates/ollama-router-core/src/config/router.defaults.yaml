@@ -81,13 +81,15 @@ timeouts:
   pull_seconds: 3600
 
 # Router-side zrok access frontend. `.zrok.io` public shares are always blocked;
-# extra suffixes are optional (hostname tunnels → public_url_blocked).
+# `.proxy.runpod.net` is blocked the same way (RunPod public proxy hostnames).
+# Extra suffixes are optional (hostname tunnels → public_url_blocked).
 # api_endpoint is the self-hosted controller (ZROK_API_ENDPOINT). Enable token
 # stays in the env named by enable_token_env — never a YAML literal.
 tunnel:
   zrok_bin: zrok
   public_share_suffixes:
     - .zrok.io
+    - .proxy.runpod.net
   api_endpoint: ""
   enable_token_env: ZROK_ENABLE_TOKEN
   access_bind: "127.0.0.1"
@@ -165,7 +167,8 @@ verda:
   denied_instance_types: []
   allowed_locations: []
   max_spot_price_per_hour: null
-  selection_strategy: cheapest
+  selection_strategy: best_value
+  min_lifetime_seconds: 0
   os_volume_gb: 100
   on_spot_discontinue: delete_permanently
   poll_interval_seconds: 10
@@ -173,3 +176,45 @@ verda:
   destroy_timeout_seconds: 120
   create_retries: 2
   create_backoff_base_seconds: 2.0
+
+# RunPod interruptible GPU pods — DISABLED by default.
+# API key stays in the env named by api_key_env (default RUNPOD_API_KEY);
+# never put secrets in this file. FleetState ownership is managed_by=runpod.
+runpod:
+  enabled: false
+  api_key_env: RUNPOD_API_KEY
+  base_url_v1: https://rest.runpod.io/v1
+  base_url_v2: https://api.runpod.io/v2
+  cloud_type: SECURE
+  interruptible: true
+  on_demand_fallback: false
+  image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+  container_disk_gb: 40
+  min_vram_gb: 8
+  max_vram_gb: 80
+  allowed_gpu_types: []
+  denied_gpu_types: []
+  allowed_data_centers: []
+  max_price_per_hour: null
+  auto_scale: true
+  auto_scale_min_instances: 0
+  auto_scale_max_instances: 2
+  idle_scale_down_enabled: true
+  idle_timeout_seconds: 900
+  idle_grace_after_create_seconds: 300
+  orphan_reclaim_enabled: true
+  orphan_reclaim_grace_seconds: 1800
+  destroy_on_shutdown: true
+  min_lifetime_seconds: 0
+  poll_interval_seconds: 10
+  create_timeout_seconds: 900
+  destroy_timeout_seconds: 120
+  create_retries: 2
+  create_backoff_base_seconds: 2.0
+  router_id_env: OLLAMA_ROUTER_ID
+  agent_package_url: null
+  agent_github_repo: miguelenes/ollama-router
+  agent_version: null
+  enroll_url: null
+  zrok_enable_token_env: ZROK_ENABLE_TOKEN
+  enroll_token_env: OLLAMA_ROUTER_ADMIN_TOKEN

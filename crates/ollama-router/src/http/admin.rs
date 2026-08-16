@@ -1,7 +1,7 @@
-//! Admin API: `/router/v1/models/*`, jobs, nodes, stats, reload, enroll, Verda.
+//! Admin API: `/router/v1/models/*`, jobs, nodes, stats, reload, enroll, Verda, RunPod.
 //!
 //! Bearer token comes from `OLLAMA_ROUTER_ADMIN_TOKEN` (captured on
-//! [`AppState`] construction). Unset → 403. No Thunder / RunPod routes.
+//! [`AppState`] construction). Unset → 403. No Thunder routes.
 
 use axum::extract::{Path, Query, State};
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
@@ -527,6 +527,7 @@ pub async fn undrain_node(
 pub enum EnrollOrigin {
     Fleet,
     Verda,
+    Runpod,
     Adopt,
 }
 
@@ -602,6 +603,40 @@ fn resolve_owned_verda_id(
         .ok_or(("unknown_verda_node", "unknown Verda node"))
 }
 
+/// Map a guest enroll id/hostname onto the FleetState RunPod row (`runpod-{pod_id}`).
+fn resolve_owned_runpod_id(
+    fleet_state: &FleetState,
+    requested: &NodeId,
+    hostname: Option<&str>,
+) -> Result<NodeId, (&'static str, &'static str)> {
+    if fleet_state.snapshot_entry(requested.as_str()).is_some() {
+        return Ok(requested.clone());
+    }
+    let host = hostname.map(str::trim).filter(|s| !s.is_empty());
+    let nodes = fleet_state.snapshot_runpod_nodes();
+    let mut found: Option<String> = None;
+    for (id, entry) in nodes {
+        let stored = entry
+            .hostname
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let hit = stored == Some(requested.as_str())
+            || (host.is_some() && stored == host)
+            || id == requested.as_str();
+        if !hit {
+            continue;
+        }
+        if found.is_some() {
+            return Err(("unknown_runpod_node", "unknown RunPod node"));
+        }
+        found = Some(id);
+    }
+    found
+        .and_then(|id| NodeId::parse(id).ok())
+        .ok_or(("unknown_runpod_node", "unknown RunPod node"))
+}
+
 fn reject_public_share(share_id: &str, suffixes: &[String]) -> Option<Response> {
     let trimmed = share_id.trim();
     if trimmed.is_empty() {
@@ -622,7 +657,7 @@ fn reject_public_share(share_id: &str, suffixes: &[String]) -> Option<Response> 
 }
 
 /// Hydrate reachability from zrok private share tokens. Never SSH.
-/// Does not write `fleet.yaml`. Production inventory stays fleet.yaml + FleetState + Verda.
+/// Does not write `fleet.yaml`. Production inventory stays fleet.yaml + FleetState + cloud.
 pub async fn enroll_node(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -697,9 +732,60 @@ pub async fn enroll_node(
                     });
             }
         }
+        EnrollOrigin::Runpod => {
+            id = match resolve_owned_runpod_id(&state.fleet_state, &id, body.hostname.as_deref()) {
+                Ok(resolved) => resolved,
+                Err((reason, error)) => {
+                    return enroll_reason(
+                        if reason == "fleet_state_unreadable" {
+                            StatusCode::BAD_GATEWAY
+                        } else if reason == "unknown_runpod_node" {
+                            StatusCode::NOT_FOUND
+                        } else {
+                            StatusCode::CONFLICT
+                        },
+                        reason,
+                        error,
+                    );
+                }
+            };
+            let Some(entry) = state.fleet_state.snapshot_entry(id.as_str()) else {
+                return enroll_reason(
+                    StatusCode::NOT_FOUND,
+                    "unknown_runpod_node",
+                    "unknown RunPod node",
+                );
+            };
+            if entry.managed_by.as_deref() != Some("runpod") {
+                return enroll_reason(
+                    StatusCode::CONFLICT,
+                    "runpod_not_owned",
+                    "FleetState row is not RunPod-owned",
+                );
+            }
+            if state.registry.origin(&id) == Some(NodeOrigin::Permanent) {
+                return enroll_reason(
+                    StatusCode::CONFLICT,
+                    "origin_mismatch",
+                    "node id is a fleet.yaml host",
+                );
+            }
+            if state.registry.get(&id).is_none() {
+                state
+                    .registry
+                    .upsert_runpod(ollama_router_core::config::NodeConfig {
+                        id: id.clone(),
+                        url: None,
+                        capacity_url: None,
+                        labels: Vec::new(),
+                        static_capacity: ollama_router_core::config::Capacity::default(),
+                        max_inflight: None,
+                    });
+            }
+        }
         EnrollOrigin::Fleet => match state.registry.origin(&id) {
             Some(NodeOrigin::Permanent) => {}
-            Some(NodeOrigin::Verda) => {
+            Some(NodeOrigin::Verda | NodeOrigin::Runpod) => {
                 return enroll_reason(
                     StatusCode::CONFLICT,
                     "origin_mismatch",
@@ -783,6 +869,7 @@ pub async fn enroll_node(
         origin = match body.origin {
             EnrollOrigin::Fleet => "fleet",
             EnrollOrigin::Verda => "verda",
+            EnrollOrigin::Runpod => "runpod",
             EnrollOrigin::Adopt => "adopt",
         },
         ollama_port,
@@ -940,6 +1027,10 @@ fn require_verda(state: &AppState) -> Option<&ollama_router_verda::VerdaManager>
     state.verda.as_ref()
 }
 
+fn require_runpod(state: &AppState) -> Option<&ollama_router_runpod::RunpodManager> {
+    state.runpod.as_ref()
+}
+
 pub async fn verda_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(resp) = require_admin(&state, &headers) {
         return resp;
@@ -980,6 +1071,63 @@ pub async fn verda_destroy(State(state): State<AppState>, headers: HeaderMap) ->
         return json_status(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error": "Verda Cloud not enabled (verda.enabled=false)"}),
+        );
+    };
+    let body = mgr.destroy_all_owned().await;
+    let failed = body
+        .get("failed")
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
+    json_status(
+        if failed {
+            StatusCode::MULTI_STATUS
+        } else {
+            StatusCode::OK
+        },
+        body,
+    )
+}
+
+pub async fn runpod_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Some(mgr) = require_runpod(&state) else {
+        return json_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "RunPod not enabled (runpod.enabled=false)"}),
+        );
+    };
+    Json(mgr.status().await).into_response()
+}
+
+pub async fn runpod_ensure(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Some(mgr) = require_runpod(&state) else {
+        return json_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "RunPod not enabled (runpod.enabled=false)"}),
+        );
+    };
+    match mgr.ensure(true).await {
+        Ok(body) => json_status(StatusCode::OK, body),
+        Err(err) => json_status(
+            StatusCode::BAD_GATEWAY,
+            json!({"error": err.to_string().chars().take(200).collect::<String>()}),
+        ),
+    }
+}
+
+pub async fn runpod_destroy(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Some(mgr) = require_runpod(&state) else {
+        return json_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error": "RunPod not enabled (runpod.enabled=false)"}),
         );
     };
     let body = mgr.destroy_all_owned().await;

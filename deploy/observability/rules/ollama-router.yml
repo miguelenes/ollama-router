@@ -33,10 +33,10 @@ groups:
         annotations:
           summary: Model-operation jobs are failing
 
-      - alert: VerdaEnsureFailed
-        expr: increase(ollama_router_verda_events_total{event="ensure_failed"}[10m]) > 0
+      - alert: CloudEnsureFailed
+        expr: increase(ollama_router_cloud_events_total{event="ensure_failed"}[10m]) > 0
         for: 0m
         labels:
           severity: warning
         annotations:
-          summary: Verda ensure or create_additional failed
+          summary: Cloud ensure or create_additional failed

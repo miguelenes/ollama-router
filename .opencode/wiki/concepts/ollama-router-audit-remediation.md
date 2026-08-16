@@ -5,7 +5,7 @@ sourceRefs:
   - crates/ollama-router-core
   - crates/ollama-router/src/proxy
   - crates/ollama-router-verda
-lastReviewed: 2026-08-14
+lastReviewed: 2026-08-16
 ---
 
 # Ollama router audit remediation
@@ -16,9 +16,10 @@ Preserve these five remediations in the Rust rewrite:
    Health probing starts and cancels with every node lifecycle change. Scale-out
    creates additional Verda instances rather than re-adopting the first.
    Failed teardown retains ownership for retry.
-2. **Coordinated cloud capacity.** A no-capacity request calls **Verda only**
-   (the sole provider). Respect `auto_scale_max_instances`. Coalesce in-flight
-   `ensure`. Never fan one demand event to multiple clouds.
+2. **Coordinated cloud capacity.** A no-capacity request fans through
+   `MultiProviderDemand` to the best-value eligible provider (Verda and/or
+   RunPod). Respect each provider's `auto_scale_max_instances`. Coalesce
+   in-flight scale-up. Never fan one demand event to multiple creates.
 3. **Safe proxy data plane.** Cap request bodies before buffering. Retries
    re-rank without already-failed nodes. Incomplete NDJSON telemetry is bounded.
    Upstream failures use gateway-shaped responses. Warm requests occupy inflight
@@ -29,7 +30,7 @@ Preserve these five remediations in the Rust rewrite:
 5. **Restart-safe model operations.** Pull/delete metadata and dedupe state
    persist in SQLite; incomplete work reconciles from live `/api/tags` on startup.
 
-These preserve env-first fleet config, tunnel/loopback-only Verda routing
+These preserve env-first fleet config, tunnel/loopback-only cloud routing
 (self-hosted zrok private share), and router-owned idle teardown. Related:
 [[concepts/ollama-router-product]],
 [[concepts/ollama-router-idle-scale-down]],

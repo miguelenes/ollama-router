@@ -105,6 +105,7 @@ pub fn inventory_lines(config: &RouterConfig) -> anyhow::Result<Vec<String>> {
         }
         let origin = match entry.managed_by.as_deref() {
             Some("verda") => "verda",
+            Some("runpod") => "runpod",
             _ if inventory_state_row_visible(entry) => "adopt",
             _ => continue,
         };
@@ -115,7 +116,7 @@ pub fn inventory_lines(config: &RouterConfig) -> anyhow::Result<Vec<String>> {
 }
 
 fn inventory_state_row_visible(entry: &FleetStateEntry) -> bool {
-    entry.managed_by.as_deref() == Some("verda")
+    matches!(entry.managed_by.as_deref(), Some("verda") | Some("runpod"))
         || entry
             .tunnel_backend
             .as_deref()
@@ -171,7 +172,9 @@ fn unix_now() -> f64 {
 mod tests {
     use super::*;
     use ollama_router_core::config::{Capacity, NodeConfig};
-    use ollama_router_core::fleet::{EnrollPersist, NodeId, VerdaInstanceId, VerdaNodePersist};
+    use ollama_router_core::fleet::{
+        CloudInstanceId, EnrollPersist, NodeId, RunpodNodePersist, VerdaNodePersist,
+    };
 
     fn nid(id: &str) -> NodeId {
         NodeId::parse(id).expect("id")
@@ -182,7 +185,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let state_path = dir.path().join("fleet-state.json");
         let store = FleetState::new(&state_path);
-        let iid = VerdaInstanceId::parse("abc").expect("iid");
+        let iid = CloudInstanceId::parse("abc").expect("iid");
         store
             .persist_verda_node(
                 "verda-abc",
@@ -222,6 +225,60 @@ mod tests {
                 .any(|l| l.starts_with("verda\tverda-abc\thttp://127.0.0.1:41990\t-\t")),
             "{lines:?}"
         );
+    }
+
+    #[test]
+    fn inventory_includes_runpod_origin_without_tokens() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let state_path = dir.path().join("fleet-state.json");
+        let store = FleetState::new(&state_path);
+        let pod = CloudInstanceId::parse("pod1").expect("pod");
+        store
+            .persist_runpod_node(
+                "runpod-pod1",
+                RunpodNodePersist {
+                    url: "http://127.0.0.1:41991",
+                    pod_id: &pod,
+                    gpu_type: "NVIDIA L4",
+                    data_center: Some("US-CA-2"),
+                    cost_per_hour: Some(0.39),
+                    hostname: Some("or-rp-test-1"),
+                },
+            )
+            .expect("persist");
+        store
+            .persist_enroll(
+                "runpod-pod1",
+                EnrollPersist {
+                    url: "http://127.0.0.1:41991",
+                    capacity_url: "http://127.0.0.1:41992",
+                    ollama_share_id: "super-secret-runpod-share",
+                    agent_share_id: "super-secret-runpod-agent",
+                },
+            )
+            .expect("enroll");
+        let config = RouterConfig {
+            nodes: vec![],
+            state_path,
+            ..RouterConfig::default()
+        };
+        let lines = inventory_lines(&config).expect("lines");
+        let joined = lines.join("\n");
+        assert!(
+            !joined.contains("secret"),
+            "share tokens must not appear: {joined}"
+        );
+        let row = lines
+            .iter()
+            .find(|l| l.starts_with("runpod\trunpod-pod1\t"))
+            .expect("runpod row");
+        let cols: Vec<&str> = row.split('\t').collect();
+        assert_eq!(cols.len(), 5, "{row}");
+        assert_eq!(cols[0], "runpod");
+        assert_eq!(cols[1], "runpod-pod1");
+        assert_eq!(cols[2], "http://127.0.0.1:41991");
+        assert_eq!(cols[3], "zrok");
+        assert_ne!(cols[4], "-");
     }
 
     #[test]

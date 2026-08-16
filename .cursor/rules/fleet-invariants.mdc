@@ -1,27 +1,31 @@
 ---
-description: fleet.yaml inventory, tunnel/loopback-only cloud URLs, Verda spots, idle from client forwards
+description: fleet.yaml inventory, tunnel/loopback-only cloud URLs, Verda+RunPod, idle from client forwards
 alwaysApply: true
 ---
 
 # Fleet invariants
 
-- Inventory: `OLLAMA_ROUTER_FLEET` (`fleet.yaml`) + FleetState + Verda. YAML
-  tunables only. Top-level YAML `nodes:` → hard config error (wrong file).
-- **Verda spots only.** No Thunder, no RunPod, no `THUNDER_*`/`RUNPOD_*`, no
-  `**/thunder/**` or `**/runpod/**`, no admin routes or tests for them.
+- Inventory: `OLLAMA_ROUTER_FLEET` (`fleet.yaml`) + FleetState + Verda/RunPod.
+  YAML tunables only. Top-level YAML `nodes:` → hard config error (wrong file).
+- **Cloud providers: Verda and RunPod.** No Thunder, no `THUNDER_*`, no
+  `**/thunder/**`, no Thunder admin routes or tests. RunPod is optional
+  (`runpod:`, `crates/ollama-router-runpod`, `RUNPOD_API_KEY`).
 - Cloud Ollama URLs are **tunnel/loopback-only** (self-hosted zrok **private**
   share). Public `:11434` → `public_url_blocked`, never healthy. Hostname public
   tunnels (`*.zrok.io` etc.) are also rejected. No public-proxy fallback.
   `fleet.yaml` LAN URLs stay direct HTTP (no tunnel on the same L2/L3).
-  No Tailscale join. Verda create does not SSH (startup script + enroll).
+  No Tailscale join. Cloud create does not SSH (Verda startup script / RunPod
+  `dockerStartCmd` + enroll).
 - Enroll learns the zrok share token via `POST /router/v1/nodes/enroll`
-  (fail-closed admin bearer). It must **not** write `fleet.yaml`. `origin=verda`
-  only updates an existing `managed_by=verda` FleetState row.
+  (fail-closed admin bearer). It must **not** write `fleet.yaml`.
+  `origin=verda` / `origin=runpod` only update an existing matching
+  `managed_by` FleetState row.
 - Idle: `last_client_request_at` only from `inflight_inc` on generate/chat/embed
   and OpenAI `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`.
   Health, `/api/ps`, capacity, admin, warm-keeper do not count. **Never destroy
-  fleet.yaml hosts.** Verda teardown uses `delete_permanently`. Failed
-  destroy retains FleetState ownership. Capacity miss → async `create_additional` + **503 + Retry-After**.
+  fleet.yaml hosts.** Verda teardown uses `delete_permanently`; RunPod
+  terminates pods (never stop-only). Failed destroy retains FleetState
+  ownership. Capacity miss → async `create_additional` + **503 + Retry-After**.
 - Admin `/router/v1/*`: bearer `OLLAMA_ROUTER_ADMIN_TOKEN`. Unset → 403, no default.
 
 ```yaml
@@ -30,7 +34,7 @@ nodes:
   - id: local
     url: http://127.0.0.1:11434
 
-# GOOD — tunables only; membership is fleet.yaml + FleetState + Verda
+# GOOD — tunables only; membership is fleet.yaml + FleetState + cloud managers
 policy:
   default_max_inflight: 2
 ```

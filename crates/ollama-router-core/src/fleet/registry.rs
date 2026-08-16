@@ -18,11 +18,12 @@ use crate::fleet::tags::{
     merge_catalog, merge_ps, AggregatedPs, AggregatedTag, CatalogNode, PsNode, PsRecord, TagRecord,
 };
 
-/// Where a live registry row came from. Reload never drops `Verda` rows.
+/// Where a live registry row came from. Reload never drops cloud rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeOrigin {
     Permanent,
     Verda,
+    Runpod,
 }
 
 impl NodeOrigin {
@@ -30,6 +31,7 @@ impl NodeOrigin {
         match self {
             Self::Permanent => "permanent",
             Self::Verda => "verda",
+            Self::Runpod => "runpod",
         }
     }
 }
@@ -560,7 +562,7 @@ impl Node {
         }
         match self.origin {
             NodeOrigin::Permanent => self.draining.load(Ordering::Acquire),
-            NodeOrigin::Verda => self.forget_pending.load(Ordering::Acquire),
+            NodeOrigin::Verda | NodeOrigin::Runpod => self.forget_pending.load(Ordering::Acquire),
         }
     }
 
@@ -955,7 +957,7 @@ impl Registry {
         let Some(node) = self.node(id) else {
             return InflightAdmit::Missing;
         };
-        if node.origin == NodeOrigin::Verda
+        if matches!(node.origin, NodeOrigin::Verda | NodeOrigin::Runpod)
             && (node.draining.load(Ordering::Acquire)
                 || node.forget_pending.load(Ordering::Acquire))
         {
@@ -1294,6 +1296,23 @@ impl Registry {
         }
     }
 
+    /// Insert or refresh a RunPod ephemeral. Does not overwrite Permanent or Verda.
+    pub fn upsert_runpod(&self, config: NodeConfig) {
+        let mut inner = self.write();
+        let id = config.id.clone();
+        match inner.nodes.get(&id) {
+            Some(existing) if existing.origin == NodeOrigin::Runpod => {
+                existing.apply_permanent_config(config);
+            }
+            Some(_) => {}
+            None => {
+                inner
+                    .nodes
+                    .insert(id, Arc::new(Node::from_config(config, NodeOrigin::Runpod)));
+            }
+        }
+    }
+
     /// Forget a Verda node. Permanent hosts are ignored.
     ///
     /// Sets forget-pending (not the same as idle-destroy `draining`). Drops the
@@ -1312,13 +1331,26 @@ impl Registry {
         self.remove_if_droppable(id, &node);
     }
 
-    /// Mark a Verda node draining so ranking stops selecting it. No-op for
+    /// Forget a RunPod node. Permanent / Verda hosts are ignored.
+    pub fn remove_runpod(&self, id: &NodeId) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        if node.origin != NodeOrigin::Runpod {
+            return;
+        }
+        node.forget_pending.store(true, Ordering::Release);
+        node.draining.store(true, Ordering::Release);
+        self.remove_if_droppable(id, &node);
+    }
+
+    /// Mark a cloud node draining so ranking stops selecting it. No-op for
     /// permanent hosts (`begin_remove_permanent` owns that path).
     pub fn set_draining(&self, id: &NodeId, draining: bool) -> bool {
         let Some(node) = self.node(id) else {
             return false;
         };
-        if node.origin != NodeOrigin::Verda {
+        if !matches!(node.origin, NodeOrigin::Verda | NodeOrigin::Runpod) {
             return false;
         }
         node.draining.store(draining, Ordering::Release);
@@ -1775,6 +1807,15 @@ mod tests {
         let spot = registry.get(&nid("spot-1")).unwrap();
         assert_eq!(spot.origin, NodeOrigin::Verda);
         assert!(!spot.draining);
+    }
+
+    #[test]
+    fn upsert_runpod_sets_runpod_origin() {
+        let registry = Registry::new(&RouterConfig::default());
+        registry.upsert_runpod(node("runpod-pod-1", 24.0, 1));
+        let snap = registry.get(&nid("runpod-pod-1")).unwrap();
+        assert_eq!(snap.origin, NodeOrigin::Runpod);
+        assert_eq!(snap.origin.as_str(), "runpod");
     }
 
     #[test]

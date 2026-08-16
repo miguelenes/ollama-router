@@ -34,7 +34,7 @@ Compose home dashboard is **Ollama Router** (`uid: ollama-router`). Do not repla
 | `ollama-router-nodes` | Nodes | `.../ollama-router-nodes.json` |
 | `ollama-router-jobs` | Model operations | `.../ollama-router-jobs.json` |
 | `ollama-router-logs` | Logs | `.../ollama-router-logs.json` |
-| `ollama-router-verda` | Verda | `.../ollama-router-verda.json` |
+| `ollama-router-verda` | Cloud | `.../ollama-router-verda.json` |
 | `compose-scrapes` etc. | Stack mixins | `.../dashboards/stack/` |
 
 Datasource UIDs in panels: `prometheus`, `loki`. Provisioning: `deploy/observability/grafana/provisioning/`.
@@ -45,5 +45,5 @@ Repo JSON under `deploy/observability/grafana/dashboards/` is GitOps source of t
 
 - Pull full dashboard JSON with `get_dashboard_by_uid` when a summary/property suffices.
 - Scrape or chart node-agent `:11436` (router scrape only).
-- Log prompts, bodies, Verda tokens, zrok share tokens, or admin bearer (sensitivity allowlist only).
+- Log prompts, bodies, Verda tokens, `RUNPOD_API_KEY`, zrok share tokens, or admin bearer (sensitivity allowlist only).
 - Invent panel queries — read existing panels or live metrics first.

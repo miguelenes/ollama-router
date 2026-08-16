@@ -17,6 +17,7 @@ clap.workspace = true
 futures-util.workspace = true
 http-body-util.workspace = true
 ollama-router-core = { path = "../ollama-router-core" }
+ollama-router-runpod = { path = "../ollama-router-runpod" }
 ollama-router-verda = { path = "../ollama-router-verda" }
 prometheus.workspace = true
 reqwest.workspace = true

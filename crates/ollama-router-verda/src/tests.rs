@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig, VerdaConfig};
 use ollama_router_core::fleet::{
-    EnrollPersist, FleetState, NodeId, Registry, VerdaInstanceId, VerdaNodePersist,
+    CloudInstanceId, EnrollPersist, FleetState, NodeId, Registry, VerdaNodePersist,
 };
 use ollama_router_core::routing::RoutingError;
 
@@ -489,7 +489,7 @@ async fn manager_destroy_permanent_and_idempotent() {
         then.status(204);
     });
     let (mgr, _, fs) = manager(&server, false);
-    let iid = VerdaInstanceId::parse("inst-1").unwrap();
+    let iid = CloudInstanceId::parse("inst-1").unwrap();
     fs.persist_verda_node(
         "verda-inst-1",
         VerdaNodePersist {
@@ -549,7 +549,7 @@ async fn manager_failed_destroy_retains_fleet_state() {
         then.status(500).json_body(json!({"error": "busy"}));
     });
     let (mgr, _, fs) = manager(&server, false);
-    let iid = VerdaInstanceId::parse("inst-keep").unwrap();
+    let iid = CloudInstanceId::parse("inst-keep").unwrap();
     fs.persist_verda_node(
         "verda-inst-keep",
         VerdaNodePersist {
@@ -904,7 +904,7 @@ async fn request_scale_up_after_cancel_does_not_spawn() {
 }
 
 fn persist_owned(fs: &FleetState, id: &str) {
-    let iid = VerdaInstanceId::parse(id).unwrap();
+    let iid = CloudInstanceId::parse(id).unwrap();
     fs.persist_verda_node(
         format!("verda-{id}"),
         VerdaNodePersist {
@@ -1591,6 +1591,9 @@ async fn create_additional_lock_caps_concurrent_creates() {
 
 #[test]
 fn forbidden_provider_symbols_absent() {
+    // Verda crate sources must not mention sibling Thunder. Shared
+    // `cloud/mod.rs` intentionally names all origins (incl. runpod) — exclude
+    // the runpod ban there and assert the multi-provider policy is present.
     let sources = [
         include_str!("manager.rs"),
         include_str!("client.rs"),
@@ -1599,15 +1602,31 @@ fn forbidden_provider_symbols_absent() {
         include_str!("images.rs"),
         include_str!("types.rs"),
         include_str!("lib.rs"),
-        include_str!("../../ollama-router-core/src/cloud/mod.rs"),
     ];
     for src in sources {
         let lower = src.to_ascii_lowercase();
-        assert!(!lower.contains("runpod"), "runpod must not appear");
+        assert!(
+            !lower.contains("runpod"),
+            "runpod must not appear in verda crate"
+        );
         assert!(!lower.contains("thunder"), "thunder must not appear");
         assert!(
             !src.contains("illumination-ollama-router"),
             "must not tag instances illumination-ollama-router"
         );
     }
+    let cloud = include_str!("../../ollama-router-core/src/cloud/mod.rs");
+    let cloud_lower = cloud.to_ascii_lowercase();
+    assert!(
+        !cloud_lower.contains("thunder"),
+        "thunder must not appear in cloud policy"
+    );
+    assert!(
+        cloud_lower.contains("runpod"),
+        "cloud policy must name the runpod origin"
+    );
+    assert!(
+        !cloud.contains("illumination-ollama-router"),
+        "must not tag instances illumination-ollama-router"
+    );
 }

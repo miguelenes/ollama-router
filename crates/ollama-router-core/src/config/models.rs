@@ -65,8 +65,8 @@ pub enum RequestClass {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SelectionStrategy {
-    #[default]
     Cheapest,
+    #[default]
     BestValue,
 }
 
@@ -649,7 +649,7 @@ fn default_zrok_bin() -> String {
 }
 
 fn default_public_share_suffixes() -> Vec<String> {
-    vec![".zrok.io".to_string()]
+    vec![".zrok.io".to_string(), ".proxy.runpod.net".to_string()]
 }
 
 fn default_enable_token_env() -> String {
@@ -818,6 +818,8 @@ pub struct VerdaConfig {
     pub allowed_locations: Vec<String>,
     pub max_spot_price_per_hour: Option<f64>,
     pub selection_strategy: SelectionStrategy,
+    /// Minimum age before an instance may be idle-torn-down (0 = no floor).
+    pub min_lifetime_seconds: f64,
     pub os_volume_gb: u32,
     pub on_spot_discontinue: String,
     pub poll_interval_seconds: f64,
@@ -871,7 +873,8 @@ impl Default for VerdaConfig {
             denied_instance_types: Vec::new(),
             allowed_locations: Vec::new(),
             max_spot_price_per_hour: None,
-            selection_strategy: SelectionStrategy::Cheapest,
+            selection_strategy: SelectionStrategy::BestValue,
+            min_lifetime_seconds: 0.0,
             os_volume_gb: 100,
             on_spot_discontinue: "delete_permanently".to_string(),
             poll_interval_seconds: 10.0,
@@ -938,9 +941,26 @@ impl VerdaConfig {
             }
         }
         if let Some(price) = self.demand_scale_price_per_hour {
+            reject_non_finite("demand_scale_price_per_hour", price)?;
             if price < 0.0 {
-                return Err(ConfigError::invalid("verda VRAM bounds must be >= 0"));
+                return Err(ConfigError::invalid(
+                    "verda.demand_scale_price_per_hour must be >= 0",
+                ));
             }
+        }
+        if let Some(price) = self.max_spot_price_per_hour {
+            reject_non_finite("max_spot_price_per_hour", price)?;
+            if price <= 0.0 {
+                return Err(ConfigError::invalid(
+                    "verda.max_spot_price_per_hour must be > 0 when set",
+                ));
+            }
+        }
+        reject_non_finite("min_lifetime_seconds", self.min_lifetime_seconds)?;
+        if self.min_lifetime_seconds < 0.0 {
+            return Err(ConfigError::invalid(
+                "verda.min_lifetime_seconds must be >= 0",
+            ));
         }
         if self.min_gpus < 1 {
             return Err(ConfigError::invalid("verda.min_gpus must be >= 1"));
@@ -1022,6 +1042,245 @@ fn system_hostname() -> String {
         .unwrap_or_else(|| "ollama-router".to_string())
 }
 
+fn default_runpod_image() -> String {
+    "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04".to_string()
+}
+
+/// RunPod interruptible GPU pod provisioning (opt-in; disabled by default).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RunpodConfig {
+    pub enabled: bool,
+    pub api_key_env: String,
+    pub base_url_v1: String,
+    pub base_url_v2: String,
+    pub cloud_type: String,
+    pub interruptible: bool,
+    pub on_demand_fallback: bool,
+    pub image: String,
+    pub container_disk_gb: u32,
+    pub min_vram_gb: f64,
+    pub max_vram_gb: Option<f64>,
+    pub allowed_gpu_types: Vec<String>,
+    pub denied_gpu_types: Vec<String>,
+    pub allowed_data_centers: Vec<String>,
+    pub max_price_per_hour: Option<f64>,
+    pub auto_scale: bool,
+    pub auto_scale_min_instances: u32,
+    pub auto_scale_max_instances: u32,
+    pub idle_scale_down_enabled: bool,
+    pub idle_timeout_seconds: f64,
+    pub idle_grace_after_create_seconds: f64,
+    pub orphan_reclaim_enabled: bool,
+    pub orphan_reclaim_grace_seconds: f64,
+    pub destroy_on_shutdown: bool,
+    /// Minimum age before an instance may be idle-torn-down (0 = no floor).
+    pub min_lifetime_seconds: f64,
+    pub poll_interval_seconds: f64,
+    pub create_timeout_seconds: f64,
+    pub destroy_timeout_seconds: f64,
+    pub create_retries: u32,
+    pub create_backoff_base_seconds: f64,
+    pub router_id_env: String,
+    pub agent_package_url: Option<String>,
+    pub agent_github_repo: String,
+    pub agent_version: Option<String>,
+    pub enroll_url: Option<String>,
+    pub zrok_enable_token_env: String,
+    pub enroll_token_env: String,
+}
+
+impl Default for RunpodConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key_env: "RUNPOD_API_KEY".to_string(),
+            base_url_v1: "https://rest.runpod.io/v1".to_string(),
+            base_url_v2: "https://api.runpod.io/v2".to_string(),
+            cloud_type: "SECURE".to_string(),
+            interruptible: true,
+            on_demand_fallback: false,
+            image: default_runpod_image(),
+            container_disk_gb: 40,
+            min_vram_gb: 8.0,
+            max_vram_gb: Some(80.0),
+            allowed_gpu_types: Vec::new(),
+            denied_gpu_types: Vec::new(),
+            allowed_data_centers: Vec::new(),
+            max_price_per_hour: None,
+            auto_scale: true,
+            auto_scale_min_instances: 0,
+            auto_scale_max_instances: 2,
+            idle_scale_down_enabled: true,
+            idle_timeout_seconds: 900.0,
+            idle_grace_after_create_seconds: 300.0,
+            orphan_reclaim_enabled: true,
+            orphan_reclaim_grace_seconds: 1800.0,
+            destroy_on_shutdown: true,
+            min_lifetime_seconds: 0.0,
+            poll_interval_seconds: 10.0,
+            create_timeout_seconds: 900.0,
+            destroy_timeout_seconds: 120.0,
+            create_retries: 2,
+            create_backoff_base_seconds: 2.0,
+            router_id_env: "OLLAMA_ROUTER_ID".to_string(),
+            agent_package_url: None,
+            agent_github_repo: "miguelenes/ollama-router".to_string(),
+            agent_version: None,
+            enroll_url: None,
+            zrok_enable_token_env: "ZROK_ENABLE_TOKEN".to_string(),
+            enroll_token_env: "OLLAMA_ROUTER_ADMIN_TOKEN".to_string(),
+        }
+    }
+}
+
+impl RunpodConfig {
+    pub(crate) fn validate(&self) -> Result<(), ConfigError> {
+        for (field, url) in [
+            ("runpod.base_url_v1", self.base_url_v1.as_str()),
+            ("runpod.base_url_v2", self.base_url_v2.as_str()),
+        ] {
+            let base = url.trim().trim_end_matches('/');
+            if !(base.starts_with("http://") || base.starts_with("https://")) {
+                return Err(ConfigError::invalid(format!(
+                    "{field} must be http(s): {base:?}"
+                )));
+            }
+        }
+        require_env_name(&self.api_key_env, "runpod.api_key_env")?;
+        require_env_name(&self.router_id_env, "runpod.router_id_env")?;
+        require_env_name(&self.zrok_enable_token_env, "runpod.zrok_enable_token_env")?;
+        require_env_name(&self.enroll_token_env, "runpod.enroll_token_env")?;
+        if self.cloud_type.trim().is_empty() {
+            return Err(ConfigError::invalid("runpod.cloud_type must be non-empty"));
+        }
+        if self.image.trim().is_empty() {
+            return Err(ConfigError::invalid("runpod.image must be non-empty"));
+        }
+        if self.container_disk_gb < 1 {
+            return Err(ConfigError::invalid(
+                "runpod.container_disk_gb must be >= 1",
+            ));
+        }
+        if let Some(raw) = self.enroll_url.as_deref() {
+            let _ = strip_http_url(raw, "runpod.enroll_url")?;
+        }
+        if let Some(raw) = self.agent_package_url.as_deref() {
+            let _ = strip_http_url(raw, "runpod.agent_package_url")?;
+        }
+        if self.agent_github_repo.trim().is_empty()
+            || !self.agent_github_repo.contains('/')
+            || self.agent_github_repo.contains("://")
+        {
+            return Err(ConfigError::invalid(
+                "runpod.agent_github_repo must be owner/repo",
+            ));
+        }
+        reject_non_finite("min_vram_gb", self.min_vram_gb)?;
+        if self.min_vram_gb < 0.0 {
+            return Err(ConfigError::invalid("runpod VRAM bounds must be >= 0"));
+        }
+        if let Some(max) = self.max_vram_gb {
+            reject_non_finite("max_vram_gb", max)?;
+            if max < 0.0 {
+                return Err(ConfigError::invalid("runpod VRAM bounds must be >= 0"));
+            }
+            if max < self.min_vram_gb {
+                return Err(ConfigError::invalid(
+                    "runpod.max_vram_gb must be >= min_vram_gb",
+                ));
+            }
+        }
+        if let Some(price) = self.max_price_per_hour {
+            reject_non_finite("max_price_per_hour", price)?;
+            if price <= 0.0 {
+                return Err(ConfigError::invalid(
+                    "runpod.max_price_per_hour must be > 0 when set",
+                ));
+            }
+        }
+        reject_non_finite("min_lifetime_seconds", self.min_lifetime_seconds)?;
+        if self.min_lifetime_seconds < 0.0 {
+            return Err(ConfigError::invalid(
+                "runpod.min_lifetime_seconds must be >= 0",
+            ));
+        }
+        for (name, value) in [
+            ("poll_interval_seconds", self.poll_interval_seconds),
+            ("create_timeout_seconds", self.create_timeout_seconds),
+            ("destroy_timeout_seconds", self.destroy_timeout_seconds),
+        ] {
+            reject_non_finite(name, value)?;
+            if value <= 0.0 {
+                return Err(ConfigError::invalid(format!(
+                    "runpod timings must be > 0 ({name})"
+                )));
+            }
+        }
+        if self.idle_timeout_seconds < 0.0
+            || self.idle_grace_after_create_seconds < 0.0
+            || self.create_backoff_base_seconds < 0.0
+            || self.orphan_reclaim_grace_seconds < 0.0
+        {
+            return Err(ConfigError::invalid("runpod idle timings must be >= 0"));
+        }
+        if self.orphan_reclaim_enabled
+            && self.orphan_reclaim_grace_seconds < self.create_timeout_seconds
+        {
+            return Err(ConfigError::invalid(
+                "runpod.orphan_reclaim_grace_seconds must be >= create_timeout_seconds",
+            ));
+        }
+        if self.auto_scale_max_instances > 0
+            && self.auto_scale_min_instances > self.auto_scale_max_instances
+        {
+            return Err(ConfigError::invalid("runpod auto_scale min must be <= max"));
+        }
+        Ok(())
+    }
+
+    /// API key from the env var named by `api_key_env`. Never log this.
+    pub fn api_key(&self, env: &impl super::env_source::EnvSource) -> Option<String> {
+        env.var(&self.api_key_env)
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// When enabled, require a non-empty API key in the named env var.
+    pub fn require_credentials_if_enabled(
+        &self,
+        env: &impl super::env_source::EnvSource,
+    ) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.api_key(env).is_some() {
+            return Ok(());
+        }
+        Err(ConfigError::invalid(format!(
+            "runpod.enabled requires env var {} to be set",
+            self.api_key_env
+        )))
+    }
+
+    /// Resolve the stable router identity: env var named by `router_id_env`, else hostname.
+    pub fn router_id(
+        &self,
+        env: &impl super::env_source::EnvSource,
+    ) -> crate::fleet::ids::RouterId {
+        if let Some(value) = env.var(&self.router_id_env) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                if let Ok(id) = crate::fleet::ids::RouterId::parse(trimmed) {
+                    return id;
+                }
+            }
+        }
+        crate::fleet::ids::RouterId::parse(system_hostname())
+            .unwrap_or_else(|_| crate::fleet::ids::RouterId::fallback())
+    }
+}
+
 /// YAML tunables only — no `nodes` field.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -1044,6 +1303,7 @@ pub struct YamlTunables {
     pub listen_host: String,
     pub listen_port: u16,
     pub verda: VerdaConfig,
+    pub runpod: RunpodConfig,
     pub upstream: UpstreamPoolConfig,
     pub tunnel: TunnelConfig,
 }
@@ -1069,6 +1329,7 @@ impl Default for YamlTunables {
             listen_host: "0.0.0.0".to_string(),
             listen_port: 11434,
             verda: VerdaConfig::default(),
+            runpod: RunpodConfig::default(),
             upstream: UpstreamPoolConfig::default(),
             tunnel: TunnelConfig::default(),
         }
@@ -1081,6 +1342,7 @@ impl YamlTunables {
         self.health.validate()?;
         self.timeouts.validate()?;
         self.verda.validate()?;
+        self.runpod.validate()?;
         self.upstream.validate()?;
         self.tunnel.validate()?;
         for tier in &self.desired_model_tiers {
@@ -1117,6 +1379,14 @@ impl YamlTunables {
         }
         Ok(())
     }
+
+    /// Fail closed when an enabled cloud provider lacks credentials in `env`.
+    pub(crate) fn require_cloud_credentials(
+        &self,
+        env: &impl super::env_source::EnvSource,
+    ) -> Result<(), ConfigError> {
+        self.runpod.require_credentials_if_enabled(env)
+    }
 }
 
 /// Top-level router configuration (tunables + fleet.yaml nodes).
@@ -1141,6 +1411,7 @@ pub struct RouterConfig {
     pub listen_host: String,
     pub listen_port: u16,
     pub verda: VerdaConfig,
+    pub runpod: RunpodConfig,
     pub upstream: UpstreamPoolConfig,
     pub fleet_path: PathBuf,
     pub fleet_missing_is_error: bool,
@@ -1176,6 +1447,7 @@ impl RouterConfig {
             listen_host: tunables.listen_host,
             listen_port: tunables.listen_port,
             verda: tunables.verda,
+            runpod: tunables.runpod,
             upstream: tunables.upstream,
             fleet_path: PathBuf::from("/etc/ollama-router/fleet.yaml"),
             fleet_missing_is_error: false,
@@ -1258,6 +1530,42 @@ mod tests {
             ..VerdaConfig::default()
         };
         assert!(negative_max.validate().is_err());
+    }
+
+    #[test]
+    fn verda_rejects_non_positive_max_spot_price() {
+        let zero = VerdaConfig {
+            max_spot_price_per_hour: Some(0.0),
+            ..VerdaConfig::default()
+        };
+        assert!(zero.validate().is_err());
+        let neg = VerdaConfig {
+            max_spot_price_per_hour: Some(-1.0),
+            ..VerdaConfig::default()
+        };
+        assert!(neg.validate().is_err());
+    }
+
+    #[test]
+    fn runpod_defaults_and_price_cap() {
+        let runpod = RunpodConfig::default();
+        runpod.validate().unwrap();
+        assert!(!runpod.enabled);
+        assert_eq!(runpod.min_lifetime_seconds, 0.0);
+        let zero = RunpodConfig {
+            max_price_per_hour: Some(0.0),
+            ..RunpodConfig::default()
+        };
+        assert!(zero.validate().is_err());
+    }
+
+    #[test]
+    fn selection_strategy_default_is_best_value() {
+        assert_eq!(SelectionStrategy::default(), SelectionStrategy::BestValue);
+        assert_eq!(
+            VerdaConfig::default().selection_strategy,
+            SelectionStrategy::BestValue
+        );
     }
 
     #[test]

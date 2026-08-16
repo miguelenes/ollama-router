@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Router container Loki logs (compose service router only; no node-agent). Alloy promotes the level stream label; node, reason, path, request_class, request_id, and timestamp are JSON fields — queries use | json, not invented Loki labels. line_format is allowlisted fields only (no prompt, messages, body, embeddings, tokens, Authorization, or secrets). All / .* is match-all; label_format treats missing JSON fields as empty so All does not hide lines that omit node or reason. Alloy sensitive_keys drop counts are not in Loki — do not fake them here.",
+  "description": "Router container Loki logs (compose service router only; no node-agent). Alloy promotes the level stream label; node, reason, path, request_class, request_id, and timestamp are JSON fields \u2014 queries use | json, not invented Loki labels. line_format is allowlisted fields only (no prompt, messages, body, embeddings, tokens, Authorization, or secrets). All / .* is match-all; label_format treats missing JSON fields as empty so All does not hide lines that omit node or reason. Alloy sensitive_keys drop counts are not in Loki \u2014 do not fake them here.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -16,7 +16,7 @@
       "tags": [],
       "targetBlank": false,
       "title": "Fleet overview",
-      "tooltip": "Fleet-wide RED and Verda",
+      "tooltip": "Fleet-wide RED and Cloud",
       "type": "link",
       "url": "/d/ollama-router/ollama-router"
     },
@@ -51,8 +51,8 @@
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
-      "title": "Verda",
-      "tooltip": "Spot lifecycle and cost",
+      "title": "Cloud",
+      "tooltip": "Cloud spot/pod lifecycle and cost",
       "type": "link",
       "url": "/d/ollama-router-verda/ollama-router-verda"
     }

@@ -12,7 +12,7 @@ use ollama_router::warm::run as run_warm;
 use ollama_router_core::config::{
     Capacity, HealthConfig, ModelTier, NodeConfig, PolicyConfig, RouterConfig,
 };
-use ollama_router_core::fleet::NodeId;
+use ollama_router_core::fleet::{NodeId, NodeOrigin};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -143,6 +143,93 @@ async fn public_share_hostname_blocked_without_http() {
             .is_some_and(|n| n.unhealthy_reason.as_deref() == Some("public_url_blocked"))
     })
     .await;
+    handle.abort();
+}
+
+#[tokio::test]
+async fn runpod_loopback_url_becomes_healthy() {
+    let server = MockServer::start();
+    let _tags = server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    let state = state_from(RouterConfig::default());
+    let id = nid("runpod-pod-1");
+    state.registry.upsert_runpod(NodeConfig {
+        id: id.clone(),
+        url: Some(server.base_url()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity {
+            vram_gb: Some(24.0),
+            ram_gb: Some(32.0),
+            gpus: Some(1),
+            cpu_cores: Some(8),
+        },
+        max_inflight: None,
+    });
+    assert_eq!(
+        state.registry.origin(&id),
+        Some(NodeOrigin::Runpod),
+        "upsert_runpod must set Runpod origin"
+    );
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(3), || {
+        state.registry.get(&id).is_some_and(|n| n.healthy)
+    })
+    .await;
+    handle.abort();
+}
+
+#[tokio::test]
+async fn runpod_public_pod_ip_stays_public_url_blocked() {
+    let state = state_from(RouterConfig::default());
+    let id = nid("runpod-pod-ip");
+    state.registry.upsert_runpod(NodeConfig {
+        id: id.clone(),
+        url: Some("http://8.8.8.8:11434".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    assert_eq!(state.registry.origin(&id), Some(NodeOrigin::Runpod));
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(2), || {
+        state
+            .registry
+            .get(&id)
+            .is_some_and(|n| n.unhealthy_reason.as_deref() == Some("public_url_blocked"))
+    })
+    .await;
+    assert!(!state.registry.get(&id).unwrap().healthy);
+    handle.abort();
+}
+
+#[tokio::test]
+async fn runpod_proxy_hostname_stays_public_url_blocked() {
+    let state = state_from(RouterConfig::default());
+    let id = nid("runpod-pod-proxy");
+    state.registry.upsert_runpod(NodeConfig {
+        id: id.clone(),
+        url: Some("https://something.proxy.runpod.net".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    assert_eq!(state.registry.origin(&id), Some(NodeOrigin::Runpod));
+    let handle = spawn_health(state.clone());
+    wait_until(Duration::from_secs(2), || {
+        state
+            .registry
+            .get(&id)
+            .is_some_and(|n| n.unhealthy_reason.as_deref() == Some("public_url_blocked"))
+    })
+    .await;
+    assert!(!state.registry.get(&id).unwrap().healthy);
     handle.abort();
 }
 

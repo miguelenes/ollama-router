@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Verda spot lifecycle and fleet-sum cost. Never destroy fleet.yaml hosts; Verda teardown is delete_permanently (failed destroy retains FleetState ownership). Idle timer is last_client_request_at from inflight_inc on generate/chat/embed only (health, /api/ps, capacity, admin, warm-keeper do not count). Capacity miss is 503 + Retry-After + async create_additional (not ensure). Cloud Ollama URLs are tunnel/loopback or RFC1918; public :11434 is public_url_blocked and never healthy. auto_scale min/max instance knobs are config, not Prometheus series — do not invent gauges. Per-node price/location/instance type are not exported. No model-name labels. Router /metrics only; do not add a production :11436 scrape.",
+  "description": "Cloud spot/pod lifecycle and fleet-sum cost by provider. Never destroy fleet.yaml hosts; cloud teardown is permanent delete/terminate (failed destroy retains FleetState ownership). Idle timer is last_client_request_at from inflight_inc on generate/chat/embed only (health, /api/ps, capacity, admin, warm-keeper do not count). Capacity miss is 503 + Retry-After + async create_additional (not ensure). Cloud Ollama URLs are tunnel/loopback or RFC1918; public :11434 is public_url_blocked and never healthy. auto_scale min/max instance knobs are config, not Prometheus series \u2014 do not invent gauges. Per-node price/location/instance type are not exported. No model-name labels. Router /metrics only; do not add a production :11436 scrape.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -16,7 +16,7 @@
       "tags": [],
       "targetBlank": false,
       "title": "Fleet overview",
-      "tooltip": "Fleet-wide RED and Verda",
+      "tooltip": "Fleet-wide RED and Cloud",
       "type": "link",
       "url": "/d/ollama-router/ollama-router"
     },
@@ -76,7 +76,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Live registry rows with origin verda. auto_scale_min_instances / auto_scale_max_instances are config knobs, not series.",
+      "description": "Live registry rows with cloud origin (verda/runpod). auto_scale_min_instances / auto_scale_max_instances are config knobs, not series.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -128,14 +128,14 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_instances",
+          "expr": "sum(ollama_router_cloud_instances{provider=~\"$provider\"})",
           "instant": true,
           "legendFormat": "instances",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Verda instances",
+      "title": "Cloud instances",
       "type": "stat"
     },
     {
@@ -143,7 +143,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Sum of known FleetState Verda spot prices. Per-node price/location/instance type are not exported.",
+      "description": "Sum of known FleetState cloud prices by provider. Per-node price/location/instance type are not exported.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -196,14 +196,14 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_spot_price_per_hour",
+          "expr": "sum(ollama_router_cloud_price_per_hour{provider=~\"$provider\"})",
           "instant": true,
           "legendFormat": "USD/h",
           "range": false,
           "refId": "A"
         }
       ],
-      "title": "Spot price / hour (fleet sum)",
+      "title": "Price / hour (fleet sum)",
       "type": "stat"
     },
     {
@@ -211,7 +211,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Same expression as alert VerdaEnsureFailed: increase(ollama_router_verda_events_total{event=\"ensure_failed\"}[10m]). Covers ensure and create_additional failures. No tokens in this panel.",
+      "description": "Same expression as alert CloudEnsureFailed: increase(ollama_router_cloud_events_total{event=\"ensure_failed\"}[10m]). Covers ensure and create_additional failures. No tokens in this panel.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -264,13 +264,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "increase(ollama_router_verda_events_total{event=\"ensure_failed\"}[10m])",
+          "expr": "sum(increase(ollama_router_cloud_events_total{event=\"ensure_failed\", provider=~\"$provider\"}[10m]))",
           "legendFormat": "ensure_failed",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "ensure_failed (VerdaEnsureFailed)",
+      "title": "ensure_failed (CloudEnsureFailed)",
       "type": "stat"
     },
     {
@@ -338,13 +338,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum by (event) (rate(ollama_router_verda_events_total{event=~\"idle|demand|create|destroy|adopt|ensure_failed\"}[5m]))",
-          "legendFormat": "{{event}}",
+          "expr": "sum by (event, provider) (rate(ollama_router_cloud_events_total{event=~\"idle|demand|create|destroy|adopt|ensure_failed\", provider=~\"$provider\"}[5m]))",
+          "legendFormat": "{{provider}} {{event}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Verda events",
+      "title": "Cloud events",
       "type": "timeseries"
     },
     {
@@ -438,7 +438,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "origin=verda only — not the Nodes inventory table, and not fleet.yaml hosts. These spots may be destroyed with delete_permanently; never destroy permanent inventory. vram_free/used plotted only when known=1 (free=0 with known=1 is a full GPU). Per-node price/location are not exported. GiB = bytes/1024³.",
+      "description": "origin=~\"$provider\" \u2014 not the Nodes inventory table, and not fleet.yaml hosts. These spots may be destroyed permanently; never destroy permanent inventory. vram_free/used plotted only when known=1 (free=0 with known=1 is a full GPU). Per-node price/location are not exported. GiB = bytes/1024\u00b3.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -594,7 +594,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -608,7 +608,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "ollama_router_node_healthy and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "ollama_router_node_healthy and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -622,7 +622,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "ollama_router_inflight and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "ollama_router_inflight and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -636,7 +636,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "ollama_router_node_vram_gb and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "ollama_router_node_vram_gb and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -650,7 +650,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "(ollama_router_node_vram_free_gb * on(node) (ollama_router_node_vram_free_known == 1)) and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "(ollama_router_node_vram_free_gb * on(node) (ollama_router_node_vram_free_known == 1)) and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -664,7 +664,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "(ollama_router_node_vram_used_gb * on(node) (ollama_router_node_vram_used_known == 1)) and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "(ollama_router_node_vram_used_gb * on(node) (ollama_router_node_vram_used_known == 1)) and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -678,7 +678,7 @@
           },
           "editorMode": "code",
           "exemplar": false,
-          "expr": "ollama_router_node_draining and on(node) ollama_router_node_info{origin=\"verda\", node=~\"$node\"}",
+          "expr": "ollama_router_node_draining and on(node) ollama_router_node_info{origin=~\"$provider\", node=~\"$node\"}",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -686,7 +686,7 @@
           "refId": "G"
         }
       ],
-      "title": "Verda spots (not fleet.yaml)",
+      "title": "Cloud spots (not fleet.yaml)",
       "transformations": [
         {
           "id": "joinByField",
@@ -782,7 +782,7 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Allowlisted fields only (timestamp, level, node, reason, request_id, path, request_class). origin is not an Alloy/Loki label — node is a JSON field. No tokens, prompts, bodies, or secrets. Router container only.",
+      "description": "Allowlisted fields only (timestamp, level, node, reason, request_id, path, request_class). origin is not an Alloy/Loki label \u2014 node is a JSON field. No tokens, prompts, bodies, or secrets. Router container only.",
       "gridPos": {
         "h": 10,
         "w": 24,
@@ -830,18 +830,51 @@
           "text": "All",
           "value": "$__all"
         },
+        "hide": 0,
+        "includeAll": true,
+        "label": "Provider",
+        "multi": true,
+        "name": "provider",
+        "options": [
+          {
+            "selected": true,
+            "text": "All",
+            "value": "$__all"
+          },
+          {
+            "selected": false,
+            "text": "verda",
+            "value": "verda"
+          },
+          {
+            "selected": false,
+            "text": "runpod",
+            "value": "runpod"
+          }
+        ],
+        "query": "verda,runpod",
+        "skipUrlSync": false,
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": {
+          "selected": true,
+          "text": "All",
+          "value": "$__all"
+        },
         "datasource": {
           "type": "prometheus",
           "uid": "prometheus"
         },
-        "definition": "label_values(ollama_router_node_info{origin=\"verda\"}, node)",
+        "definition": "label_values(ollama_router_node_info{origin=~\"$provider\"}, node)",
         "hide": 0,
         "includeAll": true,
-        "label": "Verda node",
+        "label": "Cloud node",
         "multi": true,
         "name": "node",
         "options": [],
-        "query": "label_values(ollama_router_node_info{origin=\"verda\"}, node)",
+        "query": "label_values(ollama_router_node_info{origin=~\"$provider\"}, node)",
         "refresh": 1,
         "regex": "",
         "skipUrlSync": false,
@@ -856,7 +889,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Ollama Router - Verda",
+  "title": "Ollama Router - Cloud",
   "uid": "ollama-router-verda",
   "version": 1,
   "weekStart": ""

@@ -1,0 +1,27 @@
+[package]
+name = "ollama-router-runpod"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "RunPod interruptible GPU pod client, selector, and fleet manager"
+
+[lints]
+workspace = true
+
+[dependencies]
+ollama-router-core = { path = "../ollama-router-core" }
+reqwest.workspace = true
+secrecy.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+httpmock.workspace = true
+proptest.workspace = true
+tempfile.workspace = true

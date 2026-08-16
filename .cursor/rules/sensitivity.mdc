@@ -8,7 +8,7 @@ alwaysApply: true
 Treat proxied Ollama traffic and cloud credentials as secrets.
 
 **Never log or persist:** request/response bodies, prompts, embeddings, `/api/chat`
-messages, Verda access/refresh tokens or client secrets,
+messages, Verda access/refresh tokens or client secrets, `RUNPOD_API_KEY`,
 SSH private keys, zrok share tokens, `OLLAMA_ROUTER_ADMIN_TOKEN`, capacity bearer tokens.
 
 **Allowlist:** node id, model name, request class, status code, latency, reason

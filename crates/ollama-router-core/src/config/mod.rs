@@ -14,6 +14,6 @@ pub use error::ConfigError;
 pub use load::{hydrate_node_urls, load_config, load_config_from, parse_yaml, DEFAULTS_YAML};
 pub use models::{
     http_url_for_bind, socket_addr_for_bind, Capacity, HealthConfig, ModelTier, NodeConfig,
-    PolicyConfig, RequestClass, RouterConfig, SelectionStrategy, TimeoutsConfig, TunnelConfig,
-    UpstreamPoolConfig, VerdaConfig, YamlTunables,
+    PolicyConfig, RequestClass, RouterConfig, RunpodConfig, SelectionStrategy, TimeoutsConfig,
+    TunnelConfig, UpstreamPoolConfig, VerdaConfig, YamlTunables,
 };

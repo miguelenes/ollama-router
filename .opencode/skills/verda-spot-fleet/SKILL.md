@@ -10,7 +10,8 @@ Read `.opencode/wiki/concepts/ollama-cloud-vram-guardrails.md`,
 `.opencode/wiki/concepts/ollama-router-node-tunnel.md`. Code:
 `crates/ollama-router-verda/`.
 
-Verda is the **only** cloud provider. Do not add Thunder or RunPod.
+This skill covers **Verda only**. RunPod is a separate provider — see
+`runpod-pod-fleet`. Do not add Thunder.
 
 ## Auth
 

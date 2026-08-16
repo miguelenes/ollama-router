@@ -1,5 +1,5 @@
 ---
-description: Unit tests for pure fns, httpmock for HTTP, no live Verda; ≥80% coverage
+description: Unit tests for pure fns, httpmock for HTTP, no live cloud; ≥80% coverage
 globs: "**/*.rs"
 alwaysApply: false
 ---
@@ -7,11 +7,13 @@ alwaysApply: false
 # Testing
 
 - Pure fns (selector, `rank_nodes`, `classify`, load key): unit tests **next to the module**.
-- HTTP (Verda API, Ollama upstream, capacity agent): **httpmock**. Never hit live Verda.
+- HTTP (Verda API, RunPod API, Ollama upstream, capacity agent): **httpmock**.
+  Never hit live Verda or RunPod.
 - Integration under workspace `tests/`.
-- **proptest** for Verda selector ranking and WLC sort (utilization dominates preference).
-- No Thunder/RunPod fixtures, types, env knobs, or route tests.
-- Do not log bodies/tokens in test output. Capacity fixtures must use GiB = `1024³`.
+- **proptest** for Verda/RunPod selector ranking and WLC sort (utilization dominates preference).
+- No Thunder fixtures, types, env knobs, or route tests. RunPod fixtures,
+  types, env knobs, and `/router/v1/runpod/*` route tests are allowed.
+- Do not log bodies/tokens/`RUNPOD_API_KEY` in test output. Capacity fixtures must use GiB = `1024³`.
 - **Coverage gate:** workspace line coverage **≥ 80%** via `task coverage`
   (`cargo llvm-cov --fail-under-lines 80`, ignore `**/main.rs`). Add tests when
   coverage drops; do not lower the threshold or exclude crates.

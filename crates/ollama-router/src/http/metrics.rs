@@ -8,8 +8,8 @@ use ollama_router_core::fleet::{
 };
 use ollama_router_core::jobs::{JobKind, JobObserver, JobStatus};
 use prometheus::{
-    Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec,
-    Opts, Registry as PromRegistry, TextEncoder,
+    GaugeVec, Histogram, HistogramOpts, HistogramVec, IntCounterVec, IntGauge, IntGaugeVec, Opts,
+    Registry as PromRegistry, TextEncoder,
 };
 use serde_json::{json, Value};
 
@@ -30,9 +30,9 @@ pub struct Metrics {
     node_info: GaugeVec,
     route_reason: IntCounterVec,
     probe_duration: Histogram,
-    verda_instances: IntGauge,
-    verda_spot_price: Gauge,
-    verda_events: IntCounterVec,
+    cloud_instances: IntGaugeVec,
+    cloud_price: GaugeVec,
+    cloud_events: IntCounterVec,
     job_operations: IntCounterVec,
     auto_pull_wait: IntCounterVec,
     aggregated_models: IntGauge,
@@ -140,7 +140,7 @@ impl Metrics {
         let node_info = GaugeVec::new(
             Opts::new(
                 "ollama_router_node_info",
-                "Fleet node identity (1). origin=permanent|verda; role=cpu|gpu|verda|origin",
+                "Fleet node identity (1). origin=permanent|verda|runpod; role=cpu|gpu|verda|runpod|origin",
             ),
             &["node", "origin", "role"],
         )?;
@@ -155,20 +155,26 @@ impl Metrics {
             "ollama_router_probe_duration_seconds",
             "Health probe wall time",
         ))?;
-        let verda_instances = IntGauge::new(
-            "ollama_router_verda_instances",
-            "Live registry nodes with origin Verda",
-        )?;
-        let verda_spot_price = Gauge::new(
-            "ollama_router_verda_spot_price_per_hour",
-            "Sum of known FleetState Verda spot prices",
-        )?;
-        let verda_events = IntCounterVec::new(
+        let cloud_instances = IntGaugeVec::new(
             Opts::new(
-                "ollama_router_verda_events_total",
-                "Verda fleet lifecycle events",
+                "ollama_router_cloud_instances",
+                "Live registry nodes with cloud origin, by provider",
             ),
-            &["event"],
+            &["provider"],
+        )?;
+        let cloud_price = GaugeVec::new(
+            Opts::new(
+                "ollama_router_cloud_price_per_hour",
+                "Sum of known FleetState cloud prices by provider",
+            ),
+            &["provider"],
+        )?;
+        let cloud_events = IntCounterVec::new(
+            Opts::new(
+                "ollama_router_cloud_events_total",
+                "Cloud fleet lifecycle events by provider",
+            ),
+            &["provider", "event"],
         )?;
         let job_operations = IntCounterVec::new(
             Opts::new(
@@ -374,9 +380,9 @@ impl Metrics {
         registry.register(Box::new(node_info.clone()))?;
         registry.register(Box::new(route_reason.clone()))?;
         registry.register(Box::new(probe_duration.clone()))?;
-        registry.register(Box::new(verda_instances.clone()))?;
-        registry.register(Box::new(verda_spot_price.clone()))?;
-        registry.register(Box::new(verda_events.clone()))?;
+        registry.register(Box::new(cloud_instances.clone()))?;
+        registry.register(Box::new(cloud_price.clone()))?;
+        registry.register(Box::new(cloud_events.clone()))?;
         registry.register(Box::new(job_operations.clone()))?;
         registry.register(Box::new(auto_pull_wait.clone()))?;
         registry.register(Box::new(aggregated_models.clone()))?;
@@ -421,9 +427,9 @@ impl Metrics {
             node_info,
             route_reason,
             probe_duration,
-            verda_instances,
-            verda_spot_price,
-            verda_events,
+            cloud_instances,
+            cloud_price,
+            cloud_events,
             job_operations,
             auto_pull_wait,
             aggregated_models,
@@ -490,10 +496,13 @@ impl Metrics {
         self.disk_available.reset();
         self.ollama_up.reset();
         self.tunnel_up.reset();
+        self.cloud_instances.reset();
+        self.cloud_price.reset();
 
         let snap = fleet.snapshot();
         let state_map = fleet_state.snapshot();
         let mut verda_n: i64 = 0;
+        let mut runpod_n: i64 = 0;
         for node in &snap {
             let id = node.id.as_str();
             let origin = node.origin.as_str();
@@ -589,20 +598,29 @@ impl Metrics {
                     set_g(&self.gpu_temp, &labels, temp);
                 }
             }
-            if node.origin == NodeOrigin::Verda {
-                verda_n += 1;
+            match node.origin {
+                NodeOrigin::Verda => verda_n += 1,
+                NodeOrigin::Runpod => runpod_n += 1,
+                NodeOrigin::Permanent => {}
             }
         }
-        self.verda_instances.set(verda_n);
+        set_i(&self.cloud_instances, &["verda"], verda_n);
+        set_i(&self.cloud_instances, &["runpod"], runpod_n);
         self.aggregated_models
             .set(fleet.aggregated_tags().len() as i64);
 
-        let price_sum = state_map
+        let verda_price = state_map
             .values()
             .filter(|entry| entry.managed_by.as_deref() == Some("verda"))
             .filter_map(|entry| entry.verda_spot_price_per_hour)
             .sum::<f64>();
-        self.verda_spot_price.set(price_sum);
+        let runpod_price = state_map
+            .values()
+            .filter(|entry| entry.managed_by.as_deref() == Some("runpod"))
+            .filter_map(|entry| entry.runpod_cost_per_hour)
+            .sum::<f64>();
+        set_g(&self.cloud_price, &["verda"], verda_price);
+        set_g(&self.cloud_price, &["runpod"], runpod_price);
     }
 
     /// Prometheus 0.0.4 text. Caller must [`Self::refresh_gauges`] first.
@@ -657,8 +675,14 @@ impl Metrics {
             "nodes": snap.len(),
             "healthy": snap.iter().filter(|n| n.healthy).count(),
             "inflight": inflight,
-            "verda_instances": self.verda_instances.get(),
-            "verda_spot_price_per_hour": self.verda_spot_price.get(),
+            "cloud_instances": {
+                "verda": gauge_i(&self.cloud_instances, &["verda"]),
+                "runpod": gauge_i(&self.cloud_instances, &["runpod"]),
+            },
+            "cloud_price_per_hour": {
+                "verda": gauge_f(&self.cloud_price, &["verda"]),
+                "runpod": gauge_f(&self.cloud_price, &["runpod"]),
+            },
         })
     }
 }
@@ -675,8 +699,11 @@ impl JobObserver for Metrics {
 }
 
 impl FleetEvents for Metrics {
-    fn verda_event(&self, event: &'static str) {
-        if let Ok(c) = self.verda_events.get_metric_with_label_values(&[event]) {
+    fn cloud_event(&self, provider: &'static str, event: &'static str) {
+        if let Ok(c) = self
+            .cloud_events
+            .get_metric_with_label_values(&[provider, event])
+        {
             c.inc();
         }
     }
@@ -694,8 +721,20 @@ fn set_i(vec: &IntGaugeVec, labels: &[&str], value: i64) {
     }
 }
 
+fn gauge_f(vec: &GaugeVec, labels: &[&str]) -> f64 {
+    vec.get_metric_with_label_values(labels)
+        .map(|g| g.get())
+        .unwrap_or(0.0)
+}
+
+fn gauge_i(vec: &IntGaugeVec, labels: &[&str]) -> i64 {
+    vec.get_metric_with_label_values(labels)
+        .map(|g| g.get())
+        .unwrap_or(0)
+}
+
 fn node_role(labels: &[String], origin: NodeOrigin) -> String {
-    for wanted in ["cpu", "gpu", "verda"] {
+    for wanted in ["cpu", "gpu", "verda", "runpod"] {
         if labels
             .iter()
             .any(|label| label.eq_ignore_ascii_case(wanted))

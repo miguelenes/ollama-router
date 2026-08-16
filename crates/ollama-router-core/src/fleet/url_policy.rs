@@ -374,6 +374,19 @@ mod tests {
     }
 
     #[test]
+    fn runpod_proxy_suffix_blocks_public_proxy_hostname() {
+        let extras = vec![".proxy.runpod.net".into()];
+        assert_eq!(
+            routing_url_blocked_reason("https://something.proxy.runpod.net", &extras),
+            Some("public_url_blocked")
+        );
+        assert!(!url_is_safe_overlay_with_suffixes(
+            "https://something.proxy.runpod.net",
+            &extras
+        ));
+    }
+
+    #[test]
     fn blocked_reason_unifies_ipv4_hostname_and_cgnat() {
         let extras = Vec::<String>::new();
         assert_eq!(

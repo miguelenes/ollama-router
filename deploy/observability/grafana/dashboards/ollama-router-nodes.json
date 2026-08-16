@@ -27,7 +27,7 @@
       "tags": [],
       "targetBlank": false,
       "title": "Fleet overview",
-      "tooltip": "Fleet-wide RED and Verda",
+      "tooltip": "Fleet-wide RED and Cloud",
       "type": "link",
       "url": "/d/ollama-router/ollama-router"
     },
@@ -62,8 +62,8 @@
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
-      "title": "Verda",
-      "tooltip": "Spot lifecycle and cost",
+      "title": "Cloud",
+      "tooltip": "Cloud spot/pod lifecycle and cost",
       "type": "link",
       "url": "/d/ollama-router-verda/ollama-router-verda"
     }
@@ -488,16 +488,16 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_instances",
-          "legendFormat": "verda",
+          "expr": "sum(ollama_router_cloud_instances)",
+          "legendFormat": "cloud",
           "refId": "A",
           "instant": true,
           "range": false
         }
       ],
-      "title": "Verda",
+      "title": "Cloud",
       "type": "stat",
-      "description": "Live registry rows with origin verda (fleet-wide, not filtered by $node)."
+      "description": "Live registry cloud rows (verda+runpod), fleet-wide, not filtered by $node."
     },
     {
       "datasource": {
@@ -552,7 +552,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_spot_price_per_hour",
+          "expr": "sum(ollama_router_cloud_price_per_hour)",
           "legendFormat": "USD/h",
           "refId": "A",
           "instant": true,
@@ -561,7 +561,7 @@
       ],
       "title": "USD/h",
       "type": "stat",
-      "description": "Sum of known FleetState Verda spot prices — not per node."
+      "description": "Sum of known FleetState cloud prices \u2014 not per node."
     },
     {
       "datasource": {
@@ -619,7 +619,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "count(ALERTS{alertname=~\"NoHealthyNodes|HighSaturation|ProbeStorm|JobFailures|VerdaEnsureFailed\", alertstate=\"firing\"}) or vector(0)",
+          "expr": "count(ALERTS{alertname=~\"NoHealthyNodes|HighSaturation|ProbeStorm|JobFailures|CloudEnsureFailed\", alertstate=\"firing\"}) or vector(0)",
           "legendFormat": "firing",
           "refId": "A",
           "instant": true,
@@ -628,7 +628,7 @@
       ],
       "title": "Alerts",
       "type": "stat",
-      "description": "Prometheus ALERTS for NoHealthyNodes, HighSaturation, ProbeStorm, JobFailures, VerdaEnsureFailed."
+      "description": "Prometheus ALERTS for NoHealthyNodes, HighSaturation, ProbeStorm, JobFailures, CloudEnsureFailed."
     },
     {
       "collapsed": false,
@@ -647,7 +647,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Join of router gauges on node. vram_free_gb=0 with vram_free_known=1 is a full GPU; known=0 is unknown (CPU/Metal). req/s and 5xx/s are 5m rates. models is on-disk count; loaded is /api/ps or agent count. Per-node Verda price/location are not exported.",
+      "description": "Join of router gauges on node. vram_free_gb=0 with vram_free_known=1 is a full GPU; known=0 is unknown (CPU/Metal). req/s and 5xx/s are 5m rates. models is on-disk count; loaded is /api/ps or agent count. Per-node cloud price/location are not exported.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1582,7 +1582,7 @@
       ],
       "title": "Probe latency p50 / p99 (global)",
       "type": "timeseries",
-      "description": "Health-probe wall time across all nodes combined — not per-node."
+      "description": "Health-probe wall time across all nodes combined \u2014 not per-node."
     },
     {
       "datasource": {
@@ -2319,7 +2319,7 @@
       ],
       "title": "VRAM GiB (total and free)",
       "type": "timeseries",
-      "description": "GiB = bytes/1024³. Unit is none (not SI GB). CPU nodes often have vram_gb=0. Free is plotted only when vram_free_known=1: 0 then means an empty GPU. When known=0, free is omitted (unknown, not empty)."
+      "description": "GiB = bytes/1024\u00b3. Unit is none (not SI GB). CPU nodes often have vram_gb=0. Free is plotted only when vram_free_known=1: 0 then means an empty GPU. When known=0, free is omitted (unknown, not empty)."
     },
     {
       "datasource": {
@@ -2433,7 +2433,7 @@
       ],
       "title": "Pressure (0 unknown / 1 ok / 2 elevated / 3 critical)",
       "type": "timeseries",
-      "description": "PressureLevel from the node agent; router does not reclassify. Elevated: score +2, inflight cap −1 (floor 1) unless explicit max. Critical: score +8, inflight cap 1; hard-reject when reject_on_ram_critical. Meaningful on CPU nodes even when VRAM is 0."
+      "description": "PressureLevel from the node agent; router does not reclassify. Elevated: score +2, inflight cap \u22121 (floor 1) unless explicit max. Critical: score +8, inflight cap 1; hard-reject when reject_on_ram_critical. Meaningful on CPU nodes even when VRAM is 0."
     },
     {
       "datasource": {
@@ -2557,9 +2557,9 @@
           "range": true
         }
       ],
-      "title": "Estimated VRAM used GiB (total − free, not the ledger)",
+      "title": "Estimated VRAM used GiB (total \u2212 free, not the ledger)",
       "type": "timeseries",
-      "description": "Estimate = total − free, gated on vram_free_known=1 (full GPU shows used=total). This is not reserved (ledger), loaded (/api/ps), or agent-reported used. See the VRAM ledger / placement row for those series. GiB = bytes/1024³."
+      "description": "Estimate = total \u2212 free, gated on vram_free_known=1 (full GPU shows used=total). This is not reserved (ledger), loaded (/api/ps), or agent-reported used. See the VRAM ledger / placement row for those series. GiB = bytes/1024\u00b3."
     },
     {
       "collapsed": true,
@@ -2633,7 +2633,7 @@
           ],
           "title": "Reserved VRAM GiB (ledger)",
           "type": "timeseries",
-          "description": "GiB = bytes/1024³. Reservation ledger (inflight admission holds), not /api/ps loaded and not agent used. 0 is an empty ledger, not unknown."
+          "description": "GiB = bytes/1024\u00b3. Reservation ledger (inflight admission holds), not /api/ps loaded and not agent used. 0 is an empty ledger, not unknown."
         },
         {
           "datasource": {
@@ -2695,7 +2695,7 @@
           ],
           "title": "Loaded VRAM GiB (/api/ps, known only)",
           "type": "timeseries",
-          "description": "GiB = bytes/1024³. Loaded is /api/ps merge. Plotted only when loaded_vram_known=1; omitted when unknown (not a zero load)."
+          "description": "GiB = bytes/1024\u00b3. Loaded is /api/ps merge. Plotted only when loaded_vram_known=1; omitted when unknown (not a zero load)."
         },
         {
           "datasource": {
@@ -2757,7 +2757,7 @@
           ],
           "title": "Used VRAM GiB (agent, known only)",
           "type": "timeseries",
-          "description": "GiB = bytes/1024³. Agent-reported used VRAM. Plotted only when vram_used_known=1; omitted when unknown (not empty)."
+          "description": "GiB = bytes/1024\u00b3. Agent-reported used VRAM. Plotted only when vram_used_known=1; omitted when unknown (not empty)."
         },
         {
           "datasource": {
@@ -2819,7 +2819,7 @@
           ],
           "title": "Free VRAM GiB (agent, known only)",
           "type": "timeseries",
-          "description": "GiB = bytes/1024³. Agent-reported free VRAM. Plotted only when vram_free_known=1: 0 then means a full GPU, not unknown. When known=0, the series is omitted."
+          "description": "GiB = bytes/1024\u00b3. Agent-reported free VRAM. Plotted only when vram_free_known=1: 0 then means a full GPU, not unknown. When known=0, the series is omitted."
         },
         {
           "datasource": {
@@ -2881,11 +2881,10 @@
           ],
           "title": "Total VRAM GiB",
           "type": "timeseries",
-          "description": "GiB = bytes/1024³. Effective VRAM capacity per node (router re-export). CPU/Metal without discrete inventory is often 0."
+          "description": "GiB = bytes/1024\u00b3. Effective VRAM capacity per node (router re-export). CPU/Metal without discrete inventory is often 0."
         }
       ]
     },
-
     {
       "collapsed": false,
       "gridPos": {
@@ -3582,7 +3581,7 @@
         "y": 143
       },
       "id": 34,
-      "title": "Verda",
+      "title": "Cloud",
       "type": "row",
       "panels": [
         {
@@ -3624,7 +3623,7 @@
             "legend": {
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": false
+              "showLegend": true
             },
             "tooltip": {
               "mode": "multi",
@@ -3638,15 +3637,15 @@
                 "uid": "prometheus"
               },
               "editorMode": "code",
-              "expr": "ollama_router_verda_instances",
-              "legendFormat": "instances",
+              "expr": "ollama_router_cloud_instances",
+              "legendFormat": "{{provider}}",
               "refId": "A",
               "range": true
             }
           ],
-          "title": "Verda instances",
+          "title": "Cloud instances",
           "type": "timeseries",
-          "description": "Count of live registry rows with origin verda. Per-node spot price, location, and instance type are not exported."
+          "description": "Count of live registry rows with cloud origin, by provider. Per-node price, location, and instance type are not exported."
         },
         {
           "datasource": {
@@ -3687,7 +3686,7 @@
             "legend": {
               "displayMode": "list",
               "placement": "bottom",
-              "showLegend": false
+              "showLegend": true
             },
             "tooltip": {
               "mode": "multi",
@@ -3701,15 +3700,15 @@
                 "uid": "prometheus"
               },
               "editorMode": "code",
-              "expr": "ollama_router_verda_spot_price_per_hour",
-              "legendFormat": "USD/h",
+              "expr": "ollama_router_cloud_price_per_hour",
+              "legendFormat": "{{provider}}",
               "refId": "A",
               "range": true
             }
           ],
-          "title": "Spot price / hour (fleet sum)",
+          "title": "Price / hour (fleet sum)",
           "type": "timeseries",
-          "description": "Sum of known FleetState Verda spot prices — not per node."
+          "description": "Sum of known FleetState cloud prices by provider \u2014 not per node."
         },
         {
           "datasource": {
@@ -3764,15 +3763,15 @@
                 "uid": "prometheus"
               },
               "editorMode": "code",
-              "expr": "sum by (event) (rate(ollama_router_verda_events_total[5m]))",
-              "legendFormat": "{{event}}",
+              "expr": "sum by (event, provider) (rate(ollama_router_cloud_events_total[5m]))",
+              "legendFormat": "{{provider}} {{event}}",
               "refId": "A",
               "range": true
             }
           ],
-          "title": "Verda lifecycle events",
+          "title": "Cloud lifecycle events",
           "type": "timeseries",
-          "description": "idle, demand, create, destroy, adopt, ensure_failed. Filter the inventory table with origin=verda."
+          "description": "idle, demand, create, destroy, adopt, ensure_failed by provider. Filter the inventory table with origin=verda or origin=runpod."
         }
       ]
     },
@@ -4006,7 +4005,7 @@
         "type": "loki",
         "uid": "loki"
       },
-      "description": "Short strip. Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines — they are not Prometheus labels. Filtered explorer: Logs dashboard (/d/ollama-router-logs).",
+      "description": "Short strip. Allowlisted fields only (node, level, reason, request_class, path, request_id). Alloy does not promote node to a stream label; $node matches the JSON field. When All is selected, allValue is .* . Model names may appear in some warn lines \u2014 they are not Prometheus labels. Filtered explorer: Logs dashboard (/d/ollama-router-logs).",
       "gridPos": {
         "h": 10,
         "w": 24,
@@ -4155,7 +4154,7 @@
   },
   "timepicker": {},
   "timezone": "browser",
-  "title": "Ollama Router — Nodes",
+  "title": "Ollama Router \u2014 Nodes",
   "uid": "ollama-router-nodes",
   "version": 2,
   "weekStart": ""

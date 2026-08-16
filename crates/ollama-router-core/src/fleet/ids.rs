@@ -1,4 +1,4 @@
-//! Stable identity newtypes for fleet membership and Verda instances.
+//! Stable identity newtypes for fleet membership and cloud instances.
 
 use std::fmt;
 use std::str::FromStr;
@@ -125,7 +125,7 @@ macro_rules! nonempty_id {
 }
 
 nonempty_id!(RouterId, "router id");
-nonempty_id!(VerdaInstanceId, "verda instance id");
+nonempty_id!(CloudInstanceId, "cloud instance id");
 
 impl RouterId {
     /// Fallback identity when `router_id_env` and hostname are unavailable.

@@ -1,11 +1,12 @@
 ---
 title: ollama-router product surface
-tags: [ollama-router, fleet, verda, embeddings]
+tags: [ollama-router, fleet, verda, runpod, embeddings]
 sourceRefs:
   - AGENTS.md
   - crates/ollama-router-core/src/config
   - crates/ollama-router/src/proxy
   - crates/ollama-router-verda
+  - crates/ollama-router-runpod
   - crates/ollama-router-core/src/jobs
 lastReviewed: 2026-08-16
 ---
@@ -14,7 +15,7 @@ lastReviewed: 2026-08-16
 
 Mixed CPU+GPU Ollama-compatible fleet proxy. The router process needs **no GPU**.
 One URL (`:11434`) load-balances embeddings and chat across `fleet.yaml` hosts
-and optional Verda GPU nodes over a self-hosted zrok **private** share.
+and optional Verda / RunPod GPU nodes over a self-hosted zrok **private** share.
 
 This crate is **not** Illumination. The Python tree at
 `/home/menes/Projects/illumination/services/ollama-router/` is a behavioral
@@ -25,8 +26,9 @@ spec — read it; do not paste it.
 | Source | Role |
 |--------|------|
 | `OLLAMA_ROUTER_FLEET` / `fleet.yaml` | Permanent CPU and GPU membership (LAN URLs are direct HTTP) |
-| `FleetState` | Durable enroll/tunnel URLs + Verda metadata |
+| `FleetState` | Durable enroll/tunnel URLs + Verda/RunPod metadata |
 | Verda manager | Dynamic spot GPUs (not in fleet.yaml) |
+| RunPod manager | Dynamic interruptible pods (not in fleet.yaml) |
 
 YAML overlays are **tunables-only**. Top-level `nodes:` is a hard config error
 (wrong file). Never destroy fleet.yaml hosts.
@@ -36,30 +38,38 @@ layered load that rejects YAML inventory.
 
 ## Cloud
 
-**Verda only.** NVIDIA spots, cheapest then smallest qualifying GPU inside
-inclusive `min_vram_gb` / `max_vram_gb` (default 8–80). Never advertise public
-`:11434` as healthy. Hostname public tunnels (`*.zrok.io` etc.) are also
-`public_url_blocked`.
+**Verda and RunPod** (each independently enabled). Thunder stays forbidden.
+Both select best value-for-money (lowest $/known VRAM GiB) inside inclusive
+`min_vram_gb` / `max_vram_gb` (default 8–80) with a per-provider hourly cap.
+Never advertise public `:11434` as healthy. Hostname public tunnels
+(`*.zrok.io` etc.) are also `public_url_blocked`.
 
-Path: Verda **startup script** (`startup_script_id` on instance create) installs
-`ollama-node-agent` and runs `setup` (Ollama + zrok sidecar). Reuse catalog
-script `ollama-router-agent-init` by name (or a configured id). Secrets are
-injected from router env at create into a 0600 guest env file — never committed,
-never echoed. `tunnel.api_endpoint` is also written as `ZROK_API_ENDPOINT` so
-the guest `zrok enable` talks to the self-hosted controller. The router may upload an SSH key to satisfy Verda's API but must
-**never SSH** (no russh, no public SSH wait). Register an Ollama URL only after
-enroll of the private share token and `/api/tags` succeed through the tunnel.
-Enroll timeout keeps FleetState ownership and returns an allowlisted reason.
-On tunneled hosts, Ollama and the node-agent bind **loopback**.
-`fleet.yaml` LAN URLs stay direct HTTP. Enroll must not write `fleet.yaml`.
-Preferred images stay Ubuntu 24 CUDA. See [[concepts/ollama-router-node-tunnel]].
+**Verda path:** startup script (`startup_script_id` on instance create)
+installs `ollama-node-agent` and runs `setup` (Ollama + zrok sidecar). Reuse
+catalog script `ollama-router-agent-init` by name (or a configured id). Secrets
+are injected from router env at create into a 0600 guest env file — never
+committed, never echoed. `tunnel.api_endpoint` is also written as
+`ZROK_API_ENDPOINT`. The router may upload an SSH key to satisfy Verda's API
+but must **never SSH**. Preferred images stay Ubuntu 24 CUDA.
 
-Demand scale-up calls the Verda manager only (no multi-provider ranking). It is
+**RunPod path:** stock CUDA-capable `image` + `dockerStartCmd` (agent bootstrap
+script via `bash -lc`). Container `env` carries only names from `*_env` knobs
+(zrok enable / enroll bearer) — memory-only, never logged. `ports: []`,
+`volumeInGb: 0`. No SSH. Teardown **terminates** the pod (never stop-only).
+
+Register an Ollama URL only after enroll of the private share token and
+`/api/tags` succeed through the tunnel. Enroll timeout keeps FleetState
+ownership and returns an allowlisted reason. On tunneled hosts, Ollama and the
+node-agent bind **loopback**. `fleet.yaml` LAN URLs stay direct HTTP. Enroll
+must not write `fleet.yaml`. See [[concepts/ollama-router-node-tunnel]].
+
+Demand scale-up goes through `MultiProviderDemand`: best cached value score
+among enabled providers below ceiling wins; stockout falls back. It is
 coalesced and asynchronous; the client receives **503 + Retry-After**.
 
-`CloudFleetManager` reconcile (in `crates/ollama-router-core/src/cloud/`): list →
-cleanup gone/terminal/evicted → orphan adopt → auto_scale up/down. Verda supplies
-the hooks.
+Cloud reconcile policy lives in `crates/ollama-router-core/src/cloud/`. Each
+manager owns its reconcile loop (floor create, idle/excess teardown, orphan
+reclaim).
 
 ## Capacity
 
@@ -97,7 +107,7 @@ There is no single-node mutate passthrough.
 
 Operator cordon: `POST /router/v1/nodes/{id}/drain` and `/undrain` (fail-closed
 bearer) exclude a node from ranking/placement without destroying it; separate
-from Verda/inventory `draining`. Opt-in `saturation_wait_seconds` (default `0`)
+from cloud/inventory `draining`. Opt-in `saturation_wait_seconds` (default `0`)
 waits for an inflight slot (`Notify` on `inflight_dec`) before the usual
 saturated 503.
 
@@ -124,8 +134,8 @@ same union; `created` is Unix seconds from the winning `modified_at` when
 parseable, else `0`. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
 `/api/create`, and `/api/blobs*` are rejected (`not_a_fleet_operation`).
 
-Cloud instance tag `managed_by=ollama-router`. FleetState `managed_by=verda`
-is an ownership discriminator, not the cloud tag.
+Cloud instance tag `managed_by=ollama-router` (Verda). FleetState
+`managed_by=verda` / `managed_by=runpod` is the ownership discriminator.
 
 ## Related
 

@@ -14,6 +14,7 @@ use ollama_router_core::config::RouterConfig;
 use ollama_router_core::fleet::{FleetState, Registry};
 use ollama_router_core::jobs::PullOrchestrator;
 use ollama_router_core::routing::{looks_like_embedding, DEFAULT_EMBED_MARKERS};
+use ollama_router_runpod::RunpodManager;
 use ollama_router_verda::VerdaManager;
 use serde::Serialize;
 use serde_json::json;
@@ -47,6 +48,7 @@ pub struct AppState {
     pub admin_token: Option<String>,
     pub fleet_state: Arc<FleetState>,
     pub verda: Option<VerdaManager>,
+    pub runpod: Option<RunpodManager>,
     pub metrics: Arc<Metrics>,
     pub tunnels: TunnelFrontends,
 }
@@ -91,6 +93,7 @@ impl AppState {
             admin_token,
             fleet_state,
             verda: None,
+            runpod: None,
             metrics,
             tunnels,
         })
@@ -258,6 +261,9 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/v1/verda/status", get(admin::verda_status))
         .route("/router/v1/verda/ensure", post(admin::verda_ensure))
         .route("/router/v1/verda/destroy", post(admin::verda_destroy))
+        .route("/router/v1/runpod/status", get(admin::runpod_status))
+        .route("/router/v1/runpod/ensure", post(admin::runpod_ensure))
+        .route("/router/v1/runpod/destroy", post(admin::runpod_destroy))
         .fallback(proxy_route)
         .with_state(state)
         .layer(TraceLayer::new_for_http().make_span_with(RequestIdMakeSpan))

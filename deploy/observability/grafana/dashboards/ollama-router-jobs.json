@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Pull/delete and auto_pull_on_miss. SQLite stores operation metadata only; no model-name series; terminal job counters only. JobObserver fires on success/failed — there is no in-flight/running-jobs gauge. WaitMetricGuard outcomes: forwarded, timeout, pull_finished; Drop default is disconnected (recorded only when auto_pull_wait_seconds > 0). Disk is models-dir free space as a pull placement signal, not a Nodes host-overview copy. Router /metrics only; do not add a production :11436 scrape.",
+  "description": "Pull/delete and auto_pull_on_miss. SQLite stores operation metadata only; no model-name series; terminal job counters only. JobObserver fires on success/failed \u2014 there is no in-flight/running-jobs gauge. WaitMetricGuard outcomes: forwarded, timeout, pull_finished; Drop default is disconnected (recorded only when auto_pull_wait_seconds > 0). Disk is models-dir free space as a pull placement signal, not a Nodes host-overview copy. Router /metrics only; do not add a production :11436 scrape.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -27,7 +27,7 @@
       "tags": [],
       "targetBlank": false,
       "title": "Fleet overview",
-      "tooltip": "Fleet-wide RED and Verda",
+      "tooltip": "Fleet-wide RED and Cloud",
       "type": "link",
       "url": "/d/ollama-router/ollama-router"
     },
@@ -62,8 +62,8 @@
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
-      "title": "Verda",
-      "tooltip": "Spot lifecycle and cost",
+      "title": "Cloud",
+      "tooltip": "Cloud spot/pod lifecycle and cost",
       "type": "link",
       "url": "/d/ollama-router-verda/ollama-router-verda"
     }
@@ -87,7 +87,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Terminal jobs only (kind=pull|delete, status=success|failed). JobObserver does not emit running or pending — do not infer in-flight work from this chart.",
+      "description": "Terminal jobs only (kind=pull|delete, status=success|failed). JobObserver does not emit running or pending \u2014 do not infer in-flight work from this chart.",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -166,7 +166,7 @@
               },
               {
                 "color": "orange",
-                "value": 1e-9
+                "value": 1e-09
               }
             ]
           },
@@ -628,7 +628,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Models-dir available GiB (bytes/1024³). Pulls write here — a placement/disk signal, not a copy of the Nodes host overview. Series is omitted when the agent has not reported disk.",
+      "description": "Models-dir available GiB (bytes/1024\u00b3). Pulls write here \u2014 a placement/disk signal, not a copy of the Nodes host overview. Series is omitted when the agent has not reported disk.",
       "fieldConfig": {
         "defaults": {
           "color": {

@@ -14,7 +14,7 @@ use super::knobs::apply_env_knobs;
 use super::merge::deep_merge;
 use super::models::{NodeConfig, RouterConfig, YamlTunables};
 
-/// Committed tunables (Verda-only; no inventory).
+/// Committed tunables (Verda + optional RunPod; no inventory).
 pub const DEFAULTS_YAML: &str = include_str!("router.defaults.yaml");
 
 const ENV_CONFIG: &str = "OLLAMA_ROUTER_CONFIG";
@@ -51,6 +51,7 @@ pub fn load_config_from(
 
     apply_env_knobs(&mut merged, env)?;
     let tunables = tunables_from_value(merged)?;
+    tunables.require_cloud_credentials(env)?;
 
     let (fleet_path, fleet_missing_is_error) = fleet_path_from_env(env);
     let mut nodes = load_fleet_nodes(&fleet_path, fleet_missing_is_error)?;
@@ -408,7 +409,43 @@ ready_requires_embedding_model: true
     #[test]
     fn thunder_overlay_is_unknown_field() {
         assert!(parse_yaml("thunder:\n  enabled: true\n").is_err());
-        assert!(parse_yaml("runpod:\n  enabled: true\n").is_err());
+    }
+
+    #[test]
+    fn runpod_overlay_parses_when_disabled() {
+        let config = parse_yaml("runpod:\n  enabled: false\n").unwrap();
+        assert!(!config.runpod.enabled);
+        assert_eq!(config.runpod.api_key_env, "RUNPOD_API_KEY");
+    }
+
+    #[test]
+    fn runpod_enabled_without_api_key_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(&overlay, "runpod:\n  enabled: true\n").unwrap();
+        let err = load_config_from(Some(&overlay), &env_with_state(&dir)).unwrap_err();
+        assert!(err.to_string().contains("RUNPOD_API_KEY"), "err={err}");
+    }
+
+    #[test]
+    fn runpod_enabled_with_api_key_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(&overlay, "runpod:\n  enabled: true\n").unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("RUNPOD_API_KEY".into(), "test-key".into());
+        let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert!(config.runpod.enabled);
+    }
+
+    #[test]
+    fn max_price_caps_must_be_positive() {
+        assert!(parse_yaml("verda:\n  max_spot_price_per_hour: 0\n").is_err());
+        assert!(parse_yaml("verda:\n  max_spot_price_per_hour: -1\n").is_err());
+        assert!(parse_yaml("runpod:\n  max_price_per_hour: 0\n").is_err());
+        assert!(parse_yaml("runpod:\n  max_price_per_hour: -0.5\n").is_err());
+        let ok = parse_yaml("verda:\n  max_spot_price_per_hour: 0.5\n").unwrap();
+        assert_eq!(ok.verda.max_spot_price_per_hour, Some(0.5));
     }
 
     #[test]
@@ -435,9 +472,16 @@ ready_requires_embedding_model: true
         let map = raw.as_mapping().unwrap();
         assert!(!map.contains_key("nodes"));
         assert!(!map.contains_key("thunder"));
-        assert!(!map.contains_key("runpod"));
+        assert!(map.contains_key("runpod"));
         let tunables: YamlTunables = serde_yaml::from_value(raw).unwrap();
         tunables.validate().unwrap();
+        assert!(!tunables.runpod.enabled);
+        assert_eq!(tunables.runpod.min_lifetime_seconds, 0.0);
+        assert_eq!(tunables.verda.min_lifetime_seconds, 0.0);
+        assert_eq!(
+            tunables.verda.selection_strategy,
+            crate::config::SelectionStrategy::BestValue
+        );
         assert_eq!(tunables.verda.min_vram_gb, 8.0);
         assert_eq!(tunables.verda.max_vram_gb, Some(80.0));
         assert_eq!(tunables.verda.ssh_key_name, "ollama-router");
@@ -447,6 +491,11 @@ ready_requires_embedding_model: true
             .public_share_suffixes
             .iter()
             .any(|s| s.contains("zrok.io")));
+        assert!(tunables
+            .tunnel
+            .public_share_suffixes
+            .iter()
+            .any(|s| s.contains("proxy.runpod.net")));
         assert!(tunables.tunnel.api_endpoint.trim().is_empty());
         assert_eq!(tunables.tunnel.enable_token_env, "ZROK_ENABLE_TOKEN");
         assert_eq!(tunables.tunnel.access_bind, "127.0.0.1");
@@ -621,6 +670,7 @@ ready_requires_embedding_model: true
         let text = fs::read_to_string(&root).unwrap();
         assert!(!text.lines().any(|l| l.starts_with("nodes:")));
         assert!(!text.lines().any(|l| l.starts_with("thunder:")));
+        // Commented `# runpod:` example lines are allowed; active top-level key is not.
         assert!(!text.lines().any(|l| l.starts_with("runpod:")));
     }
 

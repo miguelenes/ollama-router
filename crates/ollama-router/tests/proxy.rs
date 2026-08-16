@@ -11,7 +11,9 @@ use futures_util::stream;
 use http_body_util::BodyExt;
 use httpmock::prelude::*;
 use ollama_router::http::{make_app, AppState};
-use ollama_router_core::cloud::DemandScale;
+use ollama_router_core::cloud::{
+    CachedOffer, CloudProviderHandle, DemandScale, MultiProviderDemand,
+};
 use ollama_router_core::config::{
     Capacity, NodeConfig, PolicyConfig, RouterConfig, TimeoutsConfig, UpstreamPoolConfig,
 };
@@ -1053,6 +1055,165 @@ impl DemandScale for RecordingDemand {
         assert_eq!(reason, RoutingError::Capacity);
         self.called.store(true, Ordering::SeqCst);
     }
+}
+
+struct FakeProviderHandle {
+    name: &'static str,
+    offer: Option<CachedOffer>,
+    below_ceiling: bool,
+    hits: AtomicU32,
+}
+
+impl CloudProviderHandle for FakeProviderHandle {
+    fn provider(&self) -> &'static str {
+        self.name
+    }
+
+    fn request_scale_up(&self, reason: RoutingError) {
+        assert!(
+            matches!(
+                reason,
+                RoutingError::Capacity | RoutingError::Saturated | RoutingError::NoHealthy
+            ),
+            "{reason:?}"
+        );
+        self.hits.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn cached_best_offer(&self) -> Option<CachedOffer> {
+        self.offer
+    }
+
+    fn below_ceiling(&self) -> bool {
+        self.below_ceiling
+    }
+}
+
+#[tokio::test]
+async fn capacity_miss_triggers_one_provider_create_with_retry_after() {
+    let handle = Arc::new(FakeProviderHandle {
+        name: "runpod",
+        offer: Some(CachedOffer {
+            hourly_price: 0.39,
+            vram_gb: Some(24.0),
+        }),
+        below_ceiling: true,
+        hits: AtomicU32::new(0),
+    });
+    let demand = Arc::new(MultiProviderDemand::new(vec![
+        handle.clone() as Arc<dyn CloudProviderHandle>
+    ]));
+    let mut state = state_from(fleet_config(vec![node(
+        "gpu",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    state.demand = demand;
+    // Model is on disk but the 8 GiB node cannot place a 405B-class request.
+    mark_ready(&state, "gpu", &["llama3.1:405b"]);
+    let (status, headers, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/chat",
+            json!({"model": "llama3.1:405b", "messages": [{"role": "user", "content": "hi"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("30")
+    );
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_str().unwrap();
+    assert!(error.contains("insufficient_capacity"), "{error}");
+    assert_eq!(handle.hits.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn non_client_traffic_never_triggers_demand_scale() {
+    let handle = Arc::new(FakeProviderHandle {
+        name: "runpod",
+        offer: Some(CachedOffer {
+            hourly_price: 0.39,
+            vram_gb: Some(24.0),
+        }),
+        below_ceiling: true,
+        hits: AtomicU32::new(0),
+    });
+    let demand = Arc::new(MultiProviderDemand::new(vec![
+        handle.clone() as Arc<dyn CloudProviderHandle>
+    ]));
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/ps");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    let mut state = state_from(RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1, None)],
+        policy: PolicyConfig {
+            model_warm_enabled: true,
+            model_warm_interval_seconds: 0.05,
+            model_warm_cooldown_seconds: 0.05,
+            model_warm_min_free_vram_gb: 0.0,
+            ..PolicyConfig::default()
+        },
+        ..RouterConfig::default()
+    });
+    state.demand = demand;
+    state.admin_token = Some("secret".into());
+    mark_ready(&state, "gpu", &["llama3.2:1b"]);
+
+    let (hz, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(hz, StatusCode::OK);
+
+    let (ps, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/api/ps")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ps, StatusCode::OK);
+
+    let (admin, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/router/v1/stats")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(admin, StatusCode::OK);
+
+    let warm = tokio::spawn(ollama_router::warm::run(
+        state.clone(),
+        tokio_util::sync::CancellationToken::new(),
+    ));
+    sleep(Duration::from_millis(200)).await;
+    warm.abort();
+
+    assert_eq!(
+        handle.hits.load(Ordering::SeqCst),
+        0,
+        "health /api/ps / admin / warm-keeper must not scale"
+    );
 }
 
 #[tokio::test]

@@ -15,8 +15,8 @@ pub use capacity::{
 };
 pub use cloud::{
     excess_scale_down_order, idle_scale_down_candidates, orphan_reclaim_candidates,
-    should_destroy_on_shutdown, DemandScale, FleetEvents, IdleCandidate, IdleNodeView, IdlePolicy,
-    NoopDemandScale, NoopFleetEvents,
+    should_destroy_on_shutdown, CachedOffer, CloudProviderHandle, DemandScale, FleetEvents,
+    IdleCandidate, IdleNodeView, IdlePolicy, MultiProviderDemand, NoopDemandScale, NoopFleetEvents,
 };
 pub use config::{
     http_url_for_bind, hydrate_node_urls, load_config, load_config_from, parse_yaml,
@@ -25,9 +25,9 @@ pub use config::{
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
     url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, AggregatedPs,
-    AggregatedTag, EnrollPersist, FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId,
-    NodeOrigin, NodeSnapshot, PressureLevel, PsRecord, Registry, RouterId, TagRecord,
-    VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
+    AggregatedTag, CloudInstanceId, EnrollPersist, FleetState, FleetStateError, GpuSnapshot,
+    InflightAdmit, NodeId, NodeOrigin, NodeSnapshot, PressureLevel, PsRecord, Registry, RouterId,
+    RunpodNodePersist, TagRecord, VerdaNodePersist, DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 pub use jobs::{

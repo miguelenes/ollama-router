@@ -6,12 +6,12 @@ use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::cloud::{
-    excess_scale_down_order, idle_scale_down_candidates, orphan_reclaim_candidates, DemandScale,
-    FleetEvents, IdleNodeView, IdlePolicy,
+    excess_scale_down_order, idle_scale_down_candidates, orphan_reclaim_candidates, CachedOffer,
+    CloudProviderHandle, DemandScale, FleetEvents, IdleNodeView, IdlePolicy,
 };
 use ollama_router_core::config::{Capacity, EnvSource, NodeConfig, OsEnv, RouterConfig};
 use ollama_router_core::fleet::{
-    FleetState, NodeId, NodeOrigin, Registry, VerdaInstanceId, VerdaNodePersist,
+    CloudInstanceId, FleetState, NodeId, NodeOrigin, Registry, VerdaNodePersist,
 };
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
@@ -70,6 +70,7 @@ struct Inner {
     shutdown: CancellationToken,
     recovery: std::sync::Mutex<Option<Recovery>>,
     orphan_first_seen: std::sync::Mutex<HashMap<String, Instant>>,
+    cached_offer: std::sync::Mutex<Option<CachedOffer>>,
 }
 
 impl VerdaManager {
@@ -116,8 +117,43 @@ impl VerdaManager {
                 shutdown,
                 recovery: std::sync::Mutex::new(None),
                 orphan_first_seen: std::sync::Mutex::new(HashMap::new()),
+                cached_offer: std::sync::Mutex::new(None),
             }),
         }
+    }
+
+    fn lock_cached_offer(&self) -> std::sync::MutexGuard<'_, Option<CachedOffer>> {
+        self.inner
+            .cached_offer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Refresh the best-eligible spot offer for multi-provider demand ranking.
+    /// Catalog failure clears the cache (soft-fail; provider skipped until next tick).
+    async fn refresh_cached_offer(&self) {
+        let ranked = match (
+            self.inner.client.get_instance_availability().await,
+            self.inner.client.get_instance_types().await,
+        ) {
+            (Ok(availability), Ok(instance_types)) => {
+                rank_candidates(&availability, &instance_types, &self.inner.config.verda)
+            }
+            (Err(err), _) | (_, Err(err)) => {
+                tracing::warn!(
+                    error = %err,
+                    reason = "catalog_failed",
+                    "verda_cached_offer_soft_fail"
+                );
+                *self.lock_cached_offer() = None;
+                return;
+            }
+        };
+        let offer = ranked.first().map(|choice| CachedOffer {
+            hourly_price: choice.spot_price,
+            vram_gb: choice.gpu_memory_gb,
+        });
+        *self.lock_cached_offer() = offer;
     }
 
     /// Attach fleet-event metrics (binary). Replaces any previous hook.
@@ -137,7 +173,7 @@ impl VerdaManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(events) = events {
-            events.verda_event(event);
+            events.cloud_event("verda", event);
         }
     }
 
@@ -251,7 +287,7 @@ impl VerdaManager {
         let iid = instance
             .instance_id_value()
             .ok_or_else(|| VerdaError::Message("Verda persist missing instance id".into()))?;
-        let instance_id = VerdaInstanceId::parse(iid)
+        let instance_id = CloudInstanceId::parse(iid)
             .map_err(|err| VerdaError::Message(format!("verda persist instance id: {err}")))?;
         let persist = VerdaNodePersist {
             url,
@@ -1033,7 +1069,7 @@ impl VerdaManager {
                 let iid = inst.instance_id_value()?;
                 let node_id = Self::node_id_for(iid);
                 let snap = self.inner.registry.get(&node_id)?;
-                let instance_id = VerdaInstanceId::parse(iid).ok()?;
+                let instance_id = CloudInstanceId::parse(iid).ok()?;
                 let registered_at = self.inner.registry.registered_at(&node_id).unwrap_or(now);
                 let last_client_request_at = self.inner.registry.last_client_request_at(&node_id);
                 Some(IdleNodeView {
@@ -1061,6 +1097,9 @@ impl VerdaManager {
                     .max(0.0),
             ),
             min_instances: min_n,
+            min_lifetime: Duration::from_secs_f64(
+                self.inner.config.verda.min_lifetime_seconds.max(0.0),
+            ),
         }
     }
 
@@ -1092,6 +1131,7 @@ impl VerdaManager {
                             min_instances: 0,
                             ..policy
                         },
+                        NodeOrigin::Verda,
                     )
                     .is_empty()
                 });
@@ -1138,9 +1178,9 @@ impl VerdaManager {
             .filter_map(|entry| entry.verda_instance_id.clone())
             .collect();
         let registry_ids = self.registry_verda_instance_ids();
-        let owned_ids: Vec<VerdaInstanceId> = owned
+        let owned_ids: Vec<CloudInstanceId> = owned
             .iter()
-            .filter_map(|inst| VerdaInstanceId::parse(inst.instance_id_value()?).ok())
+            .filter_map(|inst| CloudInstanceId::parse(inst.instance_id_value()?).ok())
             .collect();
         let owned_keys: HashSet<String> =
             owned_ids.iter().map(|id| id.as_str().to_string()).collect();
@@ -1308,7 +1348,7 @@ impl VerdaManager {
         let now = Instant::now();
         let views = self.idle_views(in_flight, now);
         let policy = self.idle_policy(min_n);
-        for cand in idle_scale_down_candidates(&views, now, policy) {
+        for cand in idle_scale_down_candidates(&views, now, policy, NodeOrigin::Verda) {
             let Some(inst) = in_flight
                 .iter()
                 .find(|i| i.instance_id_value() == Some(cand.instance_id.as_str()))
@@ -1352,7 +1392,7 @@ impl VerdaManager {
         }
         let now = Instant::now();
         let views = self.idle_views(&remaining, now);
-        for cand in excess_scale_down_order(&views) {
+        for cand in excess_scale_down_order(&views, NodeOrigin::Verda) {
             if count <= max_n || count <= min_n {
                 break;
             }
@@ -1385,12 +1425,42 @@ impl VerdaManager {
                 tracing::info!("verda_reconcile_loop_stopped");
                 return;
             }
+            self.refresh_cached_offer().await;
             self.reconcile().await;
             if self.cancelled_or_sleep(interval).await {
                 tracing::info!("verda_reconcile_loop_stopped");
                 return;
             }
         }
+    }
+}
+
+impl CloudProviderHandle for VerdaManager {
+    fn provider(&self) -> &'static str {
+        "verda"
+    }
+
+    fn request_scale_up(&self, reason: RoutingError) {
+        DemandScale::request_scale_up(self, reason);
+    }
+
+    fn cached_best_offer(&self) -> Option<CachedOffer> {
+        *self.lock_cached_offer()
+    }
+
+    fn below_ceiling(&self) -> bool {
+        let max_n = self.inner.config.verda.auto_scale_max_instances;
+        if max_n == 0 {
+            return true;
+        }
+        let owned = self
+            .inner
+            .registry
+            .snapshot()
+            .iter()
+            .filter(|n| n.origin == NodeOrigin::Verda)
+            .count() as u32;
+        owned < max_n
     }
 }
 

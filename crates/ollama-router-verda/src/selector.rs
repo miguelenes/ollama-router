@@ -202,9 +202,16 @@ mod tests {
         }
     }
 
+    fn cheapest_config() -> VerdaConfig {
+        VerdaConfig {
+            selection_strategy: SelectionStrategy::Cheapest,
+            ..VerdaConfig::default()
+        }
+    }
+
     #[test]
     fn cheapest_nvidia_smallest_vram_on_tie() {
-        let config = VerdaConfig::default();
+        let config = cheapest_config();
         let types = [
             nvidia("big", "0.40", 80.0, 1),
             nvidia("small", "0.40", 24.0, 1),
@@ -251,7 +258,7 @@ mod tests {
 
     #[test]
     fn cheapest_larger_gpu_beats_expensive_smaller() {
-        let config = VerdaConfig::default();
+        let config = cheapest_config();
         let types = [
             nvidia("small", "0.50", 24.0, 1),
             nvidia("large", "0.20", 80.0, 1),
@@ -263,10 +270,9 @@ mod tests {
 
     #[test]
     fn best_value_ranks_by_price_per_vram() {
-        let config = VerdaConfig {
-            selection_strategy: SelectionStrategy::BestValue,
-            ..VerdaConfig::default()
-        };
+        // Default is BestValue; cheapest_config must set Cheapest explicitly.
+        let config = VerdaConfig::default();
+        assert_eq!(config.selection_strategy, SelectionStrategy::BestValue);
         let types = [
             nvidia("small", "0.40", 24.0, 1),
             nvidia("large", "0.80", 80.0, 1),
@@ -274,16 +280,43 @@ mod tests {
         let availability = vec![avail("HEL", &["small", "large"])];
         let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
         assert_eq!(pick.instance_type, "large");
-        let cheapest_config = VerdaConfig::default();
         let cheap =
-            pick_cheapest_available_spot_gpu(&availability, &types, &cheapest_config).unwrap();
+            pick_cheapest_available_spot_gpu(&availability, &types, &cheapest_config()).unwrap();
         assert_eq!(cheap.instance_type, "small");
+    }
+
+    #[test]
+    fn better_value_wins_over_cheaper_sticker() {
+        // 0.40/48 ≈ 0.0083 $/GiB beats 0.20/8 = 0.025 $/GiB.
+        let config = VerdaConfig::default();
+        let types = [
+            nvidia("tiny_cheap", "0.20", 8.0, 1),
+            nvidia("mid_value", "0.40", 48.0, 1),
+        ];
+        let availability = vec![avail("HEL", &["tiny_cheap", "mid_value"])];
+        let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
+        assert_eq!(pick.instance_type, "mid_value");
+    }
+
+    #[test]
+    fn over_cap_offer_is_rejected() {
+        let config = VerdaConfig {
+            max_spot_price_per_hour: Some(0.30),
+            ..VerdaConfig::default()
+        };
+        let types = [
+            nvidia("cheap", "0.20", 8.0, 1),
+            nvidia("over", "0.40", 48.0, 1),
+        ];
+        let availability = vec![avail("HEL", &["cheap", "over"])];
+        let ranked = rank_candidates(&availability, &types, &config);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].instance_type, "cheap");
     }
 
     #[test]
     fn best_value_unknown_vram_sorts_last() {
         let config = VerdaConfig {
-            selection_strategy: SelectionStrategy::BestValue,
             min_vram_gb: 0.0,
             max_vram_gb: None,
             ..VerdaConfig::default()
@@ -296,12 +329,25 @@ mod tests {
         assert_eq!(ranked[0].instance_type, "known");
         assert_eq!(ranked[1].instance_type, "mystery");
     }
+
+    #[test]
+    fn explicit_cheapest_ranks_by_hourly_price() {
+        let config = cheapest_config();
+        let types = [
+            nvidia("pricey_value", "0.40", 48.0, 1),
+            nvidia("cheap_sticker", "0.20", 8.0, 1),
+        ];
+        let availability = vec![avail("HEL", &["pricey_value", "cheap_sticker"])];
+        let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
+        assert_eq!(pick.instance_type, "cheap_sticker");
+    }
 }
 
 #[cfg(test)]
 mod proptests {
     use super::*;
     use crate::types::{GpuMemorySpec, GpuSpec};
+    use ollama_router_core::config::SelectionStrategy;
     use proptest::prelude::*;
 
     proptest! {
@@ -322,7 +368,10 @@ mod proptests {
                 location_code: "HEL".into(),
                 availabilities: names,
             }];
-            let config = VerdaConfig::default();
+            let config = VerdaConfig {
+                selection_strategy: SelectionStrategy::Cheapest,
+                ..VerdaConfig::default()
+            };
             let pick = pick_cheapest_available_spot_gpu(&availability, &types, &config).unwrap();
             let min = types
                 .iter()

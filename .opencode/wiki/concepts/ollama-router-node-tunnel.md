@@ -1,12 +1,14 @@
 ---
 title: Node tunnel (self-hosted zrok private share)
-tags: [ollama-router, zrok, openziti, enroll, verda]
+tags: [ollama-router, zrok, openziti, enroll, verda, runpod]
 sourceRefs:
   - crates/ollama-node-agent
   - crates/ollama-router-core/src/fleet
   - crates/ollama-router/src/http/admin.rs
   - crates/ollama-router/src/tunnel.rs
-lastReviewed: 2026-08-14
+  - crates/ollama-router-verda
+  - crates/ollama-router-runpod
+lastReviewed: 2026-08-16
 ---
 
 # Node tunnel
@@ -40,15 +42,18 @@ router learns the share via **enroll**, not SSH.
 
 `POST /router/v1/nodes/enroll` is fail-closed admin bearer
 (`OLLAMA_ROUTER_ADMIN_TOKEN`, unset → 403). Allowlisted JSON only: node id or
-proposed id, origin (`fleet` | `verda` | `adopt`), zrok share unique-names for
-Ollama and the capacity agent, agent version, hostname. No Ollama request
-bodies. No zrok enable tokens (`deny_unknown_fields`).
+proposed id, origin (`fleet` | `verda` | `runpod` | `adopt`), zrok share
+unique-names for Ollama and the capacity agent, agent version, hostname. No
+Ollama request bodies. No zrok enable tokens (`deny_unknown_fields`).
 
 - **origin=fleet** — existing `fleet.yaml` / Permanent registry row only.
   Hydrate reachability. Never write `fleet.yaml`.
 - **origin=verda** — update the existing FleetState row the Verda manager
   already owns (`managed_by=verda`). Do not create a second node. Unknown
   instance → `404` `unknown_verda_node`. Wrong owner → `409` `verda_not_owned`.
+- **origin=runpod** — same pattern for `managed_by=runpod` rows. Unknown →
+  `404`; wrong owner → `409` (RunPod mirror of the Verda conflict). Never invent
+  a RunPod node via enroll.
 - **origin=adopt** — same rules as `PUT /router/v1/nodes` (debug adopt; must
   not write `fleet.yaml`).
 
@@ -81,8 +86,8 @@ export ZROK_ENABLE_TOKEN='…'
 sudo --preserve-env=ZROK_API_ENDPOINT,ZROK_ENABLE_TOKEN ollama-node-agent setup
 ```
 
-Production inventory is still `fleet.yaml` + FleetState + Verda. Enroll
-hydrates reachability only.
+Production inventory is still `fleet.yaml` + FleetState + Verda/RunPod managers.
+Enroll hydrates reachability only.
 
 The agent heartbeat (`register.url` or setup `--enroll-url`) POSTs that
 allowlisted body. `--enroll-token-env` stores the env *name* in `state.json`;
@@ -95,7 +100,8 @@ IPv4-compatible v6 such as `[::ffff:8.8.8.8]`), CGNAT (`100.64/10`), and
 unspecified addresses (`0.0.0.0`, `::`). Hostname public tunnels
 (`*.zrok.io` plus `tunnel.public_share_suffixes`) are the same reason code.
 Loopback, RFC1918, link-local, and unique-local (`fc00::/7`) stay probeable.
-No public-proxy fallback.
+No public-proxy fallback. RunPod public pod IPs and RunPod proxy hostnames are
+also `public_url_blocked`.
 
 ## Verda
 
@@ -122,6 +128,23 @@ ownership, do not persist provider errors in SQLite. The guest heartbeat may
 send the create hostname as `id`; enroll maps that onto the existing Verda
 FleetState row. Enroll then updates that row only. Preferred images stay
 Ubuntu 24 CUDA.
+
+## RunPod
+
+Bootstrap is container **`dockerStartCmd`**, not SSH and not a Verda-style
+startup-script catalog. The manager renders the agent-bootstrap script
+(install node-agent package, zrok private enable, agent serve, enroll) and
+passes `dockerStartCmd: ["bash","-lc", <script>]` on a configurable stock
+CUDA-capable `image`. Container `env` carries secret values under configured
+`*_env` names only — memory-only, never logged or persisted. Create uses
+`ports: []` and `volumeInGb: 0` so the RunPod proxy/public IP is never ingress
+and terminated pods leave no billed volume.
+
+After the pod is `RUNNING`, the manager polls FleetState for enroll of the
+managed RunPod row, then probes tunnel `GET /api/tags`. Public pod IP / RunPod
+proxy hostnames stay `public_url_blocked`. Teardown always **terminates**
+(`DELETE /pods/{id}`), never stop-only. Interrupted (non-RUNNING) managed pods
+are terminated on the reconcile tick and replaced only when below the floor.
 
 ## Related
 

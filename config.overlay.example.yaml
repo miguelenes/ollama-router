@@ -5,7 +5,13 @@
 # OLLAMA_ROUTER_FLEET (see deploy/fleet.yaml). Do not add a top-level
 # `nodes:` key here — that is a hard config error.
 #
-# Verda is the only cloud provider. Thunder / RunPod sections are rejected.
+# Cloud providers: Verda spots and optional RunPod interruptible pods.
+# Thunder sections are rejected as unknown fields. Secrets stay in env
+# (VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, RUNPOD_API_KEY) — never YAML.
+#
+# Hourly caps (hard filters on create): Verda `max_spot_price_per_hour`,
+# RunPod `max_price_per_hour`. Over-cap offers are never provisioned.
+# `verda.demand_scale_price_per_hour` is metrics/log fallback only, not a cap.
 
 # policy:
 #   sticky_affinity: false
@@ -31,6 +37,12 @@
 #   auto_scale_max_instances: 2
 #   orphan_reclaim_enabled: true
 #   orphan_reclaim_grace_seconds: 1800
+#   # Default ranking is best_value (lowest $/known VRAM GiB). Opt into cheapest:
+#   # selection_strategy: cheapest
+#   # Hard hourly cap (must be > 0 when set); over-cap spots are never created:
+#   # max_spot_price_per_hour: 0.50
+#   # Billing-period floor before idle teardown (seconds; 0 = none):
+#   # min_lifetime_seconds: 0
 #   ssh_key_name: ollama-router
 #   startup_script_name: ollama-router-agent-init
 #   # Reachable enroll URL for Verda spots (not 0.0.0.0). Tokens stay in env:
@@ -44,8 +56,28 @@
 #   min_vram_gb: 8
 #   max_vram_gb: 80
 #   # Optional fallback for demand-scale logs/metrics. FleetState
-#   # verda_spot_price_per_hour wins when persisted.
+#   # verda_spot_price_per_hour wins when persisted. Not an create-time cap.
 #   demand_scale_price_per_hour: 0.30
+
+# runpod:
+#   enabled: false
+#   # API key from env named below — never a YAML literal.
+#   api_key_env: RUNPOD_API_KEY
+#   interruptible: true
+#   on_demand_fallback: false
+#   cloud_type: SECURE
+#   # Hard hourly cap (must be > 0 when set):
+#   # max_price_per_hour: 0.50
+#   min_vram_gb: 8
+#   max_vram_gb: 80
+#   auto_scale_min_instances: 0
+#   auto_scale_max_instances: 2
+#   idle_timeout_seconds: 900
+#   idle_grace_after_create_seconds: 300
+#   min_lifetime_seconds: 0
+#   enroll_url: http://router.example:11435
+#   zrok_enable_token_env: ZROK_ENABLE_TOKEN
+#   enroll_token_env: OLLAMA_ROUTER_ADMIN_TOKEN
 
 # Self-hosted zrok controller the router `access private` frontends talk to.
 # Enable token stays in the env named below — never a YAML literal.

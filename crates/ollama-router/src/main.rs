@@ -11,11 +11,14 @@ use ollama_router::cli::{inventory_lines, Cli, Commands};
 use ollama_router::health::{reload_permanent_inventory, run as run_health};
 use ollama_router::http::{build_upstream_client, make_app, AppState};
 use ollama_router::warm::run as run_warm;
-use ollama_router_core::cloud::{should_destroy_on_shutdown, DemandScale};
+use ollama_router_core::cloud::{
+    should_destroy_on_shutdown, CloudProviderHandle, MultiProviderDemand,
+};
 use ollama_router_core::fleet::normalize_model;
 use ollama_router_core::jobs::{Job, JobStatus, PullOrchestrator};
 use ollama_router_core::load_config;
 use ollama_router_core::routing::TargetSpec;
+use ollama_router_runpod::{RunpodClient, RunpodManager};
 use ollama_router_verda::{VerdaClient, VerdaManager};
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -151,7 +154,7 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
         recovered = recovered.len(),
         "recovered incomplete model jobs"
     );
-    wire_verda(&mut state, shutdown.clone()).context("verda")?;
+    wire_cloud_providers(&mut state, shutdown.clone()).context("cloud providers")?;
     let app = make_app(state.clone());
     let mut supervisor = Supervisor::new();
     supervisor.spawn(run_health(state.clone(), shutdown.clone()));
@@ -164,10 +167,14 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     #[cfg(unix)]
     supervisor.spawn(run_sighup_reloader(state.clone(), shutdown.clone()));
     let started_at = Instant::now();
-    let destroy_on_shutdown = state.config.verda.destroy_on_shutdown;
-    let shutdown_grace =
+    let verda_destroy_on_shutdown = state.config.verda.destroy_on_shutdown;
+    let verda_shutdown_grace =
         Duration::from_secs_f64(state.config.verda.idle_grace_after_create_seconds.max(0.0));
+    let runpod_destroy_on_shutdown = state.config.runpod.destroy_on_shutdown;
+    let runpod_shutdown_grace =
+        Duration::from_secs_f64(state.config.runpod.idle_grace_after_create_seconds.max(0.0));
     let verda_shutdown = state.verda.clone();
+    let runpod_shutdown = state.runpod.clone();
     if let Some(mgr) = state.verda.clone() {
         if state.config.verda.ensure_on_startup && !state.config.verda.auto_scale {
             let startup = mgr.clone();
@@ -184,6 +191,9 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
                 }
             });
         }
+        supervisor.spawn(mgr.run_reconcile_loop());
+    }
+    if let Some(mgr) = state.runpod.clone() {
         supervisor.spawn(mgr.run_reconcile_loop());
     }
     let addr = format!("{host}:{port}");
@@ -205,38 +215,76 @@ async fn serve(host: String, port: u16, config: Option<PathBuf>) -> anyhow::Resu
     if let Some(mgr) = verda_shutdown {
         mgr.abort_demand().await;
         let uptime = started_at.elapsed();
-        if should_destroy_on_shutdown(destroy_on_shutdown, uptime, shutdown_grace) {
+        if should_destroy_on_shutdown(verda_destroy_on_shutdown, uptime, verda_shutdown_grace) {
             tracing::info!(
                 uptime_seconds = uptime.as_secs_f64(),
                 "verda_destroy_on_shutdown"
             );
             let _ = mgr.destroy_all_owned().await;
-        } else if destroy_on_shutdown {
+        } else if verda_destroy_on_shutdown {
             tracing::info!(
                 uptime_seconds = uptime.as_secs_f64(),
-                grace_seconds = shutdown_grace.as_secs_f64(),
+                grace_seconds = verda_shutdown_grace.as_secs_f64(),
                 "verda_destroy_on_shutdown_skipped"
+            );
+        }
+    }
+    if let Some(mgr) = runpod_shutdown {
+        mgr.abort_demand().await;
+        let uptime = started_at.elapsed();
+        if should_destroy_on_shutdown(runpod_destroy_on_shutdown, uptime, runpod_shutdown_grace) {
+            tracing::info!(
+                uptime_seconds = uptime.as_secs_f64(),
+                "runpod_destroy_on_shutdown"
+            );
+            let _ = mgr.destroy_all_owned().await;
+        } else if runpod_destroy_on_shutdown {
+            tracing::info!(
+                uptime_seconds = uptime.as_secs_f64(),
+                grace_seconds = runpod_shutdown_grace.as_secs_f64(),
+                "runpod_destroy_on_shutdown_skipped"
             );
         }
     }
     Ok(())
 }
 
-fn wire_verda(state: &mut AppState, shutdown: CancellationToken) -> anyhow::Result<()> {
-    if !state.config.verda.enabled {
+fn wire_cloud_providers(state: &mut AppState, shutdown: CancellationToken) -> anyhow::Result<()> {
+    let mut handles: Vec<Arc<dyn CloudProviderHandle>> = Vec::new();
+
+    if state.config.verda.enabled {
+        let client = VerdaClient::new(state.config.verda.clone()).context("verda client")?;
+        let mgr = VerdaManager::with_shutdown(
+            state.config.clone(),
+            client,
+            state.registry.clone(),
+            state.fleet_state.clone(),
+            shutdown.clone(),
+        );
+        mgr.set_events(state.metrics.clone());
+        handles.push(Arc::new(mgr.clone()) as Arc<dyn CloudProviderHandle>);
+        state.verda = Some(mgr);
+    }
+
+    if state.config.runpod.enabled {
+        let client = RunpodClient::new(state.config.runpod.clone()).context("runpod client")?;
+        let mgr = RunpodManager::with_shutdown(
+            state.config.clone(),
+            client,
+            state.registry.clone(),
+            state.fleet_state.clone(),
+            shutdown,
+        );
+        mgr.set_events(state.metrics.clone());
+        handles.push(Arc::new(mgr.clone()) as Arc<dyn CloudProviderHandle>);
+        state.runpod = Some(mgr);
+    }
+
+    if handles.is_empty() {
+        // AppState defaults to NoopDemandScale; leave it.
         return Ok(());
     }
-    let client = VerdaClient::new(state.config.verda.clone()).context("verda client")?;
-    let mgr = VerdaManager::with_shutdown(
-        state.config.clone(),
-        client,
-        state.registry.clone(),
-        state.fleet_state.clone(),
-        shutdown,
-    );
-    mgr.set_events(state.metrics.clone());
-    state.demand = Arc::new(mgr.clone()) as Arc<dyn DemandScale>;
-    state.verda = Some(mgr);
+    state.demand = Arc::new(MultiProviderDemand::new(handles));
     Ok(())
 }
 

@@ -4,6 +4,7 @@ members = [
     "crates/ollama-router",
     "crates/ollama-router-core",
     "crates/ollama-router-verda",
+    "crates/ollama-router-runpod",
     "crates/ollama-mock",
     "crates/ollama-capacity-types",
     "crates/ollama-node-agent",

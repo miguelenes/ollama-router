@@ -11,7 +11,7 @@ use fs4::FileExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-use crate::fleet::ids::{NodeId, VerdaInstanceId};
+use crate::fleet::ids::{CloudInstanceId, NodeId};
 use crate::fleet::url_policy::{url_host_is_loopback, url_is_safe_overlay};
 
 /// Default on-disk location (override with `OLLAMA_ROUTER_STATE_FILE`).
@@ -68,7 +68,7 @@ pub struct VerdaNodePersist<'a> {
     /// Ollama base URL (overlay/loopback preferred; public IPs will not clobber).
     pub url: &'a str,
     /// Cloud instance id.
-    pub instance_id: &'a VerdaInstanceId,
+    pub instance_id: &'a CloudInstanceId,
     /// Verda location code.
     pub location: &'a str,
     /// Instance type slug.
@@ -78,6 +78,23 @@ pub struct VerdaNodePersist<'a> {
     /// Spot price in currency per hour, when known.
     pub spot_price_per_hour: Option<f64>,
     /// Hostname assigned at create (guest enroll may key off this).
+    pub hostname: Option<&'a str>,
+}
+
+/// Fields written by [`FleetState::persist_runpod_node`].
+#[derive(Clone, Debug)]
+pub struct RunpodNodePersist<'a> {
+    /// Ollama base URL (overlay/loopback preferred; public IPs will not clobber).
+    pub url: &'a str,
+    /// RunPod pod id.
+    pub pod_id: &'a CloudInstanceId,
+    /// GPU type id used at create.
+    pub gpu_type: &'a str,
+    /// Data center id when known.
+    pub data_center: Option<&'a str>,
+    /// Actual `costPerHr` when known.
+    pub cost_per_hour: Option<f64>,
+    /// Pod name assigned at create (ownership marker).
     pub hostname: Option<&'a str>,
 }
 
@@ -106,6 +123,14 @@ pub struct FleetStateEntry {
     pub verda_os_volume_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verda_spot_price_per_hour: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runpod_pod_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runpod_gpu_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runpod_data_center: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runpod_cost_per_hour: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capacity_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -173,6 +198,17 @@ impl FleetState {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .iter()
             .filter(|(_, e)| e.managed_by.as_deref() == Some("verda"))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// RunPod-owned rows from the snapshot. No flock.
+    pub fn snapshot_runpod_nodes(&self) -> BTreeMap<String, FleetStateEntry> {
+        self.snapshot
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .iter()
+            .filter(|(_, e)| e.managed_by.as_deref() == Some("runpod"))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect()
     }
@@ -282,6 +318,35 @@ impl FleetState {
                     instance_type: &instance_type,
                     os_volume_id: os_volume_id.as_deref(),
                     spot_price_per_hour,
+                    hostname: hostname.as_deref(),
+                },
+            )
+        })
+        .await
+    }
+
+    /// [`Self::persist_runpod_node`] on the blocking pool.
+    pub async fn persist_runpod_node_async(
+        &self,
+        node_id: impl AsRef<str>,
+        persist: RunpodNodePersist<'_>,
+    ) -> Result<(), FleetStateError> {
+        let node_id = node_id.as_ref().to_string();
+        let url = persist.url.to_string();
+        let pod_id = persist.pod_id.clone();
+        let gpu_type = persist.gpu_type.to_string();
+        let data_center = persist.data_center.map(str::to_string);
+        let cost_per_hour = persist.cost_per_hour;
+        let hostname = persist.hostname.map(str::to_string);
+        self.run_blocking(move |fs| {
+            fs.persist_runpod_node(
+                &node_id,
+                RunpodNodePersist {
+                    url: &url,
+                    pod_id: &pod_id,
+                    gpu_type: &gpu_type,
+                    data_center: data_center.as_deref(),
+                    cost_per_hour,
                     hostname: hostname.as_deref(),
                 },
             )
@@ -464,6 +529,51 @@ impl FleetState {
             .collect())
     }
 
+    /// Persist a RunPod pod node (URL + pod metadata + optional cost).
+    pub fn persist_runpod_node(
+        &self,
+        node_id: impl AsRef<str>,
+        persist: RunpodNodePersist<'_>,
+    ) -> Result<(), FleetStateError> {
+        let _lock = self.lock_exclusive()?;
+        let mut data = self.load()?;
+        let existing = data.get(node_id.as_ref()).cloned().unwrap_or_default();
+        let mut entry = merge_routing_fields(&existing, persist.url);
+        entry.updated_at = Some(now_secs());
+        entry.managed_by = Some("runpod".to_string());
+        entry.runpod_pod_id = Some(persist.pod_id.as_str().to_string());
+        entry.runpod_gpu_type = Some(persist.gpu_type.to_string());
+        if let Some(dc) = persist.data_center.map(str::trim).filter(|s| !s.is_empty()) {
+            entry.runpod_data_center = Some(dc.to_string());
+        }
+        if let Some(price) = persist.cost_per_hour {
+            entry.runpod_cost_per_hour = Some(price);
+        }
+        if let Some(host) = persist.hostname.map(str::trim).filter(|s| !s.is_empty()) {
+            entry.hostname = Some(host.to_string());
+        }
+        tracing::info!(
+            node_id = %node_id.as_ref(),
+            gpu_type = persist.gpu_type,
+            data_center = persist.data_center,
+            cost_per_hour = persist.cost_per_hour,
+            "runpod persist"
+        );
+        data.insert(node_id.as_ref().to_string(), entry);
+        atomic_write(&self.path, &data)?;
+        self.publish_snapshot(data);
+        Ok(())
+    }
+
+    /// Entries whose `managed_by` is `runpod`.
+    pub fn list_runpod_nodes(&self) -> Result<BTreeMap<String, FleetStateEntry>, FleetStateError> {
+        let data = self.load()?;
+        Ok(data
+            .into_iter()
+            .filter(|(_, e)| e.managed_by.as_deref() == Some("runpod"))
+            .collect())
+    }
+
     /// Blocking same-host exclusive flock. HTTP `/metrics` must use [`Self::snapshot`].
     pub fn lock_exclusive(&self) -> Result<File, FleetStateError> {
         if let Some(parent) = self.lock_path().parent() {
@@ -625,7 +735,7 @@ fn now_secs() -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fleet::ids::VerdaInstanceId;
+    use crate::fleet::ids::CloudInstanceId;
 
     #[test]
     fn load_empty_on_missing_file() {
@@ -705,7 +815,7 @@ mod tests {
         state
             .persist_url("verda-1", "http://127.0.0.1:41990")
             .unwrap();
-        let instance = VerdaInstanceId::parse("i-1").unwrap();
+        let instance = CloudInstanceId::parse("i-1").unwrap();
         state
             .persist_verda_node(
                 "verda-1",
@@ -827,7 +937,7 @@ mod tests {
     fn persist_enroll_hydrates_loopback_and_updates_verda_in_place() {
         let dir = tempfile::tempdir().unwrap();
         let state = FleetState::new(dir.path().join("fleet-state.json"));
-        let instance = VerdaInstanceId::parse("i-1").unwrap();
+        let instance = CloudInstanceId::parse("i-1").unwrap();
         state
             .persist_verda_node(
                 "verda-i-1",
@@ -939,5 +1049,46 @@ mod tests {
             reader.snapshot()["n"].url.as_deref(),
             Some("http://10.0.0.5:11434")
         );
+    }
+
+    #[test]
+    fn runpod_columns_are_additive_on_old_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-state.json");
+        fs::write(
+            &path,
+            r#"{"verda-1":{"url":"http://127.0.0.1:41990","managed_by":"verda","verda_instance_id":"i-1"}}"#,
+        )
+        .unwrap();
+        let state = FleetState::new(&path);
+        let entry = state.get_entry("verda-1").unwrap().unwrap();
+        assert_eq!(entry.managed_by.as_deref(), Some("verda"));
+        assert_eq!(entry.verda_instance_id.as_deref(), Some("i-1"));
+        assert!(entry.runpod_pod_id.is_none());
+        let pod = CloudInstanceId::parse("pod-1").unwrap();
+        state
+            .persist_runpod_node(
+                "runpod-pod-1",
+                RunpodNodePersist {
+                    url: "http://127.0.0.1:41991",
+                    pod_id: &pod,
+                    gpu_type: "NVIDIA L4",
+                    data_center: Some("US-CA-2"),
+                    cost_per_hour: Some(0.39),
+                    hostname: Some("or-rp-test-1"),
+                },
+            )
+            .unwrap();
+        let rp = state.get_entry("runpod-pod-1").unwrap().unwrap();
+        assert_eq!(rp.managed_by.as_deref(), Some("runpod"));
+        assert_eq!(rp.runpod_pod_id.as_deref(), Some("pod-1"));
+        assert_eq!(rp.runpod_gpu_type.as_deref(), Some("NVIDIA L4"));
+        assert_eq!(rp.runpod_data_center.as_deref(), Some("US-CA-2"));
+        assert_eq!(rp.runpod_cost_per_hour, Some(0.39));
+        assert!(state
+            .list_runpod_nodes()
+            .unwrap()
+            .contains_key("runpod-pod-1"));
+        assert!(state.list_verda_nodes().unwrap().contains_key("verda-1"));
     }
 }

@@ -2,8 +2,12 @@ use std::time::{Duration, Instant};
 
 use ollama_router::http::metrics::Metrics;
 use ollama_router_core::capacity::{CapacityReport, GpuBackend, GpuDetail, Pressure};
+use ollama_router_core::cloud::FleetEvents;
 use ollama_router_core::config::{Capacity, NodeConfig, RouterConfig};
-use ollama_router_core::fleet::{EnrollPersist, FleetState, NodeId, PressureLevel, Registry};
+use ollama_router_core::fleet::{
+    CloudInstanceId, EnrollPersist, FleetState, NodeId, PressureLevel, Registry, RunpodNodePersist,
+    VerdaNodePersist,
+};
 
 fn nid(id: &str) -> NodeId {
     NodeId::parse(id).expect("node id")
@@ -231,5 +235,123 @@ fn refresh_gauges_draining_includes_cordoned() {
     assert!(
         body.contains("ollama_router_node_draining{node=\"gpu\"} 0"),
         "{body}"
+    );
+}
+
+#[test]
+fn cloud_metrics_attribute_per_provider() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let fleet_state = FleetState::new(dir.path().join("state.json"));
+    let verda_id = CloudInstanceId::parse("i-verda-1").expect("verda id");
+    let runpod_id = CloudInstanceId::parse("pod-runpod-1").expect("runpod id");
+    fleet_state
+        .persist_verda_node(
+            "spot-verda",
+            VerdaNodePersist {
+                url: "http://127.0.0.1:41990",
+                instance_id: &verda_id,
+                location: "HEL1",
+                instance_type: "gpu",
+                os_volume_id: None,
+                spot_price_per_hour: Some(0.42),
+                hostname: None,
+            },
+        )
+        .expect("verda persist");
+    fleet_state
+        .persist_runpod_node(
+            "spot-runpod",
+            RunpodNodePersist {
+                url: "http://127.0.0.1:41991",
+                pod_id: &runpod_id,
+                gpu_type: "NVIDIA GeForce RTX 4090",
+                data_center: Some("EU-RO-1"),
+                cost_per_hour: Some(0.39),
+                hostname: None,
+            },
+        )
+        .expect("runpod persist");
+
+    let registry = Registry::new(&RouterConfig::default());
+    registry.upsert_verda(NodeConfig {
+        id: nid("spot-verda"),
+        url: Some("http://127.0.0.1:41990".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity {
+            vram_gb: Some(24.0),
+            ram_gb: Some(32.0),
+            gpus: Some(1),
+            cpu_cores: Some(8),
+        },
+        max_inflight: None,
+    });
+    registry.upsert_runpod(NodeConfig {
+        id: nid("spot-runpod"),
+        url: Some("http://127.0.0.1:41991".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity {
+            vram_gb: Some(24.0),
+            ram_gb: Some(32.0),
+            gpus: Some(1),
+            cpu_cores: Some(8),
+        },
+        max_inflight: None,
+    });
+
+    let metrics = Metrics::new().expect("metrics");
+    metrics.cloud_event("verda", "create");
+    metrics.cloud_event("runpod", "create");
+    metrics.cloud_event("verda", "destroy");
+    metrics.refresh_gauges(&registry, &fleet_state);
+    let body = metrics.encode_text().expect("encode");
+
+    assert!(
+        body.contains("ollama_router_cloud_instances{provider=\"verda\"} 1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_instances{provider=\"runpod\"} 1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_price_per_hour{provider=\"verda\"} 0.42")
+            || body.contains("ollama_router_cloud_price_per_hour{provider=\"verda\"} 0.420"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_price_per_hour{provider=\"runpod\"} 0.39")
+            || body.contains("ollama_router_cloud_price_per_hour{provider=\"runpod\"} 0.390"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_events_total{event=\"create\",provider=\"verda\"} 1")
+            || body.contains(
+                "ollama_router_cloud_events_total{provider=\"verda\",event=\"create\"} 1"
+            ),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_events_total{event=\"create\",provider=\"runpod\"} 1")
+            || body.contains(
+                "ollama_router_cloud_events_total{provider=\"runpod\",event=\"create\"} 1"
+            ),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_cloud_events_total{event=\"destroy\",provider=\"verda\"} 1")
+            || body.contains(
+                "ollama_router_cloud_events_total{provider=\"verda\",event=\"destroy\"} 1"
+            ),
+        "{body}"
+    );
+    assert!(
+        body.contains("origin=\"runpod\"") && body.contains("ollama_router_node_info{"),
+        "node_info must export runpod origin: {body}"
+    );
+    assert!(
+        !body.contains("ollama_router_verda_"),
+        "legacy verda series must be gone: {body}"
     );
 }

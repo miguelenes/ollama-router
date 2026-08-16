@@ -87,5 +87,5 @@ through one node.
 
 - Log prompts, bodies, embeddings, or tokens.
 - Count health / `/api/tags` / `/v1/models` / `/api/ps` / admin / warm-keeper as client activity.
-- Add Thunder or RunPod routes.
+- Add Thunder routes.
 - Treat omitted VRAM as a measured CPU for ranking or placement.

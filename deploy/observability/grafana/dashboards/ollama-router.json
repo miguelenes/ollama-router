@@ -61,8 +61,8 @@
       "keepTime": true,
       "tags": [],
       "targetBlank": false,
-      "title": "Verda",
-      "tooltip": "Spot lifecycle and cost",
+      "title": "Cloud",
+      "tooltip": "Cloud spot/pod lifecycle and cost",
       "type": "link",
       "url": "/d/ollama-router-verda/ollama-router-verda"
     },
@@ -533,7 +533,7 @@
           "refId": "H"
         }
       ],
-      "title": "Nodes (cpu / gpu / verda)",
+      "title": "Nodes (cpu / gpu / cloud)",
       "transformations": [
         {
           "id": "joinByField",
@@ -743,7 +743,7 @@
         "y": 35
       },
       "id": 11,
-      "title": "Verda",
+      "title": "Cloud",
       "type": "row"
     },
     {
@@ -784,7 +784,7 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -798,13 +798,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_instances",
-          "legendFormat": "instances",
+          "expr": "ollama_router_cloud_instances",
+          "legendFormat": "{{provider}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Verda instances",
+      "title": "Cloud instances",
       "type": "timeseries"
     },
     {
@@ -845,7 +845,7 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -859,13 +859,13 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_router_verda_spot_price_per_hour",
-          "legendFormat": "USD/h",
+          "expr": "ollama_router_cloud_price_per_hour",
+          "legendFormat": "{{provider}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Spot price / hour",
+      "title": "Price / hour",
       "type": "timeseries"
     },
     {
@@ -906,7 +906,7 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -920,8 +920,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(ollama_router_verda_events_total{event=\"idle\"}[5m]))",
-          "legendFormat": "idle",
+          "expr": "sum by (provider) (rate(ollama_router_cloud_events_total{event=\"idle\"}[5m]))",
+          "legendFormat": "{{provider}}",
           "range": true,
           "refId": "A"
         }
@@ -967,7 +967,7 @@
         "legend": {
           "displayMode": "list",
           "placement": "bottom",
-          "showLegend": false
+          "showLegend": true
         },
         "tooltip": {
           "mode": "single",
@@ -981,8 +981,8 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "sum(rate(ollama_router_verda_events_total{event=\"demand\"}[5m]))",
-          "legendFormat": "demand",
+          "expr": "sum by (provider) (rate(ollama_router_cloud_events_total{event=\"demand\"}[5m]))",
+          "legendFormat": "{{provider}}",
           "range": true,
           "refId": "A"
         }
@@ -1458,5 +1458,5 @@
   "uid": "ollama-router",
   "version": 1,
   "weekStart": "",
-  "description": "Fleet RED, inventory, RAM/GPU util, and Verda. Router scrape only for fleet telemetry. Duration is class-only. Do not query model names. vram_free_gb=0 is empty only when vram_free_known=1."
+  "description": "Fleet RED, inventory, RAM/GPU util, and cloud providers. Router scrape only for fleet telemetry. Duration is class-only. Do not query model names. vram_free_gb=0 is empty only when vram_free_known=1."
 }

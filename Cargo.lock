@@ -1137,6 +1137,7 @@ dependencies = [
  "http-body-util",
  "httpmock",
  "ollama-router-core",
+ "ollama-router-runpod",
  "ollama-router-verda",
  "prometheus",
  "reqwest",
@@ -1176,6 +1177,25 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "uuid",
+]
+
+[[package]]
+name = "ollama-router-runpod"
+version = "0.1.0"
+dependencies = [
+ "httpmock",
+ "ollama-router-core",
+ "proptest",
+ "reqwest",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
  "uuid",
 ]
 
