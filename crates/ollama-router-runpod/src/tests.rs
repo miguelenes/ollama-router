@@ -142,7 +142,8 @@ fn manager_with_shutdown(
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
     let client = client(server);
-    let mgr = RunpodManager::with_shutdown(config, client, registry.clone(), fs.clone(), shutdown);
+    let mgr = RunpodManager::with_shutdown(config, client, registry.clone(), fs.clone(), shutdown)
+        .expect("runpod manager");
     (mgr, registry, fs)
 }
 

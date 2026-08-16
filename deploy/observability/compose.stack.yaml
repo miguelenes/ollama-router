@@ -1,0 +1,65 @@
+# Shared observability quartet: alertmanager, loki, alloy, grafana + grafana-data.
+# Included from deploy/compose.yaml and deploy/compose.mock.yaml so image tags
+# and config wiring stay in one place. Prometheus stays in each parent file
+# (host scrape vs mock scrape) — it is not part of this fragment.
+#
+# Relative paths resolve from this directory (include project_directory).
+
+services:
+  alertmanager:
+    image: prom/alertmanager:v0.34.0
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    tmpfs:
+      - /alertmanager
+    user: "0"
+
+  loki:
+    image: grafana/loki:3.7.6
+    command:
+      - -config.file=/etc/loki/loki.yml
+    volumes:
+      - ./loki.yml:/etc/loki/loki.yml:ro
+    tmpfs:
+      - /loki
+    user: "0"
+
+  alloy:
+    image: grafana/alloy:v1.18.1
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --stability.level=generally-available
+      - --storage.path=/tmp/alloy
+      - /etc/alloy/config.alloy
+    volumes:
+      - ./config.alloy:/etc/alloy/config.alloy:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    depends_on:
+      - loki
+
+  grafana:
+    image: grafana/grafana:13.1.3
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_DEFAULT_THEME: dark
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/ollama-router.json
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - prometheus
+      - loki
+
+volumes:
+  grafana-data:

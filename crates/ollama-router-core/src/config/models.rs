@@ -1498,6 +1498,7 @@ pub(crate) fn reject_duplicate_node_ids(nodes: &[NodeConfig]) -> Result<(), Conf
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noyalib::compat::serde_yaml;
 
     #[test]
     fn verda_vram_defaults_are_inclusive_8_to_80() {

@@ -13,6 +13,7 @@ use ollama_router_core::config::{Capacity, EnvSource, NodeConfig, OsEnv, RouterC
 use ollama_router_core::fleet::{
     CloudInstanceId, FleetState, NodeId, NodeOrigin, Registry, VerdaNodePersist,
 };
+use ollama_router_core::http_util::rustls_client;
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
 use tokio::sync::Mutex;
@@ -79,7 +80,7 @@ impl VerdaManager {
         client: VerdaClient,
         registry: Arc<Registry>,
         fleet_state: Arc<FleetState>,
-    ) -> Self {
+    ) -> Result<Self, VerdaError> {
         Self::with_shutdown(
             config,
             client,
@@ -96,14 +97,10 @@ impl VerdaManager {
         registry: Arc<Registry>,
         fleet_state: Arc<FleetState>,
         shutdown: CancellationToken,
-    ) -> Self {
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(5))
-            .build()
-            .unwrap_or_else(|_| reqwest::Client::new());
-        Self {
+    ) -> Result<Self, VerdaError> {
+        let http = rustls_client(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)))
+            .map_err(|err| VerdaError::Message(format!("http client: {err}")))?;
+        Ok(Self {
             inner: Arc::new(Inner {
                 config,
                 client,
@@ -119,7 +116,7 @@ impl VerdaManager {
                 orphan_first_seen: std::sync::Mutex::new(HashMap::new()),
                 cached_offer: std::sync::Mutex::new(None),
             }),
-        }
+        })
     }
 
     fn lock_cached_offer(&self) -> std::sync::MutexGuard<'_, Option<CachedOffer>> {

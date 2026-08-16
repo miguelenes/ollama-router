@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_yaml::Value;
+use noyalib::compat::serde_yaml::{self as serde_yaml, Value};
 
 use crate::fleet::file::{fleet_path_from_env, load_fleet_nodes};
 use crate::fleet::state::{FleetState, DEFAULT_STATE_PATH};

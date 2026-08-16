@@ -32,3 +32,25 @@ updates:
       docker:
         patterns:
           - "*"
+
+  - package-ecosystem: "docker"
+    directory: "crates/ollama-node-agent/packaging/linux"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 5
+    groups:
+      docker:
+        patterns:
+          - "*"
+
+  - package-ecosystem: "npm"
+    directory: "crates/ollama-router/ui"
+    schedule:
+      interval: "weekly"
+    cooldown:
+      default-days: 5
+    groups:
+      npm:
+        patterns:
+          - "*"

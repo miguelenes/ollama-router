@@ -25,12 +25,13 @@ http-body-util = "0.1"
 proptest = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-serde_yaml = "0.9"
+noyalib = { version = "0.0.22", features = ["compat-serde-yaml"] }
+rust-embed = "8"
 tempfile = "3"
 thiserror = "2"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "signal", "time", "sync", "io-util"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.7", features = ["trace", "request-id"] }
+tower-http = { version = "0.7", features = ["trace", "request-id", "sensitive-headers"] }
 prometheus = "0.14"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }

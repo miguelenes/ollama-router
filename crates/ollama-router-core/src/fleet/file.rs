@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use noyalib::compat::serde_yaml;
+
 use crate::config::error::ConfigError;
 use crate::config::models::{reject_duplicate_node_ids, Capacity, NodeConfig};
 use crate::fleet::ids::NodeId;

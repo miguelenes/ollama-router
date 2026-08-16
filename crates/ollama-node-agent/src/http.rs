@@ -14,6 +14,7 @@ use serde::Serialize;
 use sysinfo::System;
 use tokio::sync::RwLock;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::collect::{CollectError, Snapshot, StatusPayload};
@@ -158,6 +159,9 @@ pub fn make_app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http())
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            header::AUTHORIZATION,
+        ]))
         .with_state(state)
 }
 

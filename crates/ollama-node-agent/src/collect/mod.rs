@@ -205,11 +205,7 @@ pub fn tags_model_count(body: &[u8]) -> u64 {
 
 pub async fn ollama_tags_probe(base: &str) -> TagsProbe {
     let url = format!("{}/api/tags", base.trim_end_matches('/'));
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(COLLECT_TIMEOUT)
-        .use_rustls_tls()
-        .build()
-    else {
+    let Ok(client) = crate::rustls_client(None, Some(COLLECT_TIMEOUT)) else {
         return TagsProbe::default();
     };
     let Ok(resp) = client.get(url).send().await else {
@@ -278,11 +274,7 @@ pub fn parse_ps_body(body: &[u8]) -> PsProbe {
 
 async fn ollama_ps_probe(base: &str) -> PsProbe {
     let url = format!("{}/api/ps", base.trim_end_matches('/'));
-    let Ok(client) = reqwest::Client::builder()
-        .timeout(COLLECT_TIMEOUT)
-        .use_rustls_tls()
-        .build()
-    else {
+    let Ok(client) = crate::rustls_client(None, Some(COLLECT_TIMEOUT)) else {
         return PsProbe::default();
     };
     let Ok(resp) = client.get(url).send().await else {

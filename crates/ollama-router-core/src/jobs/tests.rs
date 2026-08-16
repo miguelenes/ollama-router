@@ -38,10 +38,7 @@ fn node(id: &str, url: &str, vram: f64, gpus: u32) -> NodeConfig {
 }
 
 fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .use_rustls_tls()
-        .build()
-        .expect("client")
+    crate::http_util::rustls_client(None, None).expect("client")
 }
 
 fn tags_body(models: &[&str]) -> String {

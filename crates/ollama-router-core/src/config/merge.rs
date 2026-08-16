@@ -1,6 +1,6 @@
 //! Deep-merge YAML mappings (overlay wins). Sequences and scalars replace.
 
-use serde_yaml::Value;
+use noyalib::compat::serde_yaml::Value;
 
 /// Merge `overlay` into `base`. Nested mappings are merged recursively;
 /// sequences and scalars in `overlay` replace the same key in `base`.
@@ -24,6 +24,7 @@ pub(crate) fn deep_merge(base: &mut Value, overlay: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use noyalib::compat::serde_yaml;
 
     #[test]
     fn nested_maps_merge_and_sequences_replace() {

@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::Capacity;
+use crate::http_util::rustls_client;
 use httpmock::prelude::*;
 use std::time::Duration;
 
@@ -133,7 +134,7 @@ async fn client_reads_fixture_and_pressure_level() {
             .header("content-type", "application/json")
             .body(r#"{"collected_at":"t","pressure_level":"ok","pressure":{"ram_available_gb":26.5}}"#);
     });
-    let client = CapacityClient::new(reqwest::Client::builder().use_rustls_tls().build().unwrap());
+    let client = CapacityClient::new(rustls_client(None, None).unwrap());
     let target = CapacityTarget {
         capacity_url: format!("{}/v1/capacity", server.base_url()),
         pressure_url: format!("{}/v1/pressure", server.base_url()),
@@ -153,7 +154,7 @@ async fn client_soft_fails_on_http_error_without_json_feature() {
         when.method(GET).path("/v1/capacity");
         then.status(503).body("ignored-body");
     });
-    let client = CapacityClient::new(reqwest::Client::builder().use_rustls_tls().build().unwrap());
+    let client = CapacityClient::new(rustls_client(None, None).unwrap());
     let target = CapacityTarget {
         capacity_url: format!("{}/v1/capacity", server.base_url()),
         pressure_url: format!("{}/v1/pressure", server.base_url()),
@@ -179,7 +180,7 @@ async fn pressure_miss_still_returns_capacity() {
         when.method(GET).path("/v1/pressure");
         then.status(500);
     });
-    let client = CapacityClient::new(reqwest::Client::builder().use_rustls_tls().build().unwrap());
+    let client = CapacityClient::new(rustls_client(None, None).unwrap());
     let base = url::Url::parse(&server.base_url()).expect("base url");
     let port = base.port().expect("mock port");
     let target = capacity_target(
@@ -227,7 +228,7 @@ async fn client_reads_rocm_fixture() {
             .header("content-type", "application/json")
             .body(r#"{"collected_at":"t","pressure_level":"ok","pressure":{"ram_available_gb":48.0}}"#);
     });
-    let client = CapacityClient::new(reqwest::Client::builder().use_rustls_tls().build().unwrap());
+    let client = CapacityClient::new(rustls_client(None, None).unwrap());
     let target = CapacityTarget {
         capacity_url: format!("{}/v1/capacity", server.base_url()),
         pressure_url: format!("{}/v1/pressure", server.base_url()),

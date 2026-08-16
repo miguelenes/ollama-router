@@ -16,6 +16,7 @@ use ollama_router_core::jobs::PullOrchestrator;
 use ollama_router_core::routing::{looks_like_embedding, DEFAULT_EMBED_MARKERS};
 use ollama_router_runpod::RunpodManager;
 use ollama_router_verda::VerdaManager;
+use rust_embed::RustEmbed;
 use serde::Serialize;
 use serde_json::json;
 use tokio::sync::Semaphore;
@@ -23,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 use tower_http::request_id::{
     MakeRequestUuid, PropagateRequestIdLayer, RequestId, SetRequestIdLayer,
 };
+use tower_http::sensitive_headers::SetSensitiveRequestHeadersLayer;
 use tower_http::trace::{MakeSpan, TraceLayer};
 use tracing::Span;
 
@@ -192,26 +194,43 @@ async fn openai_model_route(State(state): State<AppState>, Path(id): Path<String
 }
 
 async fn ui_index() -> Response {
-    (
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        include_str!("../../ui/dist/index.html"),
-    )
-        .into_response()
+    match UiAssets::get("index.html") {
+        Some(file) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            file.data.into_owned(),
+        )
+            .into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Compile-time embed of the Vite `dist` tree. Rust never lists asset filenames.
+#[derive(RustEmbed)]
+#[folder = "ui/dist"]
+struct UiAssets;
+
+/// Tiny MIME map for the console (html/js/css only — no `mime_guess` crate).
+fn ui_mime(path: &str) -> Option<&'static str> {
+    match path.rsplit('.').next()? {
+        "html" => Some("text/html; charset=utf-8"),
+        "js" => Some("text/javascript; charset=utf-8"),
+        "css" => Some("text/css; charset=utf-8"),
+        _ => None,
+    }
 }
 
 async fn ui_asset(Path(path): Path<String>) -> Response {
-    let (content_type, body): (&str, &'static [u8]) = match path.as_str() {
-        "assets/app.js" => (
-            "text/javascript; charset=utf-8",
-            include_bytes!("../../ui/dist/assets/app.js"),
-        ),
-        "assets/index.css" => (
-            "text/css; charset=utf-8",
-            include_bytes!("../../ui/dist/assets/index.css"),
-        ),
-        _ => return StatusCode::NOT_FOUND.into_response(),
+    let Some(file) = UiAssets::get(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
-    ([(header::CONTENT_TYPE, content_type)], body).into_response()
+    let Some(content_type) = ui_mime(&path) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    (
+        [(header::CONTENT_TYPE, content_type)],
+        file.data.into_owned(),
+    )
+        .into_response()
 }
 
 pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
@@ -269,6 +288,9 @@ pub fn make_app(state: AppState) -> Router {
         .layer(TraceLayer::new_for_http().make_span_with(RequestIdMakeSpan))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid))
+        .layer(SetSensitiveRequestHeadersLayer::new([
+            header::AUTHORIZATION,
+        ]))
 }
 
 #[derive(Clone, Copy, Debug)]

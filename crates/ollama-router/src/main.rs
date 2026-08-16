@@ -15,6 +15,7 @@ use ollama_router_core::cloud::{
     should_destroy_on_shutdown, CloudProviderHandle, MultiProviderDemand,
 };
 use ollama_router_core::fleet::normalize_model;
+use ollama_router_core::http_util::rustls_client;
 use ollama_router_core::jobs::{Job, JobStatus, PullOrchestrator};
 use ollama_router_core::load_config;
 use ollama_router_core::routing::TargetSpec;
@@ -260,7 +261,8 @@ fn wire_cloud_providers(state: &mut AppState, shutdown: CancellationToken) -> an
             state.registry.clone(),
             state.fleet_state.clone(),
             shutdown.clone(),
-        );
+        )
+        .context("verda manager")?;
         mgr.set_events(state.metrics.clone());
         handles.push(Arc::new(mgr.clone()) as Arc<dyn CloudProviderHandle>);
         state.verda = Some(mgr);
@@ -274,7 +276,8 @@ fn wire_cloud_providers(state: &mut AppState, shutdown: CancellationToken) -> an
             state.registry.clone(),
             state.fleet_state.clone(),
             shutdown,
-        );
+        )
+        .context("runpod manager")?;
         mgr.set_events(state.metrics.clone());
         handles.push(Arc::new(mgr.clone()) as Arc<dyn CloudProviderHandle>);
         state.runpod = Some(mgr);
@@ -327,7 +330,7 @@ async fn run_reload(config: Option<PathBuf>, host: String, port: u16) -> anyhow:
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow::anyhow!("set OLLAMA_ROUTER_ADMIN_TOKEN"))?;
     let url = format!("http://{host}:{port}/router/v1/reload");
-    let client = reqwest::Client::builder().use_rustls_tls().build()?;
+    let client = rustls_client(None, None)?;
     let resp = client
         .post(&url)
         .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))

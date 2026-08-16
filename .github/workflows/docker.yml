@@ -62,18 +62,14 @@ jobs:
 
       - name: Build and push
         id: build
-        uses: docker/build-push-action@v7
+        uses: docker/bake-action@v7
         with:
-          context: .
+          source: .
+          targets: router
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: |
-            type=gha,scope=ollama-router
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache
-          cache-to: |
-            type=gha,mode=max,scope=ollama-router,ignore-error=true
-            type=registry,ref=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:buildcache,mode=max
+          set: |
+            *.tags=${{ join(fromJSON(steps.meta.outputs.json).tags, ',') }}
+            *.labels=${{ join(fromJSON(steps.meta.outputs.json).labels, ',') }}
 
       # Artifact attestations are unavailable on user-owned private repos.
       # Re-enable automatically when the repository is public.
@@ -83,5 +79,5 @@ jobs:
         uses: actions/attest-build-provenance@v4
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          subject-digest: ${{ steps.build.outputs.digest }}
+          subject-digest: ${{ fromJSON(steps.build.outputs.metadata).router["containerimage.digest"] }}
           push-to-registry: true

@@ -161,10 +161,7 @@ fn systemd_available(dry_commands: bool) -> bool {
 }
 
 async fn install_ollama() -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(60))
-        .build()?;
+    let client = crate::rustls_client(None, Some(Duration::from_secs(60)))?;
     let bytes = client
         .get(INSTALL_SH)
         .send()
@@ -225,10 +222,7 @@ async fn chown_agent_path(path: &std::path::Path) {
 
 async fn wait_ollama_tags(bind: &str) -> anyhow::Result<()> {
     let url = format!("http://{bind}/api/tags");
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(2))
-        .build()?;
+    let client = crate::rustls_client(None, Some(Duration::from_secs(2)))?;
     for _ in 0..30 {
         if client
             .get(&url)

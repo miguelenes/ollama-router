@@ -119,7 +119,14 @@ task docker
 docker run --rm -p 11434:11434 ollama-router:local
 curl -fsS http://127.0.0.1:11434/healthz
 # {"status":"ok","version":"0.1.0"}
+```
 
+`task docker` builds the default `router` target of the single root `Dockerfile`
+(`docker buildx bake router` is equivalent). The mock and node-agent images are
+targets of the same file: `docker build --target mock` / `docker build --target
+agent` (there is no separate `Dockerfile.agent`).
+
+```bash
 # Host Ollama already on :11434 — router :11435, agent :11436 (does not run setup)
 task dev
 curl -fsS http://127.0.0.1:11435/healthz

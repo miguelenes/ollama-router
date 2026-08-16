@@ -390,10 +390,7 @@ fn persist_tokens(
 }
 
 pub async fn wait_ollama_loopback_tags() -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(2))
-        .build()?;
+    let client = crate::rustls_client(None, Some(Duration::from_secs(2)))?;
     let url = format!("{OLLAMA_LOOPBACK_URL}/api/tags");
     for _ in 0..30 {
         if client

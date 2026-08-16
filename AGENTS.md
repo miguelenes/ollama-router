@@ -94,13 +94,20 @@ Local runner is **Task** ([taskfile.dev](https://taskfile.dev/)) — `Taskfile.y
 ```bash
 task check          # fmt --check, clippy -D warnings, test --locked, cargo deny
 task coverage       # cargo llvm-cov --fail-under-lines 80 (≥80% lines; ignore **/main.rs)
-task docker         # docker build -t ollama-router:local .
+task docker         # docker build -t ollama-router:local . (or: docker buildx bake router)
 task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
 task compose:mock   # optional canned CPU+GPU mock fleet on host :11435
 task agent:doctor   # read-only node-agent report for this machine
 task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97.1-slim-bookworm; GHA never installs task)
 ```
+
+The agent serve image is a target of the root `Dockerfile` (`docker build
+--target agent`), not a separate `Dockerfile.agent`. Bake targets `router` /
+`mock` / `agent` live in `docker-bake.hcl`; CI and GHCR publish `router` only.
+Observability (Grafana/Alloy/Loki/Alertmanager + `grafana-data`) is shared
+between `deploy/compose.yaml` and `deploy/compose.mock.yaml` via
+`deploy/observability/compose.stack.yaml`.
 
 Before finishing a coding task, run `task check` and (for Rust/test changes) `task coverage`; do not stop while either fails. Line coverage must stay **≥ 80%**.
 
@@ -122,7 +129,7 @@ cargo deny check advisories bans
 cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
 ```
 
-Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container.
+Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, non-root `router` (uid 1000), **HEALTHCHECK** `curl` to `/healthz` (never Python). Listen `:11434` in-container. `router` / `mock` / `agent` are targets of this one Dockerfile. `/router/ui` is served from rust-embed of `crates/ollama-router/ui/dist` (Rust never lists Vite asset filenames).
 
 ## Learned User Preferences
 

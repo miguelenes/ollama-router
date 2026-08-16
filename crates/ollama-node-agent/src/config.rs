@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use noyalib::compat::serde_yaml;
+
 #[derive(Debug, Error)]
 pub enum ConfigError {
     #[error("read config {path}: {source}")]

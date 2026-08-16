@@ -2,17 +2,14 @@
 
 use std::time::Duration;
 
-use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 
 use ollama_router_core::config::{OsEnv, RunpodConfig};
-use ollama_router_core::http_util::reqwest_error_for_log;
+use ollama_router_core::http_util::{reqwest_error_for_log, retry_after_seconds, rustls_client};
 
 use crate::types::{CatalogGpu, CatalogResponse, CreatePodRequest, Pod};
-
-const MAX_429_WAIT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunpodError {
@@ -60,10 +57,7 @@ impl RunpodClient {
 
     /// Test / injected credentials. Never log `api_key`.
     pub fn with_api_key(config: RunpodConfig, api_key: String) -> Result<Self, RunpodError> {
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .timeout(Duration::from_secs(30))
-            .build()
+        let http = rustls_client(None, Some(Duration::from_secs(30)))
             .map_err(|err| RunpodError::Message(format!("http client: {err}")))?;
         Ok(Self {
             http,
@@ -72,29 +66,6 @@ impl RunpodClient {
             api_key: SecretString::from(api_key),
             cloud_type: config.cloud_type.trim().to_string(),
         })
-    }
-
-    fn retry_after_secs(headers: &HeaderMap) -> f64 {
-        if let Some(v) = headers
-            .get(RETRY_AFTER)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.parse::<f64>().ok())
-        {
-            return v;
-        }
-        // IETF RateLimit header: "limit=…, remaining=…, reset=N"
-        if let Some(raw) = headers.get("ratelimit").and_then(|v| v.to_str().ok()) {
-            for part in raw.split(',') {
-                let part = part.trim();
-                if let Some(reset) = part
-                    .strip_prefix("reset=")
-                    .and_then(|s| s.trim().parse::<f64>().ok())
-                {
-                    return reset;
-                }
-            }
-        }
-        5.0
     }
 
     async fn request_v1(
@@ -159,15 +130,12 @@ impl RunpodClient {
             };
             let status = resp.status();
             if status == StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = Self::retry_after_secs(resp.headers());
+                let retry_after = retry_after_seconds(resp.headers());
                 if attempt >= 3 {
                     return Err(RunpodError::status(429, method.as_str(), path));
                 }
                 attempt += 1;
-                tokio::time::sleep(Duration::from_secs_f64(
-                    retry_after.min(MAX_429_WAIT.as_secs_f64()),
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_secs_f64(retry_after)).await;
                 continue;
             }
             if matches!(status.as_u16(), 408 | 425 | 500 | 502 | 503 | 504) && attempt < 1 {

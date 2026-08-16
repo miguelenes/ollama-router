@@ -2,14 +2,13 @@
 
 use std::time::{Duration, Instant};
 
-use reqwest::header::RETRY_AFTER;
 use reqwest::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::Value;
 use tokio::sync::Mutex;
 
 use ollama_router_core::config::{OsEnv, VerdaConfig};
-use ollama_router_core::http_util::reqwest_error_for_log;
+use ollama_router_core::http_util::{reqwest_error_for_log, retry_after_seconds, rustls_client};
 
 use crate::types::{
     Image, Instance, InstanceAvailability, InstanceType, SshKey, StartupScript, TokenResponse,
@@ -17,7 +16,6 @@ use crate::types::{
 
 const TOKEN_PATH: &str = "/v1/oauth2/token";
 const TOKEN_LEEWAY: Duration = Duration::from_secs(30);
-const MAX_429_WAIT: Duration = Duration::from_secs(60);
 const LIST_PAGE_SIZE: u32 = 100;
 const LIST_MAX_PAGES: u32 = 50;
 
@@ -81,10 +79,7 @@ impl VerdaClient {
         client_id: String,
         client_secret: String,
     ) -> Result<Self, VerdaError> {
-        let http = reqwest::Client::builder()
-            .use_rustls_tls()
-            .timeout(Duration::from_secs(30))
-            .build()
+        let http = rustls_client(None, Some(Duration::from_secs(30)))
             .map_err(|err| VerdaError::Message(format!("http client: {err}")))?;
         Ok(Self {
             base_url: config.base_url.trim_end_matches('/').to_string(),
@@ -233,20 +228,12 @@ impl VerdaClient {
                 continue;
             }
             if status == StatusCode::TOO_MANY_REQUESTS {
-                let retry_after = resp
-                    .headers()
-                    .get(RETRY_AFTER)
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|s| s.parse::<f64>().ok())
-                    .unwrap_or(5.0);
+                let retry_after = retry_after_seconds(resp.headers());
                 if attempt >= 3 {
                     return Err(VerdaError::status(429, method.as_str(), path));
                 }
                 attempt += 1;
-                tokio::time::sleep(Duration::from_secs_f64(
-                    retry_after.min(MAX_429_WAIT.as_secs_f64()),
-                ))
-                .await;
+                tokio::time::sleep(Duration::from_secs_f64(retry_after)).await;
                 continue;
             }
             if matches!(status.as_u16(), 408 | 425 | 500 | 502 | 503 | 504) && attempt < 1 {

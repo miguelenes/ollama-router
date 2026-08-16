@@ -18,6 +18,25 @@ pub mod windows_scm;
 pub use config::AgentConfig;
 pub use http::{make_app, AppState};
 
+/// Build a rustls-only reqwest client. Never falls back to `Client::new()`.
+///
+/// Mirrors `ollama-router-core::http_util::rustls_client` without taking a
+/// dependency on core. `connect` sets `connect_timeout`; `request` sets the
+/// per-request `timeout`.
+pub(crate) fn rustls_client(
+    connect: Option<std::time::Duration>,
+    request: Option<std::time::Duration>,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    if let Some(timeout) = connect {
+        builder = builder.connect_timeout(timeout);
+    }
+    if let Some(timeout) = request {
+        builder = builder.timeout(timeout);
+    }
+    builder.build()
+}
+
 pub fn init_tracing() {
     tracing_subscriber::fmt()
         .json()

@@ -63,15 +63,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             musl-tools cmake clang libclang-dev nasm pkg-config binutils
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.97"
           targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: agent-${{ matrix.target }}
+          cache-key: agent-${{ matrix.target }}
 
       - name: cargo build musl
         env:
@@ -169,15 +165,11 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.97"
           targets: ${{ matrix.target }}
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: agent-${{ matrix.target }}
+          cache-key: agent-${{ matrix.target }}
 
       - name: cargo build
         run: cargo build --release --locked -p ollama-node-agent --target ${{ matrix.target }}
@@ -246,14 +238,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.97"
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: agent-windows-amd64
+          cache-key: agent-windows-amd64
 
       - name: cargo build
         run: cargo build --release --locked -p ollama-node-agent

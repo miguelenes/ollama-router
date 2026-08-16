@@ -21,6 +21,7 @@ ollama-router-runpod = { path = "../ollama-router-runpod" }
 ollama-router-verda = { path = "../ollama-router-verda" }
 prometheus.workspace = true
 reqwest.workspace = true
+rust-embed.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

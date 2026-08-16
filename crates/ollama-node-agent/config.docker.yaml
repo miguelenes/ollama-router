@@ -1,4 +1,5 @@
-# Loopback defaults for Dockerfile.agent. Fleet hosts use systemd +
+# Loopback defaults for the root Dockerfile `agent` target
+# (`docker build --target agent`). Fleet hosts use systemd +
 # /etc/ollama-node-agent/config.yaml (typically listen: loopback + tunnel).
 listen: loopback
 port: 11436

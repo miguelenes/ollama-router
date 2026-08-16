@@ -130,11 +130,7 @@ fn spawn_if_configured_with(
     let token_lookup =
         token_lookup.unwrap_or_else(|| env_token_lookup(resolve_token_env(&app.config, &converge)));
     let endpoint = enroll_endpoint(&url);
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .use_rustls_tls()
-        .build()
-    {
+    let client = match crate::rustls_client(None, Some(Duration::from_secs(5))) {
         Ok(client) => client,
         Err(_) => {
             tracing::warn!("register skipped: http client");
@@ -276,7 +272,7 @@ mod http_tests {
             ..ConvergeState::default()
         };
         let body = enroll_heartbeat(&config, &state, "host", "0.1.0").unwrap();
-        let client = reqwest::Client::builder().use_rustls_tls().build().unwrap();
+        let client = crate::rustls_client(None, None).unwrap();
         let resp = client
             .post(enroll_endpoint(&server.base_url()))
             .bearer_auth("secret")

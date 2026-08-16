@@ -22,13 +22,10 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Setup Rust
+        uses: ./.github/actions/setup-rust
         with:
-          toolchain: "1.97"
           components: clippy, rustfmt, llvm-tools-preview
-
-      - uses: Swatinem/rust-cache@v2
 
       - name: cargo fmt
         run: cargo fmt --all -- --check
@@ -39,18 +36,13 @@ jobs:
       - name: cargo test
         run: cargo test --workspace --locked
 
-      - name: Install cargo-deny
+      - name: Install cargo-deny and cargo-llvm-cov
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-deny
+          tool: cargo-deny,cargo-llvm-cov
 
       - name: cargo deny
         run: cargo deny check advisories bans
-
-      - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-llvm-cov
 
       - name: coverage (≥80% lines, ignore **/main.rs)
         run: cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex '(^|/)main\.rs$'
@@ -71,13 +63,13 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Build image
-        uses: docker/build-push-action@v7
+        uses: docker/bake-action@v7
         with:
-          context: .
+          source: .
+          targets: router
           load: true
-          tags: ollama-router:ci
-          cache-from: type=gha,scope=ollama-router
-          cache-to: type=gha,mode=max,scope=ollama-router,ignore-error=true
+          set: |
+            router.tags=ollama-router:ci
 
       - name: Run /healthz
         run: |

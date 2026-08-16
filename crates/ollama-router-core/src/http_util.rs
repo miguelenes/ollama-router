@@ -1,7 +1,62 @@
-//! Shared reqwest helpers: URL-stripped errors and capped body reads.
+//! Shared reqwest helpers: URL-stripped errors, capped body reads, and a
+//! rustls-only client factory plus 429/`Retry-After` parsing.
+
+use std::time::Duration;
 
 use bytes::Bytes;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 use thiserror::Error;
+
+/// Upper bound for any parsed backoff (matching the Verda/RunPod 429 cap).
+const MAX_RETRY_AFTER_SECS: f64 = 60.0;
+/// Fallback when neither `Retry-After` nor `RateLimit` is present.
+const DEFAULT_RETRY_AFTER_SECS: f64 = 5.0;
+
+/// Build a rustls-only reqwest client. Never falls back to `Client::new()`.
+///
+/// `connect` sets `connect_timeout`; `request` sets the per-request `timeout`.
+/// Both are optional — callers pass the durations their endpoint needs.
+pub fn rustls_client(
+    connect: Option<Duration>,
+    request: Option<Duration>,
+) -> Result<reqwest::Client, reqwest::Error> {
+    let mut builder = reqwest::Client::builder().use_rustls_tls();
+    if let Some(timeout) = connect {
+        builder = builder.connect_timeout(timeout);
+    }
+    if let Some(timeout) = request {
+        builder = builder.timeout(timeout);
+    }
+    builder.build()
+}
+
+/// Seconds to wait before retrying a rate-limited request.
+///
+/// Parses `Retry-After` first, then the IETF `RateLimit` header `reset=` field.
+/// Values are clamped to `0..=60`; a missing or unparseable header defaults to
+/// 5s. Never inspects URLs or bodies.
+pub fn retry_after_seconds(headers: &HeaderMap) -> f64 {
+    if let Some(v) = headers
+        .get(RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<f64>().ok())
+    {
+        return v.clamp(0.0, MAX_RETRY_AFTER_SECS);
+    }
+    // IETF RateLimit header: "limit=…, remaining=…, reset=N"
+    if let Some(raw) = headers.get("ratelimit").and_then(|v| v.to_str().ok()) {
+        for part in raw.split(',') {
+            let part = part.trim();
+            if let Some(reset) = part
+                .strip_prefix("reset=")
+                .and_then(|s| s.trim().parse::<f64>().ok())
+            {
+                return reset.clamp(0.0, MAX_RETRY_AFTER_SECS);
+            }
+        }
+    }
+    DEFAULT_RETRY_AFTER_SECS
+}
 
 /// `reqwest::Error` `Display` includes the URL. Strip it before logs.
 pub fn reqwest_error_for_log(err: reqwest::Error) -> String {
@@ -51,15 +106,76 @@ pub async fn read_reqwest_capped(
 
 #[cfg(test)]
 mod tests {
-    use super::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
+    use super::{
+        read_reqwest_capped, reqwest_error_for_log, retry_after_seconds, rustls_client,
+        ProbeBodyError,
+    };
     use httpmock::prelude::*;
+    use reqwest::header::{HeaderMap, HeaderValue, RETRY_AFTER};
+
+    #[test]
+    fn retry_after_parses_retry_after_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("12"));
+        assert_eq!(retry_after_seconds(&headers), 12.0);
+    }
+
+    #[test]
+    fn retry_after_prefers_retry_after_over_ratelimit() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("7"));
+        headers.insert("ratelimit", HeaderValue::from_static("limit=10, reset=30"));
+        assert_eq!(retry_after_seconds(&headers), 7.0);
+    }
+
+    #[test]
+    fn retry_after_falls_back_to_ratelimit_reset() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "ratelimit",
+            HeaderValue::from_static("limit=10, remaining=4, reset=25"),
+        );
+        assert_eq!(retry_after_seconds(&headers), 25.0);
+    }
+
+    #[test]
+    fn retry_after_caps_at_sixty() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("900"));
+        assert_eq!(retry_after_seconds(&headers), 60.0);
+    }
+
+    #[test]
+    fn retry_after_floors_negative_at_zero() {
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("-3"));
+        assert_eq!(retry_after_seconds(&headers), 0.0);
+    }
+
+    #[test]
+    fn retry_after_defaults_to_five_when_missing_or_garbage() {
+        assert_eq!(retry_after_seconds(&HeaderMap::new()), 5.0);
+        let mut headers = HeaderMap::new();
+        headers.insert(RETRY_AFTER, HeaderValue::from_static("soon"));
+        headers.insert("ratelimit", HeaderValue::from_static("limit=10"));
+        assert_eq!(retry_after_seconds(&headers), 5.0);
+    }
+
+    #[test]
+    fn rustls_client_builds_with_and_without_timeouts() {
+        let bare = rustls_client(None, None).expect("bare client");
+        drop(bare);
+        let timed = rustls_client(
+            Some(std::time::Duration::from_secs(5)),
+            Some(std::time::Duration::from_secs(5)),
+        )
+        .expect("timed client");
+        drop(timed);
+    }
 
     #[tokio::test]
     async fn reqwest_error_for_log_strips_url() {
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .expect("client");
+        let client = rustls_client(None, None).expect("client");
         let err = client
             .get("http://127.0.0.1:1/secret-share")
             .send()
@@ -85,10 +201,7 @@ mod tests {
                 .header("content-length", "100")
                 .body("x".repeat(100));
         });
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .expect("client");
+        let client = rustls_client(None, None).expect("client");
         let resp = client
             .get(format!("{}/big", server.base_url()))
             .send()
@@ -105,10 +218,7 @@ mod tests {
             when.method(GET).path("/ok");
             then.status(200).body("hello");
         });
-        let client = reqwest::Client::builder()
-            .use_rustls_tls()
-            .build()
-            .expect("client");
+        let client = rustls_client(None, None).expect("client");
         let resp = client
             .get(format!("{}/ok", server.base_url()))
             .send()

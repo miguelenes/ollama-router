@@ -40,9 +40,14 @@ tasks:
       - task: deny
 
   docker:
-    desc: Build ollama-router:local
+    desc: Build ollama-router:local (default target; `docker buildx bake router` is equivalent)
     cmds:
       - docker build -t ollama-router:local .
+
+  docker:agent:
+    desc: Build the node-agent serve image (root Dockerfile `--target agent`; no Dockerfile.agent)
+    cmds:
+      - docker build --target agent -t ollama-node-agent:local .
 
   compose:up:
     desc: Start Grafana/Prometheus/Loki (loopback :3000 / :9090); scrape native router on host :11435

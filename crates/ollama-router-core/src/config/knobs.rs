@@ -1,6 +1,6 @@
 //! Table-driven `OLLAMA_ROUTER_*` / `VERDA_*` env knobs.
 
-use serde_yaml::{Mapping, Value};
+use noyalib::compat::serde_yaml::{self as serde_yaml, Mapping, Value};
 
 use super::env_source::EnvSource;
 use super::error::ConfigError;
@@ -379,18 +379,15 @@ fn set_path(raw: &mut Value, path: &[&str], value: Value) {
             Value::Mapping(mapping) => mapping,
             _ => return,
         };
-        if !mapping.contains_key(*key) || !mapping.get(*key).is_some_and(Value::is_mapping) {
-            mapping.insert(
-                Value::String((*key).to_string()),
-                Value::Mapping(Mapping::new()),
-            );
+        if !mapping.contains_key(key) || !mapping.get(key).is_some_and(Value::is_mapping) {
+            mapping.insert((*key).to_string(), Value::Mapping(Mapping::new()));
         }
-        cursor = match mapping.get_mut(*key) {
+        cursor = match mapping.get_mut(key) {
             Some(next) => next,
             None => return,
         };
     }
     if let Value::Mapping(mapping) = cursor {
-        mapping.insert(Value::String((*last).to_string()), value);
+        mapping.insert((*last).to_string(), value);
     }
 }

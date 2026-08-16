@@ -1,5 +1,6 @@
 # Toolchain for local `task agent:release:linux` / `:deb`.
-# Not the serve image (`Dockerfile.agent`) and not the router (`Dockerfile`).
+# Not the serve image (root `Dockerfile` `--target agent`) and not the router
+# (root `Dockerfile` default target).
 #
 #   docker build -f crates/ollama-node-agent/packaging/linux/Dockerfile.release \
 #     -t ollama-node-agent-release:local \

@@ -111,10 +111,7 @@ async fn install_ollama_windows() -> anyhow::Result<()> {
 }
 
 async fn download_setup_silent() -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    let client = crate::rustls_client(None, Some(Duration::from_secs(120)))?;
     let bytes = client
         .get(SETUP_URL)
         .send()
@@ -132,10 +129,7 @@ async fn download_setup_silent() -> anyhow::Result<()> {
 }
 
 async fn download_and_unzip() -> anyhow::Result<()> {
-    let client = reqwest::Client::builder()
-        .use_rustls_tls()
-        .timeout(Duration::from_secs(120))
-        .build()?;
+    let client = crate::rustls_client(None, Some(Duration::from_secs(120)))?;
     let bytes = client
         .get(ZIP_URL)
         .send()

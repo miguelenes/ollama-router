@@ -153,7 +153,8 @@ fn manager_with_shutdown(
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
     let client = client(server);
-    let mgr = VerdaManager::with_shutdown(config, client, registry.clone(), fs.clone(), shutdown);
+    let mgr = VerdaManager::with_shutdown(config, client, registry.clone(), fs.clone(), shutdown)
+        .expect("verda manager");
     (mgr, registry, fs)
 }
 
@@ -1249,7 +1250,8 @@ async fn persist_fail_compensates_with_delete() {
     config.verda.auto_scale = false;
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
-    let mgr = VerdaManager::new(config, client(&server), registry, fs.clone());
+    let mgr =
+        VerdaManager::new(config, client(&server), registry, fs.clone()).expect("verda manager");
     let result = mgr.create_additional().await;
     assert!(result.is_err());
     assert!(delete.calls() >= 1);
@@ -1293,7 +1295,8 @@ async fn persist_fail_and_delete_fail_does_not_forget() {
     config.verda.auto_scale = false;
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
-    let mgr = VerdaManager::new(config, client(&server), registry.clone(), fs);
+    let mgr =
+        VerdaManager::new(config, client(&server), registry.clone(), fs).expect("verda manager");
     let result = mgr.create_additional().await;
     assert!(result.is_err());
     assert!(delete.calls() >= 1);
