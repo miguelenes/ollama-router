@@ -6,17 +6,12 @@ Keeps size-and-load ranking and placement honest about hardware: omitted VRAM or
 
 ### Requirement: Omitted VRAM is unknown, not zero
 
-The system SHALL distinguish a node whose VRAM (or GPU count) has not been measured or statically declared from a node whose inventory reports zero VRAM or zero GPUs. Ranking, placement static VRAM gates, and GPU-vs-CPU preference MUST NOT treat omitted VRAM as a measured `0`. Health probes MAY still mark the node healthy from `/api/tags` when the capacity agent is down.
+The system SHALL distinguish a node whose VRAM (or GPU count) has not been measured or statically declared from a node whose inventory reports zero VRAM or zero GPUs. Ranking, placement static VRAM gates, and class VRAM preference MUST NOT treat omitted VRAM as a measured `0`. Health probes MAY still mark the node healthy from `/api/tags` when the capacity agent is down.
 
-#### Scenario: silent GPU is not a CPU for SMALL preference
+#### Scenario: omitted VRAM is not encoded as zero
 
-- **WHEN** two healthy holders of the same SMALL model exist, one with known VRAM 8 GiB and `gpus >= 1`, and one with unknown VRAM and unknown GPU count
-- **THEN** SMALL ranking prefers the known GPU over the unknown node
-
-#### Scenario: measured CPU stays a CPU
-
-- **WHEN** a healthy holder reports known VRAM 0 and known `gpus = 0`
-- **THEN** SMALL ranking treats it as a CPU (after any known GPU holders)
+- **WHEN** a node has no static or agent VRAM (and no GPU count)
+- **THEN** ranking and placement MUST NOT treat that node as a measured CPU with VRAM 0 / `gpus = 0`
 
 ### Requirement: MEDIUM and LARGE require known sufficient VRAM
 

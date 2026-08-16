@@ -26,15 +26,15 @@ YAML `0` / `gpus: 0` remains a measured CPU. Omitted stays `None`. Add routing a
 
 **Alternative considered:** Fail-unhealthy on unknown. Rejected — agent soft-fail, tags must still list the node.
 
-**Alternative considered:** Distinct inflight cap for unknown. Rejected — spec allows the lowest-tier number; gates and SMALL bands are the bug.
+**Alternative considered:** Distinct inflight cap for unknown. Rejected — spec allows the lowest-tier number; gates, SMALL bands, and EMBED/MEDIUM not treating omitted as `0` are the bug.
 
 ### 2. MEDIUM/LARGE unknown does not fit ranking **or** placement
 
-`vram_fits` / `static_capacity_fits`: MEDIUM/LARGE need `Some(vram)` meeting existing thresholds. EMBED/SMALL/GENERIC stay admissible. `RequestClass::Pull` is unused by HTTP pull targeting; `start_ensure` / `placement_eligible_node_ids` use generate class, so LARGE jobs skip unknown VRAM and known CPUs.
+`vram_fits` / `static_capacity_fits`: MEDIUM/LARGE need `Some(vram)` meeting existing thresholds. EMBED/SMALL/GENERIC stay admissible. `RequestClass::Pull` is unused by HTTP pull targeting; `start_ensure` / `placement_eligible_node_ids` use generate class, so LARGE jobs skip unknown VRAM and known CPUs. Default HTTP ensure uses `include_unhealthy: false`; `#all` may widen.
 
-### 3. SMALL preference bands; utilization still first
+### 3. Preference uses known VRAM/GPU; utilization still first
 
-Known GPU (`gpus >= 1`), then unknown GPU count, then known CPU (`Some(0)`). `load_key` position 1 unchanged. Existing proptest (utilization beats preference; saturated never selected) stays.
+SMALL: known GPU (`gpus >= 1`), then unknown GPU count, then known CPU (`Some(0)`). EMBED and MEDIUM compare **known** VRAM only — omitted MUST NOT sort as `0` (would win as the “smallest GPU”). LARGE unknown is already excluded by the VRAM gate. `load_key` position 1 unchanged. Existing proptest (utilization beats preference; saturated never selected) stays.
 
 ### 4. Class hint from the catalog
 

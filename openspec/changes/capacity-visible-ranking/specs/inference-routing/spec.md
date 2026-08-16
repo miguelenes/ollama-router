@@ -25,12 +25,22 @@ The system SHALL forward `POST /api/generate`, `/api/chat`, `/api/embed` (includ
 
 ### Requirement: Class preference among similar load
 
-When utilization (and pressure) do not already decide, the system SHALL apply class VRAM preference: EMBED prefers lower known VRAM; SMALL prefers known GPU then unknown then known CPU; MEDIUM prefers lower known VRAM; LARGE prefers higher known VRAM. LARGE remains hard-gated by the LARGE VRAM estimate in `size-load-routing`.
+When utilization (and pressure) do not already decide, the system SHALL apply class VRAM preference using **known** VRAM/GPU only: EMBED prefers lower known VRAM; SMALL prefers known GPU then unknown then known CPU; MEDIUM prefers lower known VRAM; LARGE prefers higher known VRAM. Omitted VRAM MUST NOT sort as `0` (lowest) for EMBED or MEDIUM. LARGE remains hard-gated by the LARGE VRAM estimate in `size-load-routing` (unknown VRAM is not in the LARGE pool).
 
 #### Scenario: EMBED leaves the big card free
 
 - **WHEN** an 8 GiB and a 48 GiB GPU both hold the embedding model, are healthy, and have equal utilization
 - **THEN** embed ranks the 8 GiB node first
+
+#### Scenario: EMBED does not treat unknown as the smallest GPU
+
+- **WHEN** a known 8 GiB GPU and a holder with omitted VRAM both hold the same embedding model, are healthy, and have equal utilization
+- **THEN** embed ranks the known 8 GiB GPU first
+
+#### Scenario: SMALL prefers known GPU over unknown then CPU
+
+- **WHEN** three healthy holders of the same SMALL model exist — known GPU, unknown VRAM/GPU count, and known CPU (`vram = 0`, `gpus = 0`) — with equal utilization
+- **THEN** ranking order is known GPU, then unknown, then known CPU
 
 ### Requirement: Stream and retry only before the first byte
 

@@ -6,7 +6,7 @@ Puts a pulled model on every node that can actually run it so later generate/cha
 
 ### Requirement: Default pull targets every generate-class-eligible node
 
-Default `POST /api/pull` and admin ensure (placement selector `*` / omitted) SHALL target every configured node that passes label policy and **static** VRAM for that model’s **generate** class (`request-class` on `/api/generate`, not the `/api/pull` path class). The job MUST NOT target a node that fails those static gates. LARGE MUST NOT target a known CPU. MEDIUM and LARGE MUST NOT target unknown VRAM (`size-load-routing`). Explicit `#all` MAY override the node set; capacity skips at run still apply. Success SHALL mean the model is on disk on the remaining targets (visible on the next tags probe). The system MUST NOT log pull bodies.
+Default `POST /api/pull` and admin ensure (placement selector `*` / omitted) SHALL target every **healthy** node that passes label policy and **static** VRAM for that model’s **generate** class (`request-class` on `/api/generate`, not the `/api/pull` path class). The job MUST NOT target a node that fails those static gates. LARGE MUST NOT target a known CPU. MEDIUM and LARGE MUST NOT target unknown VRAM (`size-load-routing`). Explicit `#all` MAY include additional nodes; capacity skips at run still apply. Success SHALL mean the model is on disk on the remaining targets (visible on the next tags probe). The system MUST NOT log pull bodies.
 
 #### Scenario: MEDIUM pull includes the known GPU
 
