@@ -123,7 +123,10 @@ async fn healthz() -> Json<HealthResponse> {
 
 async fn readyz(State(state): State<AppState>) -> Response {
     let snap = state.registry.snapshot();
-    let healthy: Vec<_> = snap.iter().filter(|n| n.healthy && !n.draining).collect();
+    let healthy: Vec<_> = snap
+        .iter()
+        .filter(|n| n.healthy && !n.draining && !n.cordoned)
+        .collect();
     if healthy.is_empty() {
         return json_status(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -239,6 +242,8 @@ pub fn make_app(state: AppState) -> Router {
             "/router/v1/nodes",
             get(admin::list_nodes).put(admin::put_node),
         )
+        .route("/router/v1/nodes/{id}/drain", post(admin::drain_node))
+        .route("/router/v1/nodes/{id}/undrain", post(admin::undrain_node))
         .route("/router/v1/readiness", get(admin::readiness))
         .route("/router/v1/readiness/recheck", post(admin::recheck))
         .route("/router/v1/models", get(admin::list_models))
@@ -246,6 +251,7 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/v1/models/delete", post(admin::delete_models))
         .route("/router/v1/jobs", get(admin::list_jobs))
         .route("/router/v1/jobs/{id}", get(admin::get_job))
+        .route("/router/v1/jobs/{id}/cancel", post(admin::cancel_job))
         .route("/router/v1/stats", get(admin::stats))
         .route("/router/v1/reload", post(admin::reload))
         .route("/router/v1/nodes/enroll", post(admin::enroll_node))

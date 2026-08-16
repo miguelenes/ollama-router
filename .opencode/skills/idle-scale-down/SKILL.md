@@ -22,6 +22,11 @@ Implementation: `crates/ollama-router-core/src/cloud/` + `Registry::inflight_inc
 | | Capacity agent |
 | | Admin `/router/v1/*` |
 | | Warm-keeper (occupies inflight without `inflight_inc`) |
+| | Fleet unload / `ollama stop` (no `inflight_inc`) |
+
+Operator cordon (`cordoned` via admin drain/undrain) is **not** inventory/Verda
+`draining` and is not the idle teardown path. Teardown still reads only
+`draining`.
 
 ## Eligibility
 

@@ -61,7 +61,7 @@ pub fn bootstrap_targets(
             } else {
                 nodes
                     .iter()
-                    .filter(|n| n.healthy && !n.draining)
+                    .filter(|n| n.healthy && !n.draining && !n.cordoned)
                     .map(|n| n.id.clone())
                     .collect()
             };

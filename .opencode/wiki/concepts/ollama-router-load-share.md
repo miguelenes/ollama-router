@@ -22,14 +22,17 @@ concurrency capacity (VRAM tier). The primary sort key is **utilization**
 | 2 | Pressure penalty | RAM pressure: elevated +2, critical +8 |
 | 3 | Known GPU util | Soft band (busy ≥ 50%); unknown util is middle, **not** `0` |
 | 4 | Known free VRAM | Soft band (tight < 2 GiB); unknown free is middle, **not** `0` full |
-| 5 | Capacity preference | Class-aware VRAM affinity (see below) |
-| 6 | Warm score + RAM bias | 0 if loaded, 1 if cold; RAM available ratio tie-break |
+| 5 | Known CPU util | Soft band (busy ≥ 80%); unknown util is middle (`1.0`), **not** idle `0` |
+| 6 | Capacity preference | Class-aware VRAM affinity (see below) |
+| 7 | Warm score + RAM bias | 0 if loaded, 1 if cold; RAM available ratio tie-break |
 
-`base_inflight_cap` is the concurrency ceiling **before** pressure derating:
-explicit per-node `max_inflight`, fleet-wide `default_max_inflight`, or the
-VRAM-tier suggestion. Pressure is a scoring penalty — it does not inflate the
-utilization ratio. Inflight utilization **dominates** GPU-util and free-VRAM
-bias and class preference. Metrics may still publish `gpu_util_pct=0` /
+`load_key` is `(inflight, pressure, gpu_util, vram_free, cpu_util, preference,
+warm+ram)`. `CPU_UTIL_BUSY_PCT = 80` (no YAML knob). `base_inflight_cap` is the
+concurrency ceiling **before** pressure derating: explicit per-node
+`max_inflight`, fleet-wide `default_max_inflight`, or the VRAM-tier suggestion.
+Pressure is a scoring penalty — it does not inflate the utilization ratio.
+Inflight utilization **dominates** GPU-util, free-VRAM, and CPU-util bias and
+class preference. Metrics may still publish `gpu_util_pct=0` /
 `vram_free_gb=0` when the matching `*_known` flag is false; ranking must not
 treat those as idle or full.
 
@@ -54,13 +57,24 @@ a request class. It never overrides a genuine utilization difference.
 ## Hard filters (before scoring)
 
 1. Healthy
-2. Label match (`must_have_labels` / `avoid_labels`)
-3. Model present on disk (not necessarily loaded)
-4. `capacity_fits` — static VRAM gate + live headroom + reservation ledger
-5. Not saturated — `inflight < effective_max_inflight`
+2. Not draining and not operator-cordoned (`draining || cordoned`)
+3. Label match (`must_have_labels` / `avoid_labels`)
+4. Model present on disk (not necessarily loaded)
+5. `capacity_fits` — static VRAM gate + live headroom + reservation ledger
+6. Not saturated — `inflight < effective_max_inflight`
 
 A saturated node is **hard-filtered**. All otherwise-eligible nodes saturated →
-`all_nodes_saturated` → proxy 503.
+`all_nodes_saturated` → proxy 503 (opt-in `saturation_wait_seconds` may wait
+for a free slot before that 503).
+
+### Operator cordon (drain API)
+
+Admin `POST /router/v1/nodes/{id}/drain` and `/undrain` set a **cordoned** bit
+separate from Verda/inventory `draining`. Ranking, placement, bootstrap, and
+warm-keeper exclude both; health/capacity probes continue. Gauge
+`ollama_router_node_draining` is `draining || cordoned`. Cordon is not
+persisted across process restart; an in-process inventory reload must not clear
+it. Teardown / `should_remove_permanent` still read only inventory `draining`.
 
 ## Concurrency tiers (`suggested_max_inflight`)
 

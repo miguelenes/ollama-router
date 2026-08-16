@@ -152,6 +152,7 @@ pub fn placement_eligible_node_ids(
     let request_class = placement_class(model, policy, size_hint_b);
     let mut candidates: Vec<&NodeSnapshot> = nodes
         .iter()
+        .filter(|node| !node.draining && !node.cordoned)
         .filter(|node| include_unhealthy || node.healthy)
         .filter(|node| label_ok(&node.labels, policy))
         .filter(|node| {

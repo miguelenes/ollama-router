@@ -251,6 +251,8 @@ pub struct PolicyConfig {
     pub retry_on_status: Vec<u16>,
     pub overload_wait_ms: u32,
     pub admission_wait_ms: u32,
+    /// Bounded wait for an inflight slot when every holder is saturated (0 = off).
+    pub saturation_wait_seconds: f64,
     pub saturated_retry_after_seconds: u32,
     pub provision_retry_after_seconds: u32,
     pub auto_pull_on_miss: bool,
@@ -301,6 +303,7 @@ impl Default for PolicyConfig {
             retry_on_status: vec![429, 503],
             overload_wait_ms: 0,
             admission_wait_ms: 0,
+            saturation_wait_seconds: 0.0,
             saturated_retry_after_seconds: 30,
             provision_retry_after_seconds: 30,
             auto_pull_on_miss: false,
@@ -392,6 +395,12 @@ impl PolicyConfig {
         if !(1..=900).contains(&self.saturated_retry_after_seconds) {
             return Err(ConfigError::invalid(
                 "saturated_retry_after_seconds must be between 1 and 900",
+            ));
+        }
+        reject_non_finite("saturation_wait_seconds", self.saturation_wait_seconds)?;
+        if !(0.0..=120.0).contains(&self.saturation_wait_seconds) {
+            return Err(ConfigError::invalid(
+                "saturation_wait_seconds must be between 0 and 120",
             ));
         }
         if !(1..=900).contains(&self.provision_retry_after_seconds) {

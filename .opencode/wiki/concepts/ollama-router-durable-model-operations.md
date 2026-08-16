@@ -36,6 +36,15 @@ Pruning deletes both the in-memory view and the SQLite row. Call
 `recover_incomplete_jobs` during Axum lifespan startup so recovery runs before
 the first operation.
 
+## Cancel
+
+Admin `POST /router/v1/jobs/{id}/cancel` (fail-closed bearer) marks every
+incomplete target `TargetStatus::Cancelled` (failure-like job summary), stamps
+`finished_at`, persists, and notifies watchers. Unknown id → 404; already
+terminal → 409 unchanged. Dispatch skips non-incomplete targets; `set_target`
+refuses to overwrite a terminal status. The SQLite status string is additive;
+unknown status on read parses as failed.
+
 ## Related
 
 - [[concepts/ollama-router-product]]

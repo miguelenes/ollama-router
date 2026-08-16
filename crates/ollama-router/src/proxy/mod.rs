@@ -153,6 +153,12 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     if clean == "/api/delete" && method == Method::DELETE {
         return fleet_delete(state, model.as_deref()).await;
     }
+    if method == Method::POST
+        && matches!(clean, "/api/generate" | "/api/chat")
+        && is_unload_intent(clean, &body)
+    {
+        return fleet_unload(state, clean, model.as_deref(), &body).await;
+    }
 
     let size_hint = model
         .as_deref()
@@ -196,6 +202,39 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
 
     let mut decision = rank_decision(state, request_class, model, &excluded);
     if !decision.outcome.ok()
+        && decision.outcome.reason == Some(RoutingError::Saturated)
+        && policy.saturation_wait_seconds > 0.0
+    {
+        let deadline =
+            Instant::now() + Duration::from_secs_f64(policy.saturation_wait_seconds.max(0.0));
+        tracing::info!(
+            path,
+            request_class = %request_class,
+            wait_seconds = policy.saturation_wait_seconds,
+            "saturation_wait"
+        );
+        loop {
+            if decision.outcome.ok() || decision.outcome.reason != Some(RoutingError::Saturated) {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            // Arm before re-rank so a release between check and wait is not lost.
+            let notified = state.registry.slot_notified();
+            decision = rank_decision(state, request_class, model, &excluded);
+            if decision.outcome.ok() || decision.outcome.reason != Some(RoutingError::Saturated) {
+                break;
+            }
+            match tokio::time::timeout(remaining, notified).await {
+                Ok(()) => {
+                    decision = rank_decision(state, request_class, model, &excluded);
+                }
+                Err(_) => break,
+            }
+        }
+    } else if !decision.outcome.ok()
         && decision.outcome.reason == Some(RoutingError::Saturated)
         && policy.overload_wait_ms > 0
     {
@@ -775,6 +814,229 @@ fn extract_named_field(body: &[u8], key: &str) -> Option<String> {
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string)
+}
+
+/// `ollama stop`: `keep_alive <= 0` and empty/absent prompt (generate) or messages (chat).
+fn is_unload_intent(path: &str, body: &[u8]) -> bool {
+    if body.is_empty() {
+        return false;
+    }
+    let Ok(data) = serde_json::from_slice::<Value>(body) else {
+        return false;
+    };
+    let Some(keep_alive) = data.get("keep_alive") else {
+        return false;
+    };
+    let Some(seconds) = parse_keep_alive_seconds(keep_alive) else {
+        return false;
+    };
+    if seconds > 0.0 {
+        return false;
+    }
+    match path.trim_end_matches('/') {
+        "/api/generate" => prompt_absent_or_empty(data.get("prompt")),
+        "/api/chat" => messages_absent_or_empty(data.get("messages")),
+        _ => false,
+    }
+}
+
+fn prompt_absent_or_empty(prompt: Option<&Value>) -> bool {
+    match prompt {
+        None | Some(Value::Null) => true,
+        Some(Value::String(s)) => s.is_empty(),
+        Some(_) => false,
+    }
+}
+
+fn messages_absent_or_empty(messages: Option<&Value>) -> bool {
+    match messages {
+        None | Some(Value::Null) => true,
+        Some(Value::Array(items)) => items.is_empty(),
+        Some(_) => false,
+    }
+}
+
+/// Parse Ollama `keep_alive` (number of seconds, or Go-style duration string).
+/// Returns `None` when unparseable (caller falls through to normal inference).
+fn parse_keep_alive_seconds(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(n) => n.as_f64(),
+        Value::String(raw) => parse_go_duration_seconds(raw.trim()),
+        _ => None,
+    }
+}
+
+fn parse_go_duration_seconds(raw: &str) -> Option<f64> {
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(n) = raw.parse::<f64>() {
+        return Some(n);
+    }
+    // Go duration: optional signed decimal + unit (ns|us|µs|ms|s|m|h), possibly concatenated.
+    let mut total = 0.0_f64;
+    let mut rest = raw;
+    let mut parsed_any = false;
+    while !rest.is_empty() {
+        let (sign, after_sign) = match rest.as_bytes()[0] {
+            b'+' => (1.0, &rest[1..]),
+            b'-' => (-1.0, &rest[1..]),
+            _ => (1.0, rest),
+        };
+        if after_sign.is_empty() {
+            return None;
+        }
+        let num_end = after_sign
+            .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+            .unwrap_or(after_sign.len());
+        if num_end == 0 {
+            return None;
+        }
+        let number: f64 = after_sign[..num_end].parse().ok()?;
+        let after_num = &after_sign[num_end..];
+        let (unit, after_unit) = after_num
+            .strip_prefix("ms")
+            .map(|rest| (1e-3, rest))
+            .or_else(|| {
+                after_num
+                    .strip_prefix("us")
+                    .or_else(|| after_num.strip_prefix("µs"))
+                    .or_else(|| after_num.strip_prefix("μs"))
+                    .map(|rest| (1e-6, rest))
+            })
+            .or_else(|| after_num.strip_prefix("ns").map(|rest| (1e-9, rest)))
+            .or_else(|| after_num.strip_prefix('s').map(|rest| (1.0, rest)))
+            .or_else(|| after_num.strip_prefix('m').map(|rest| (60.0, rest)))
+            .or_else(|| after_num.strip_prefix('h').map(|rest| (3600.0, rest)))?;
+        total += sign * number * unit;
+        parsed_any = true;
+        rest = after_unit;
+    }
+    parsed_any.then_some(total)
+}
+
+/// Fan-out unload to every healthy loaded holder (cordoned included; inventory draining excluded).
+async fn fleet_unload(state: &AppState, path: &str, model: Option<&str>, body: &Bytes) -> Response {
+    let Some(model) = model.filter(|m| !m.is_empty()) else {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            json!({"error": "model is required"}),
+            None,
+        );
+    };
+    let targets: Vec<NodeSnapshot> = state
+        .registry
+        .snapshot()
+        .into_iter()
+        .filter(|n| n.healthy && !n.draining && n.url.is_some() && n.has_model_loaded(model))
+        .collect();
+
+    if targets.is_empty() {
+        return unload_success(model);
+    }
+
+    let timeout = class_timeout(&state.config.timeouts, RequestClass::Generic);
+    let mut join_set = tokio::task::JoinSet::new();
+    for node in targets {
+        let Some(base) = node.url.as_deref().map(str::to_string) else {
+            continue;
+        };
+        let client = state.client.clone();
+        let body = body.clone();
+        let path = path.to_string();
+        let node_id = node.id.clone();
+        join_set.spawn(async move {
+            let url = format!("{base}{path}");
+            let result = client
+                .post(&url)
+                .timeout(timeout)
+                .body(body)
+                .header(header::CONTENT_TYPE, "application/json")
+                .send()
+                .await;
+            match result {
+                Ok(resp) if resp.status().is_success() => Ok(node_id),
+                Ok(resp) => {
+                    // Drain body without logging contents.
+                    let _ = resp.bytes().await;
+                    Err(node_id)
+                }
+                Err(_) => Err(node_id),
+            }
+        });
+    }
+
+    let mut any_failed = false;
+    while let Some(joined) = join_set.join_next().await {
+        match joined {
+            Ok(Ok(_)) => {}
+            Ok(Err(node_id)) => {
+                any_failed = true;
+                tracing::warn!(node = %node_id, "fleet_unload_target_failed");
+            }
+            Err(_) => {
+                any_failed = true;
+                tracing::warn!("fleet_unload_join_failed");
+            }
+        }
+    }
+
+    if any_failed {
+        return router_error(
+            path,
+            StatusCode::BAD_GATEWAY,
+            "ollama-router: fleet unload failed on one or more nodes",
+            "unload_failed",
+            None,
+        );
+    }
+    unload_success(model)
+}
+
+fn unload_success(model: &str) -> Response {
+    json_error(
+        StatusCode::OK,
+        json!({
+            "model": model,
+            "created_at": unload_created_at(),
+            "response": "",
+            "done": true,
+            "done_reason": "unload",
+        }),
+        None,
+    )
+}
+
+fn unload_created_at() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let dur = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs() as i64;
+    let nanos = dur.subsec_nanos();
+    let (year, month, day, hour, min, sec) = civil_utc_from_unix(secs);
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{min:02}:{sec:02}.{nanos:09}Z")
+}
+
+/// Civil UTC Y-M-D h:m:s from Unix seconds (Howard Hinnant algorithm).
+fn civil_utc_from_unix(secs: i64) -> (i32, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let tod = secs.rem_euclid(86_400) as u32;
+    let hour = tod / 3600;
+    let min = (tod % 3600) / 60;
+    let sec = tod % 60;
+    // days since 1970-01-01 → civil
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = (yoe as i64) + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if m <= 2 { y + 1 } else { y };
+    (year as i32, m, d, hour, min, sec)
 }
 
 fn forward_headers(incoming: &HeaderMap) -> HeaderMap {
@@ -1562,4 +1824,58 @@ fn json_error(status: StatusCode, body: Value, retry_after: Option<u32>) -> Resp
 
 fn truncate(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod unload_tests {
+    use super::*;
+
+    #[test]
+    fn keep_alive_number_and_duration() {
+        assert_eq!(parse_keep_alive_seconds(&json!(0)), Some(0.0));
+        assert_eq!(parse_keep_alive_seconds(&json!(-1)), Some(-1.0));
+        assert_eq!(parse_keep_alive_seconds(&json!(5)), Some(5.0));
+        assert_eq!(parse_keep_alive_seconds(&json!("0")), Some(0.0));
+        assert_eq!(parse_keep_alive_seconds(&json!("0s")), Some(0.0));
+        assert_eq!(parse_keep_alive_seconds(&json!("-1m")), Some(-60.0));
+        assert_eq!(parse_keep_alive_seconds(&json!("1h30m")), Some(5400.0));
+        assert!(parse_keep_alive_seconds(&json!("nope")).is_none());
+        assert!(parse_keep_alive_seconds(&json!(true)).is_none());
+    }
+
+    #[test]
+    fn unload_intent_generate_and_chat() {
+        assert!(is_unload_intent(
+            "/api/generate",
+            br#"{"model":"m","keep_alive":0}"#
+        ));
+        assert!(is_unload_intent(
+            "/api/generate",
+            br#"{"model":"m","keep_alive":"0s","prompt":""}"#
+        ));
+        assert!(!is_unload_intent(
+            "/api/generate",
+            br#"{"model":"m","keep_alive":0,"prompt":"hi"}"#
+        ));
+        assert!(is_unload_intent(
+            "/api/chat",
+            br#"{"model":"m","keep_alive":0}"#
+        ));
+        assert!(is_unload_intent(
+            "/api/chat",
+            br#"{"model":"m","keep_alive":0,"messages":[]}"#
+        ));
+        assert!(!is_unload_intent(
+            "/api/chat",
+            br#"{"model":"m","keep_alive":0,"messages":[{"role":"user","content":"x"}]}"#
+        ));
+        assert!(!is_unload_intent(
+            "/api/generate",
+            br#"{"model":"m","keep_alive":5}"#
+        ));
+        assert!(!is_unload_intent(
+            "/api/generate",
+            br#"{"model":"m","keep_alive":"bogus"}"#
+        ));
+    }
 }

@@ -11,7 +11,8 @@ use crate::config::{Capacity, NodeConfig, RouterConfig};
 use crate::fleet::{NodeId, Registry};
 use crate::jobs::store::unix_now;
 use crate::jobs::{
-    Job, JobId, JobKind, JobStatus, JobStore, JobTarget, PullOrchestrator, TargetStatus,
+    Job, JobId, JobKind, JobStatus, JobStore, JobTarget, OrchestratorError, PullOrchestrator,
+    TargetStatus,
 };
 use crate::routing::{TargetSpec, TARGET_ALL};
 use tokio_util::sync::CancellationToken;
@@ -91,6 +92,83 @@ fn store_strips_detail_and_secret_text() {
         !json.contains("sensitive content"),
         "detail leaked into sqlite: {json}"
     );
+}
+
+#[test]
+fn store_round_trips_cancelled_and_unknown_as_failed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ops.sqlite3");
+    let store = JobStore::open(&path).expect("open");
+    let id = JobId::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").expect("id");
+    let mut targets = BTreeMap::new();
+    targets.insert(
+        "node-a:m:latest".into(),
+        JobTarget {
+            node: "node-a".into(),
+            model: "m:latest".into(),
+            status: TargetStatus::Cancelled,
+            detail: None,
+        },
+    );
+    store
+        .save(&Job {
+            id,
+            kind: JobKind::Pull,
+            status: JobStatus::Failed,
+            created_at: 1.0,
+            finished_at: Some(2.0),
+            models: vec!["m:latest".into()],
+            nodes: vec!["node-a".into()],
+            targets,
+        })
+        .expect("save");
+
+    let restored = JobStore::open(&path).expect("reopen").load().expect("load");
+    let job = restored.get(&id).expect("job");
+    assert_eq!(
+        job.targets["node-a:m:latest"].status,
+        TargetStatus::Cancelled
+    );
+
+    let conn = rusqlite::Connection::open(&path).expect("sqlite");
+    conn.execute(
+        "UPDATE model_operations SET targets_json = ?1 WHERE id = ?2",
+        rusqlite::params![
+            r#"{"node-a:m:latest":{"node":"node-a","model":"m:latest","status":"future_status"}}"#,
+            id.to_string()
+        ],
+    )
+    .expect("update");
+    let restored = JobStore::open(&path).expect("reopen").load().expect("load");
+    let job = restored.get(&id).expect("job");
+    assert_eq!(job.targets["node-a:m:latest"].status, TargetStatus::Failed);
+}
+
+#[test]
+fn cancelled_target_is_failure_like_in_summary() {
+    let mut targets = BTreeMap::new();
+    targets.insert(
+        "n:m".into(),
+        JobTarget {
+            node: "n".into(),
+            model: "m".into(),
+            status: TargetStatus::Cancelled,
+            detail: None,
+        },
+    );
+    let job = Job {
+        id: JobId::parse("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").expect("id"),
+        kind: JobKind::Pull,
+        status: JobStatus::Running,
+        created_at: 1.0,
+        finished_at: None,
+        models: vec!["m".into()],
+        nodes: vec!["n".into()],
+        targets,
+    };
+    assert_eq!(job.summarize_status(), JobStatus::Failed);
+    assert!(!TargetStatus::Cancelled.is_success_like());
+    assert!(!TargetStatus::Cancelled.is_incomplete());
 }
 
 #[tokio::test]
@@ -766,4 +844,55 @@ async fn subscribe_job_receives_terminal_update() {
     assert!(orch
         .subscribe_job(&JobId::parse("00000000-0000-0000-0000-000000000000").expect("id"))
         .is_none());
+}
+
+#[tokio::test]
+async fn cancel_job_marks_running_pull_failed() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(tags_body(&[]));
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_secs(30))
+            .body("{\"status\":\"success\"}\n");
+    });
+
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0, 1)],
+        ..RouterConfig::default()
+    };
+    let registry = Arc::new(Registry::new(&config));
+    registry.set_healthy(&nid("gpu"));
+    let orch = PullOrchestrator::new(Arc::new(config), client(), Some(registry)).expect("orch");
+    let job = orch
+        .start_ensure(
+            &["moondream".into()],
+            TargetSpec::Nodes(vec![nid("gpu")]),
+            false,
+            false,
+        )
+        .await
+        .expect("start");
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let cancelled = orch.cancel_job(&job.id).await.expect("cancel");
+    assert_eq!(cancelled.status, JobStatus::Failed);
+    assert!(cancelled.finished_at.is_some());
+    assert!(cancelled
+        .targets
+        .values()
+        .any(|t| t.status == TargetStatus::Cancelled));
+
+    let conflict = orch.cancel_job(&job.id).await;
+    assert!(matches!(conflict, Err(OrchestratorError::Conflict)));
+
+    let missing = orch
+        .cancel_job(&JobId::parse("00000000-0000-0000-0000-000000000001").expect("id"))
+        .await;
+    assert!(matches!(missing, Err(OrchestratorError::NotFound)));
 }

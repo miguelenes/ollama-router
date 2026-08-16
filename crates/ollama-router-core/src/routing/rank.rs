@@ -277,6 +277,10 @@ pub(crate) fn capacity_preference(node: &NodeSnapshot, request_class: RequestCla
 /// Busy threshold for the known-GPU-util soft band (no YAML knob).
 const GPU_UTIL_BUSY_PCT: f64 = 50.0;
 
+/// Busy threshold for the known-CPU-util soft band (no YAML knob).
+/// CPU boxes run hotter than GPUs under normal load, so the band is higher.
+const CPU_UTIL_BUSY_PCT: f64 = 80.0;
+
 /// Tight free-VRAM band (GiB); matches EMBED's existing headroom soft penalty.
 const VRAM_FREE_TIGHT_GIB: f64 = 2.0;
 
@@ -306,13 +310,26 @@ fn vram_free_key(node: &NodeSnapshot) -> f64 {
     }
 }
 
+/// Soft sort term for known CPU util. Unknown sits in the middle band — not idle `0`.
+fn cpu_util_key(node: &NodeSnapshot) -> f64 {
+    let Some(pct) = node.cpu_usage_pct else {
+        return 1.0;
+    };
+    let pct = pct.clamp(0.0, 100.0);
+    if pct < CPU_UTIL_BUSY_PCT {
+        pct / 1000.0
+    } else {
+        2.0 + pct / 1000.0
+    }
+}
+
 /// Sort key (lower is better). Sticky affinity may promote only on exact equality.
 pub fn load_key(
     node: &NodeSnapshot,
     request_class: RequestClass,
     model: Option<&str>,
     policy: &PolicyConfig,
-) -> (f64, f64, f64, f64, f64, f64) {
+) -> (f64, f64, f64, f64, f64, f64, f64) {
     let warm = if policy.prefer_warm_models {
         if let Some(model) = model {
             if node.has_model_loaded(model) {
@@ -341,6 +358,7 @@ pub fn load_key(
         pressure_penalty,
         gpu_util_key(node),
         vram_free_key(node),
+        cpu_util_key(node),
         preference,
         warm + available * 0.001,
     )
@@ -370,7 +388,7 @@ pub fn rank_nodes(
 
     let healthy: Vec<&NodeSnapshot> = nodes
         .iter()
-        .filter(|n| n.healthy && !n.draining && !excluded_node_ids.contains(&n.id))
+        .filter(|n| n.healthy && !n.draining && !n.cordoned && !excluded_node_ids.contains(&n.id))
         .collect();
     if healthy.is_empty() {
         return RankOutcome {
@@ -501,7 +519,7 @@ pub fn blocked_only_by_reservations(
     policy: &PolicyConfig,
 ) -> bool {
     for node in nodes {
-        if !node.healthy || node.draining {
+        if !node.healthy || node.draining || node.cordoned {
             continue;
         }
         if let Some(model) = model {
@@ -1410,6 +1428,162 @@ nodes:
             0,
         );
         assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
+    }
+
+    fn set_cpu_util(snap: &mut [NodeSnapshot], id: &str, pct: Option<f64>) {
+        let node = snap.iter_mut().find(|n| n.id.as_str() == id).expect("node");
+        node.cpu_usage_pct = pct;
+    }
+
+    #[test]
+    fn known_lower_cpu_util_beats_known_higher() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("quiet", 24.0, 1, Some(8)),
+                node("pinned", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["quiet", "pinned"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_cpu_util(&mut snap, "quiet", Some(20.0));
+        set_cpu_util(&mut snap, "pinned", Some(95.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "quiet");
+    }
+
+    #[test]
+    fn known_cpu_util_beats_unknown() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("known", 24.0, 1, Some(8)),
+                node("unknown", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["known", "unknown"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_cpu_util(&mut snap, "known", Some(10.0));
+        set_cpu_util(&mut snap, "unknown", None);
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "known");
+    }
+
+    #[test]
+    fn unknown_cpu_util_beats_known_busy() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("unknown", 24.0, 1, Some(8)),
+                node("busy", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["unknown", "busy"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_cpu_util(&mut snap, "unknown", None);
+        set_cpu_util(&mut snap, "busy", Some(95.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "unknown");
+    }
+
+    #[test]
+    fn inflight_dominates_cpu_util() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("busy-quiet-cpu", 24.0, 1, Some(8)),
+                node("quiet-busy-cpu", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["busy-quiet-cpu", "quiet-busy-cpu"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        for _ in 0..2 {
+            registry.inflight_inc(&nid("busy-quiet-cpu"));
+        }
+        registry.inflight_inc(&nid("quiet-busy-cpu"));
+        let mut snap = registry.snapshot();
+        set_cpu_util(&mut snap, "busy-quiet-cpu", Some(10.0));
+        set_cpu_util(&mut snap, "quiet-busy-cpu", Some(95.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "quiet-busy-cpu");
+    }
+
+    #[test]
+    fn free_vram_dominates_cpu_util() {
+        let config = RouterConfig {
+            nodes: vec![
+                node("roomy-hot", 24.0, 1, Some(8)),
+                node("tight-cool", 24.0, 1, Some(8)),
+            ],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        for id in ["roomy-hot", "tight-cool"] {
+            registry.set_healthy(&nid(id));
+            registry.update_models(&nid(id), ["qwen3:8b"]);
+        }
+        let mut snap = registry.snapshot();
+        set_vram_free(&mut snap, "roomy-hot", Some(8.0));
+        set_vram_free(&mut snap, "tight-cool", Some(0.5));
+        set_cpu_util(&mut snap, "roomy-hot", Some(90.0));
+        set_cpu_util(&mut snap, "tight-cool", Some(10.0));
+        let outcome = rank_nodes(
+            &snap,
+            RequestClass::Medium,
+            Some("qwen3:8b"),
+            &config.policy,
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert_eq!(outcome.ranked[0].id.as_str(), "roomy-hot");
     }
 
     proptest! {

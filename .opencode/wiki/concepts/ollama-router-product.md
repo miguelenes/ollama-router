@@ -78,20 +78,28 @@ This product is an **honest fleet proxy**, not a fake single daemon:
 | Process list (`GET /api/ps`) | Union of loaded models (one row per healthy node × model, `details.router_node`) — not a single-node passthrough |
 | Show (`POST /api/show`) | Forward only to a healthy holder; miss → 503 `model_missing` (GENERIC; not LARGE-gated) |
 | Version (`GET /api/version`) | Router-owned `{"version": "<router>"}` (same as `/healthz`), not a ranked Ollama build |
-| Infer (generate/chat/embed + OpenAI) | Rank among nodes that **already have** the model (holders-only WLC) |
+| Infer (generate/chat/embed + OpenAI) | Rank among nodes that **already have** the model (holders-only WLC); sort key includes known CPU util after free VRAM |
+| Stop / unload | Unload-intent generate/chat (`keep_alive <= 0`, empty prompt/messages) fans out to every healthy loaded holder (incl. cordoned; excl. inventory `draining`); `done_reason: unload`; no `inflight_inc` |
 | Pull | Fleet **placement job** that streams NDJSON progress (`total`/`completed` from targets) — not a native Hub-pull through one node |
 | Miss | **503** `model_missing` (not native Hub 404/pull); `auto_pull_on_miss` default **false** |
 | create/copy/push/blobs | **501** `not_a_fleet_operation` |
 
 Pull/delete metadata persists to SQLite and recovers via live `/api/tags`; see
 [[concepts/ollama-router-durable-model-operations]]. `POST /api/pull` and
-`/api/delete` always go through the fleet orchestrator. Default placement
-targets every **healthy** node that fits the model's **generate** size class
-(static VRAM). LARGE/MEDIUM skip known CPUs and **unknown** VRAM. Known
-insufficient disk free skips a pull target (`skipped_disk`); unknown disk does
-not. Opt-in `bootstrap_desired_models` background-ensures `desired_model_tiers`
-onto generate-class-eligible nodes (known VRAM ∩ `min_vram_gb`); default
-**false**. There is no single-node mutate passthrough.
+`/api/delete` always go through the fleet orchestrator. Running jobs are
+cancellable via `POST /router/v1/jobs/{id}/cancel`. Default placement targets
+every **healthy** node that fits the model's **generate** size class (static
+VRAM). LARGE/MEDIUM skip known CPUs and **unknown** VRAM. Known insufficient
+disk free skips a pull target (`skipped_disk`); unknown disk does not. Opt-in
+`bootstrap_desired_models` background-ensures `desired_model_tiers` onto
+generate-class-eligible nodes (known VRAM ∩ `min_vram_gb`); default **false**.
+There is no single-node mutate passthrough.
+
+Operator cordon: `POST /router/v1/nodes/{id}/drain` and `/undrain` (fail-closed
+bearer) exclude a node from ranking/placement without destroying it; separate
+from Verda/inventory `draining`. Opt-in `saturation_wait_seconds` (default `0`)
+waits for an inflight slot (`Notify` on `inflight_dec`) before the usual
+saturated 503.
 
 **Capacity honesty:** omitted `capacity.vram_gb` / `gpus` is **unknown**, not a
 measured CPU. YAML `0` / `gpus: 0` is a known CPU. MEDIUM and LARGE inference

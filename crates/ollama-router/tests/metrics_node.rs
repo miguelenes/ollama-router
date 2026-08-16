@@ -208,3 +208,28 @@ fn refresh_gauges_uses_snapshot_when_lock_held_and_disk_unreadable() {
         "share ids must not be metric labels: {body}"
     );
 }
+
+#[test]
+fn refresh_gauges_draining_includes_cordoned() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let fleet_state = FleetState::new(dir.path().join("state.json"));
+    let registry = Registry::new(&RouterConfig {
+        nodes: vec![node("gpu", 8.0, 1)],
+        ..Default::default()
+    });
+    assert!(registry.set_cordoned(&nid("gpu"), true));
+    let metrics = Metrics::new().expect("metrics");
+    metrics.refresh_gauges(&registry, &fleet_state);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_node_draining{node=\"gpu\"} 1"),
+        "{body}"
+    );
+    assert!(registry.set_cordoned(&nid("gpu"), false));
+    metrics.refresh_gauges(&registry, &fleet_state);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_node_draining{node=\"gpu\"} 0"),
+        "{body}"
+    );
+}

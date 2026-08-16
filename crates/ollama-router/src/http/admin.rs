@@ -100,6 +100,12 @@ fn map_orch_err(err: OrchestratorError) -> Response {
             StatusCode::UNPROCESSABLE_ENTITY,
             json!({"error": err.to_string()}),
         ),
+        OrchestratorError::NotFound => {
+            json_status(StatusCode::NOT_FOUND, json!({"error": err.to_string()}))
+        }
+        OrchestratorError::Conflict => {
+            json_status(StatusCode::CONFLICT, json!({"error": err.to_string()}))
+        }
         OrchestratorError::NotConfigured => json_status(
             StatusCode::SERVICE_UNAVAILABLE,
             json!({"error": err.to_string()}),
@@ -202,6 +208,23 @@ pub async fn get_job(
     }
 }
 
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Ok(id) = ollama_router_core::jobs::JobId::parse(&id) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "job not found"}));
+    };
+    match state.orchestrator.cancel_job(&id).await {
+        Ok(job) => Json(json!({"job": job})).into_response(),
+        Err(err) => map_orch_err(err),
+    }
+}
+
 pub async fn list_jobs(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if let Some(resp) = require_admin(&state, &headers) {
         return resp;
@@ -230,7 +253,10 @@ pub async fn readiness(State(state): State<AppState>, headers: HeaderMap) -> Res
 
 fn readiness_view(state: &AppState) -> Response {
     let nodes = state.registry.snapshot();
-    let healthy: Vec<_> = nodes.iter().filter(|n| n.healthy && !n.draining).collect();
+    let healthy: Vec<_> = nodes
+        .iter()
+        .filter(|n| n.healthy && !n.draining && !n.cordoned)
+        .collect();
     let desired = desired_models(state);
     let mut blockers = Vec::new();
 
@@ -244,11 +270,20 @@ fn readiness_view(state: &AppState) -> Response {
             "action": "Add a node-agent-backed entry to fleet.yaml, then reload the inventory."
         }));
     } else {
-        for node in nodes.iter().filter(|n| !n.healthy || n.draining) {
+        for node in nodes
+            .iter()
+            .filter(|n| !n.healthy || n.draining || n.cordoned)
+        {
             let reason = node
                 .unhealthy_reason
                 .as_deref()
-                .unwrap_or(if node.draining { "draining" } else { "unknown" });
+                .unwrap_or(if node.cordoned {
+                    "cordoned"
+                } else if node.draining {
+                    "draining"
+                } else {
+                    "unknown"
+                });
             let (summary, action, kind) = diagnostic_copy(reason);
             blockers.push(json!({
                 "kind": kind,
@@ -306,7 +341,10 @@ fn readiness_view(state: &AppState) -> Response {
             "total": nodes.len(),
             "healthy": healthy.len(),
             "unhealthy": nodes.iter().filter(|n| !n.healthy).count(),
-            "draining": nodes.iter().filter(|n| n.draining).count(),
+            "draining": nodes
+                .iter()
+                .filter(|n| n.draining || n.cordoned)
+                .count(),
             "permanent": nodes.iter().filter(|n| n.origin == NodeOrigin::Permanent).count(),
             "verda": nodes.iter().filter(|n| n.origin == NodeOrigin::Verda).count(),
         },
@@ -358,6 +396,11 @@ fn diagnostic_copy(reason: &str) -> (&'static str, &'static str, &'static str) {
             "is draining",
             "Wait for in-flight requests to finish or correct fleet inventory.",
             "draining",
+        ),
+        "cordoned" => (
+            "is operator-cordoned",
+            "POST /router/v1/nodes/{id}/undrain when maintenance is complete.",
+            "cordoned",
         ),
         _ => (
             "has an unknown health failure",
@@ -432,6 +475,48 @@ pub async fn put_node(
         }
     }
     let Some(snap) = state.registry.get(&id) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    };
+    Json(json!({"node": node_public_view(&snap)})).into_response()
+}
+
+/// Operator cordon: exclude from ranking/placement; keep probes; never destroy.
+pub async fn drain_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Ok(node_id) = NodeId::parse(id.trim()) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    };
+    if !state.registry.set_cordoned(&node_id, true) {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    }
+    let Some(snap) = state.registry.get(&node_id) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    };
+    Json(json!({"node": node_public_view(&snap)})).into_response()
+}
+
+/// Clear operator cordon; restore ranking eligibility.
+pub async fn undrain_node(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    let Ok(node_id) = NodeId::parse(id.trim()) else {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    };
+    if !state.registry.set_cordoned(&node_id, false) {
+        return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
+    }
+    let Some(snap) = state.registry.get(&node_id) else {
         return json_status(StatusCode::NOT_FOUND, json!({"error": "node not found"}));
     };
     Json(json!({"node": node_public_view(&snap)})).into_response()
@@ -840,6 +925,7 @@ fn node_public_view(node: &ollama_router_core::fleet::NodeSnapshot) -> serde_jso
         "capacity_url_present": node.capacity_url.is_some(),
         "fail_streak": node.fail_streak,
         "draining": node.draining,
+        "cordoned": node.cordoned,
         "loaded_vram_gb": node.loaded_vram_gb,
         "ram_available_gb": node.ram_available_gb,
         "ram_available_ratio": node.ram_available_ratio,

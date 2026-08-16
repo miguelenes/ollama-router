@@ -149,6 +149,35 @@ impl PullOrchestrator {
         self.lock().jobs.get(id).cloned()
     }
 
+    /// Operator cancel: mark incomplete targets cancelled and make the job terminal.
+    ///
+    /// Unknown id → [`OrchestratorError::NotFound`]. Already terminal →
+    /// [`OrchestratorError::Conflict`] (unchanged). In-flight upstream work is
+    /// not aborted; late `set_target` results cannot overwrite cancelled status.
+    pub async fn cancel_job(&self, id: &JobId) -> Result<Job, OrchestratorError> {
+        let snap = {
+            let mut state = self.lock();
+            let Some(job) = state.jobs.get_mut(id) else {
+                return Err(OrchestratorError::NotFound);
+            };
+            if !job.status.is_incomplete() {
+                return Err(OrchestratorError::Conflict);
+            }
+            for target in job.targets.values_mut() {
+                if target.status.is_incomplete() {
+                    target.status = TargetStatus::Cancelled;
+                    target.detail = None;
+                }
+            }
+            job.status = job.summarize_status();
+            job.finished_at = Some(unix_now());
+            job.clone()
+        };
+        self.persist(&snap).await;
+        self.notify(&snap);
+        Ok(snap)
+    }
+
     /// Subscribe to live job updates (proxy NDJSON pull stream).
     ///
     /// Returns `None` when the job is unknown or already removed from waiters.
@@ -386,7 +415,7 @@ impl PullOrchestrator {
                 for model in models {
                     let holders: Vec<NodeId> = snap
                         .iter()
-                        .filter(|n| n.healthy && !n.draining && n.has_model(model))
+                        .filter(|n| n.healthy && !n.draining && !n.cordoned && n.has_model(model))
                         .map(|n| n.id.clone())
                         .collect();
                     map.insert(model.clone(), holders);
@@ -1097,6 +1126,10 @@ impl PullOrchestrator {
             };
             let key = Job::target_key(node_id, model);
             if let Some(target) = job.targets.get_mut(&key) {
+                // Refuse late results after cancel / other terminal outcomes.
+                if !target.status.is_incomplete() {
+                    return;
+                }
                 target.status = status;
                 target.detail = detail;
             }

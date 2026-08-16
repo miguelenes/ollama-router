@@ -547,7 +547,11 @@ impl Metrics {
             );
             set_g(&self.backend_info, &[id, node.gpu_backend.as_str()], 1.0);
             set_i(&self.fail_streak, &[id], i64::from(node.fail_streak));
-            set_i(&self.draining, &[id], i64::from(node.draining));
+            set_i(
+                &self.draining,
+                &[id],
+                i64::from(node.draining || node.cordoned),
+            );
             set_i(
                 &self.max_inflight,
                 &[id],

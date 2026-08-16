@@ -41,6 +41,10 @@ pub enum OrchestratorError {
     UnknownNode(String),
     #[error("models must be non-empty")]
     EmptyModels,
+    #[error("job not found")]
+    NotFound,
+    #[error("job is already terminal")]
+    Conflict,
     #[error("{0}")]
     Other(String),
 }

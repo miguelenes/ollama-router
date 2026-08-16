@@ -231,6 +231,8 @@ pub struct NodeSnapshot {
     pub pressure_level: PressureLevel,
     pub fail_streak: u32,
     pub draining: bool,
+    /// Operator maintenance cordon (admin drain). Not inventory/Verda `draining`.
+    pub cordoned: bool,
     pub origin: NodeOrigin,
     pub capacity_url: Option<Arc<str>>,
     pub capacity_source: CapacitySource,
@@ -393,6 +395,8 @@ struct Node {
     reserved_vram_bits: AtomicU64,
     reserved_ram_bits: AtomicU64,
     draining: AtomicBool,
+    /// Operator cordon; set only by admin drain/undrain. Survives inventory reload.
+    cordoned: AtomicBool,
     forget_pending: AtomicBool,
     fail_streak: AtomicU32,
     reservations: Mutex<ReservationLedger>,
@@ -412,6 +416,7 @@ impl Node {
             reserved_vram_bits: AtomicU64::new(0.0f64.to_bits()),
             reserved_ram_bits: AtomicU64::new(0.0f64.to_bits()),
             draining: AtomicBool::new(false),
+            cordoned: AtomicBool::new(false),
             forget_pending: AtomicBool::new(false),
             fail_streak: AtomicU32::new(0),
             reservations: Mutex::new(ReservationLedger::default()),
@@ -483,6 +488,8 @@ impl Node {
         remarge(&mut cold);
         drop(cold);
         self.draining.store(false, Ordering::Release);
+        // Operator cordon is independent of inventory `draining` and must survive
+        // in-process fleet.yaml reload (`apply_permanent_config`).
         self.forget_pending.store(false, Ordering::Release);
     }
 
@@ -519,6 +526,7 @@ impl Node {
             pressure_level: cold.pressure_level,
             fail_streak: self.fail_streak.load(Ordering::Relaxed),
             draining: self.draining.load(Ordering::Acquire),
+            cordoned: self.cordoned.load(Ordering::Acquire),
             origin: self.origin,
             capacity_url: cold.capacity_url.clone(),
             capacity_source: cold.capacity_source,
@@ -572,6 +580,8 @@ pub struct Registry {
     health: HealthConfig,
     policy: PolicyConfig,
     public_share_suffixes: Vec<String>,
+    /// Wakes saturation waiters when an inflight slot frees (`notify_waiters`).
+    slot_notify: Arc<tokio::sync::Notify>,
 }
 
 impl Registry {
@@ -592,6 +602,7 @@ impl Registry {
             health: config.health.clone(),
             policy: config.policy.clone(),
             public_share_suffixes: config.tunnel.public_share_suffixes.clone(),
+            slot_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -987,6 +998,12 @@ impl Registry {
         if saturating_fetch_sub(&node.inflight) == 0 {
             self.remove_if_droppable(id, &node);
         }
+        self.slot_notify.notify_waiters();
+    }
+
+    /// Future that resolves when an inflight slot may have freed (saturation wait).
+    pub fn slot_notified(&self) -> impl std::future::Future<Output = ()> + '_ {
+        self.slot_notify.notified()
     }
 
     /// Occupy an inflight slot without touching idle (warm-keeper only).
@@ -1007,6 +1024,7 @@ impl Registry {
         if saturating_fetch_sub(&node.inflight) == 0 {
             self.remove_if_droppable(id, &node);
         }
+        self.slot_notify.notify_waiters();
     }
 
     /// In-process idle timestamp of last client inference forward.
@@ -1307,6 +1325,16 @@ impl Registry {
         true
     }
 
+    /// Operator cordon (admin drain/undrain). Excludes the node from ranking and
+    /// placement without destroying it. Idempotent; returns false when unknown.
+    pub fn set_cordoned(&self, id: &NodeId, cordoned: bool) -> bool {
+        let Some(node) = self.node(id) else {
+            return false;
+        };
+        node.cordoned.store(cordoned, Ordering::Release);
+        true
+    }
+
     /// Drop permanent nodes that are draining with zero inflight.
     ///
     /// Completion paths already remove the decremented node in O(1). The health
@@ -1320,7 +1348,7 @@ impl Registry {
     pub fn sticky_owner_from(nodes: &[NodeSnapshot], model: &str) -> Option<NodeId> {
         let holders: Vec<&NodeSnapshot> = nodes
             .iter()
-            .filter(|n| n.healthy && !n.draining && n.has_model(model))
+            .filter(|n| n.healthy && !n.draining && !n.cordoned && n.has_model(model))
             .collect();
         if holders.is_empty() {
             return None;
@@ -2108,5 +2136,67 @@ mod tests {
         let snap = registry.get(&id).unwrap();
         assert!(snap.ram_available_ratio.is_none());
         assert_eq!(snap.ram_available_gb, Some(24.0));
+    }
+
+    #[test]
+    fn cordon_survives_inventory_reload_and_excludes_from_rank() {
+        let config = RouterConfig {
+            nodes: vec![node("desk", 8.0, 1), node("spare", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let desk = nid("desk");
+        let spare = nid("spare");
+        registry.set_healthy(&desk);
+        registry.set_healthy(&spare);
+        registry.update_models(&desk, ["llama3.2:3b"]);
+        registry.update_models(&spare, ["llama3.2:3b"]);
+        assert!(registry.set_cordoned(&desk, true));
+        assert!(registry.get(&desk).unwrap().cordoned);
+        assert!(!registry.get(&desk).unwrap().draining);
+
+        registry.apply_permanent_inventory(&[node("desk", 8.0, 1), node("spare", 8.0, 1)]);
+        let snap = registry.get(&desk).unwrap();
+        assert!(snap.cordoned);
+        assert!(!snap.draining);
+        assert!(registry.get(&desk).is_some());
+
+        let ranked = crate::routing::rank_nodes(
+            &registry.snapshot(),
+            crate::routing::RequestClass::Small,
+            Some("llama3.2:3b"),
+            registry.policy(),
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(ranked.ranked.iter().all(|n| n.id.as_str() != "desk"));
+        assert_eq!(ranked.ranked[0].id.as_str(), "spare");
+
+        assert!(registry.set_cordoned(&desk, false));
+        let ranked = crate::routing::rank_nodes(
+            &registry.snapshot(),
+            crate::routing::RequestClass::Small,
+            Some("llama3.2:3b"),
+            registry.policy(),
+            None,
+            &HashSet::new(),
+            0,
+        );
+        assert!(ranked.ranked.iter().any(|n| n.id.as_str() == "desk"));
+    }
+
+    #[test]
+    fn cordon_does_not_make_permanent_droppable() {
+        let config = RouterConfig {
+            nodes: vec![node("desk", 8.0, 1)],
+            ..Default::default()
+        };
+        let registry = Registry::new(&config);
+        let desk = nid("desk");
+        assert!(registry.set_cordoned(&desk, true));
+        registry.sweep_drained();
+        assert!(registry.get(&desk).is_some());
+        assert!(registry.get(&desk).unwrap().cordoned);
     }
 }

@@ -37,6 +37,9 @@ policy:
   retry_max_attempts: 3
   retry_on_status: [429, 503]
   overload_wait_ms: 0
+  # Opt-in: wait up to N seconds for an inflight slot when every holder is saturated
+  # (0 = immediate 503 all_nodes_saturated). Uses a registry Notify on inflight_dec.
+  saturation_wait_seconds: 0
   saturated_retry_after_seconds: 30
   provision_retry_after_seconds: 30
 

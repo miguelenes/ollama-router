@@ -763,3 +763,238 @@ async fn enroll_rejects_unknown_body_fields() {
         "{status}"
     );
 }
+
+#[tokio::test]
+async fn drain_undrain_cordons_permanent_node() {
+    let state = state_with_token(
+        RouterConfig {
+            nodes: vec![node("desk", "http://127.0.0.1:11434", 8.0)],
+            ..Default::default()
+        },
+        Some("secret"),
+    );
+    state.registry.set_healthy(&nid("desk"));
+    state.registry.update_models(&nid("desk"), ["llama3.2:3b"]);
+
+    let (status, body) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/nodes/desk/drain")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["node"]["cordoned"], true);
+    assert_eq!(parsed["node"]["draining"], false);
+    assert!(state.registry.get(&nid("desk")).unwrap().cordoned);
+
+    let (status, body) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::GET)
+            .uri("/router/v1/nodes")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let nodes = parsed["nodes"].as_array().expect("nodes");
+    let desk = nodes
+        .iter()
+        .find(|n| n["id"] == "desk")
+        .expect("desk listed");
+    assert_eq!(desk["cordoned"], true);
+
+    let (status, body) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/nodes/desk/undrain")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["node"]["cordoned"], false);
+    assert!(!state.registry.get(&nid("desk")).unwrap().cordoned);
+}
+
+#[tokio::test]
+async fn drain_forbidden_without_token() {
+    let state = state_with_token(
+        RouterConfig {
+            nodes: vec![node("desk", "http://127.0.0.1:11434", 8.0)],
+            ..Default::default()
+        },
+        None,
+    );
+    let (status, body) = send(
+        state,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/nodes/desk/drain")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("OLLAMA_ROUTER_ADMIN_TOKEN"));
+}
+
+#[tokio::test]
+async fn drain_unknown_node_is_404() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    let (status, _) = send(
+        state,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/nodes/missing/drain")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn drain_is_idempotent() {
+    let state = state_with_token(
+        RouterConfig {
+            nodes: vec![node("desk", "http://127.0.0.1:11434", 8.0)],
+            ..Default::default()
+        },
+        Some("secret"),
+    );
+    for _ in 0..2 {
+        let (status, body) = send(
+            state.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/router/v1/nodes/desk/drain")
+                .header(header::AUTHORIZATION, "Bearer secret")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let parsed: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(parsed["node"]["cordoned"], true);
+    }
+}
+
+#[tokio::test]
+async fn cancel_running_job_is_terminal_non_success() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(std::time::Duration::from_secs(30))
+            .body("{\"status\":\"success\"}\n");
+    });
+    let config = RouterConfig {
+        nodes: vec![node("gpu", &server.base_url(), 24.0)],
+        ..RouterConfig::default()
+    };
+    let state = state_with_token(config, Some("secret"));
+    state.registry.set_healthy(&nid("gpu"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/models/ensure",
+            json!({"models": ["moondream"]}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let job_id = parsed["job_id"].as_str().expect("job_id");
+
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (status, body) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/router/v1/jobs/{job_id}/cancel"))
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["job"]["status"], "failed");
+    assert!(parsed["job"]["finished_at"].is_number());
+
+    let (status, body) = send(
+        state,
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/router/v1/jobs/{job_id}/cancel"))
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"].as_str().unwrap().contains("terminal"));
+}
+
+#[tokio::test]
+async fn cancel_unknown_job_is_404() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    let (status, _) = send(
+        state,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/jobs/00000000-0000-0000-0000-000000000099/cancel")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn cancel_forbidden_without_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    let (status, body) = send(
+        state,
+        Request::builder()
+            .method(Method::POST)
+            .uri("/router/v1/jobs/00000000-0000-0000-0000-000000000099/cancel")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("OLLAMA_ROUTER_ADMIN_TOKEN"));
+}

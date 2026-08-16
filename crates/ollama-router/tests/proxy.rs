@@ -776,6 +776,86 @@ async fn all_saturated_returns_503_without_upstream() {
 }
 
 #[tokio::test]
+async fn saturation_wait_admits_when_slot_frees() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let mut config = fleet_config(vec![node("gpu", &server.base_url(), 8.0, 1, Some(1))]);
+    config.policy.saturation_wait_seconds = 2.0;
+    let state = state_from(config);
+    mark_ready(&state, "gpu", &["qwen3-embedding:8b"]);
+    assert_eq!(
+        state.registry.inflight_inc(&nid("gpu")),
+        ollama_router_core::fleet::InflightAdmit::Admitted
+    );
+
+    let wait_state = state.clone();
+    let waiting = tokio::spawn(async move {
+        send(
+            wait_state,
+            json_req(
+                Method::POST,
+                "/api/embed",
+                json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+            ),
+        )
+        .await
+    });
+
+    sleep(Duration::from_millis(50)).await;
+    state.registry.inflight_dec(&nid("gpu"));
+
+    let (status, _, body) = waiting.await.expect("join");
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed.get("embeddings").is_some(), "{parsed}");
+    mock.assert();
+}
+
+#[tokio::test]
+async fn saturation_wait_expiry_is_503_with_retry_after() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/api/embed");
+        then.status(200).body(r#"{"embeddings":[[0.1]]}"#);
+    });
+    let mut config = fleet_config(vec![node("gpu", &server.base_url(), 8.0, 1, Some(1))]);
+    config.policy.saturation_wait_seconds = 0.15;
+    let state = state_from(config);
+    mark_ready(&state, "gpu", &["qwen3-embedding:8b"]);
+    state.registry.inflight_inc(&nid("gpu"));
+
+    let started = Instant::now();
+    let (status, headers, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/embed",
+            json!({"model": "qwen3-embedding:8b", "input": ["x"]}),
+        ),
+    )
+    .await;
+    assert!(started.elapsed() >= Duration::from_millis(100));
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        headers
+            .get(header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok()),
+        Some("30")
+    );
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("all_nodes_saturated"));
+    mock.assert_calls(0);
+}
+
+#[tokio::test]
 async fn connect_failure_retries_then_502_when_exhausted() {
     let state = state_from(RouterConfig {
         nodes: vec![node("gpu", "http://127.0.0.1:1", 8.0, 1, None)],
@@ -1506,6 +1586,324 @@ async fn draining_verda_is_skipped_for_client_forward() {
     );
     assert_eq!(spot_hit.calls(), 0);
     keep_ok.assert();
+}
+
+#[tokio::test]
+async fn cordoned_holder_is_never_selected() {
+    let sole = MockServer::start();
+    let _hit = sole.mock(|when, then| {
+        when.method(POST).path("/api/chat");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"message":{"role":"assistant","content":"nope"}}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "desk",
+        &sole.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "desk", &["qwen3:8b"]);
+    assert!(state.registry.set_cordoned(&nid("desk"), true));
+
+    let (status, _, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/api/chat",
+            json!({"model": "qwen3:8b", "messages": [{"role":"user","content":"hi"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let error = parsed["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("no_healthy_nodes") || error.contains("model_missing"),
+        "{parsed}"
+    );
+    assert_eq!(_hit.calls(), 0);
+
+    assert!(state.registry.set_cordoned(&nid("desk"), false));
+    let (status, headers, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/chat",
+            json!({"model": "qwen3:8b", "messages": [{"role":"user","content":"hi"}]}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-upstream")
+            .and_then(|v| v.to_str().ok()),
+        Some("desk")
+    );
+}
+
+#[tokio::test]
+async fn unload_fans_out_to_every_loaded_holder() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let a_unload = a.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"done":true,"done_reason":"unload"}"#);
+    });
+    let b_unload = b.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"done":true,"done_reason":"unload"}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("a", &a.base_url(), 24.0, 1, None),
+        node("b", &b.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "a", &["qwen3:8b"]);
+    mark_ready(&state, "b", &["qwen3:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("a"), ["qwen3:8b"], Some(4.0));
+    state
+        .registry
+        .update_ps_state(&nid("b"), ["qwen3:8b"], Some(4.0));
+
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "qwen3:8b", "keep_alive": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["done"], true);
+    assert_eq!(parsed["done_reason"], "unload");
+    assert_eq!(parsed["response"], "");
+    a_unload.assert();
+    b_unload.assert();
+}
+
+#[tokio::test]
+async fn unload_of_unloaded_model_is_success() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["other:1b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "gone:1b", "keep_alive": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["done_reason"], "unload");
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn non_empty_prompt_with_keep_alive_zero_stays_ranked() {
+    let server = MockServer::start();
+    let mock = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"response":"hi","done":true}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3:8b"]);
+    let (status, headers, _) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "qwen3:8b", "prompt": "hi", "keep_alive": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get("x-ollama-router-upstream")
+            .and_then(|v| v.to_str().ok()),
+        Some("gpu")
+    );
+    mock.assert();
+}
+
+#[tokio::test]
+async fn unload_still_hits_cordoned_loaded_holder() {
+    let server = MockServer::start();
+    let unload = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"done":true,"done_reason":"unload"}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "desk",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "desk", &["qwen3:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("desk"), ["qwen3:8b"], Some(4.0));
+    assert!(state.registry.set_cordoned(&nid("desk"), true));
+    let (status, _, body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "qwen3:8b", "keep_alive": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["done_reason"], "unload");
+    unload.assert();
+}
+
+#[tokio::test]
+async fn unload_does_not_set_last_client_request_at() {
+    let server = MockServer::start();
+    let _unload = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body(r#"{"done":true}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("gpu"), ["qwen3:8b"], Some(4.0));
+    assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/api/generate",
+            json!({"model": "qwen3:8b", "keep_alive": 0}),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
+}
+
+#[tokio::test]
+async fn cancel_running_pull_ndjson_is_terminal_error() {
+    let server = MockServer::start();
+    server.mock(|when, then| {
+        when.method(GET).path("/api/tags");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"models":[]}"#);
+    });
+    server.mock(|when, then| {
+        when.method(POST).path("/api/pull");
+        then.status(200)
+            .delay(Duration::from_secs(30))
+            .body("{\"status\":\"success\"}\n");
+    });
+    let config = fleet_config(vec![node("gpu", &server.base_url(), 24.0, 1, None)]);
+    let mut state = state_from(config);
+    state.admin_token = Some("secret".into());
+    mark_ready(&state, "gpu", &[]);
+
+    let pull_state = state.clone();
+    let pull = tokio::spawn(async move {
+        send(
+            pull_state,
+            json_req(Method::POST, "/api/pull", json!({"model": "moondream"})),
+        )
+        .await
+    });
+
+    let job_id = {
+        let started = Instant::now();
+        loop {
+            let jobs = state.orchestrator.list_jobs();
+            if let Some(job) = jobs.first() {
+                break job.id;
+            }
+            if started.elapsed() > Duration::from_secs(2) {
+                panic!("job never appeared");
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+    };
+
+    let (cancel_status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::POST)
+            .uri(format!("/router/v1/jobs/{job_id}/cancel"))
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(cancel_status, StatusCode::OK);
+
+    let (status, headers, body) = pull.await.expect("join");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok()),
+        Some("application/x-ndjson")
+    );
+    let text = String::from_utf8(body.to_vec()).unwrap();
+    let lines: Vec<Value> = text
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(|l| serde_json::from_str(l).expect("ndjson"))
+        .collect();
+    assert!(
+        lines.iter().any(|l| l.get("error").is_some()),
+        "expected terminal error line in {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .all(|l| l.get("status") != Some(&json!("success"))),
+        "must not emit success after cancel: {lines:?}"
+    );
 }
 
 async fn spawn_broken_ndjson_upstream() -> (String, tokio::task::JoinHandle<()>) {

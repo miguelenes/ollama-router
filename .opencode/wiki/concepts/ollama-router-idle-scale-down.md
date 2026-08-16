@@ -6,7 +6,7 @@ sourceRefs:
   - crates/ollama-router-core/src/fleet
   - crates/ollama-router-verda
   - crates/ollama-router/src/proxy
-lastReviewed: 2026-08-14
+lastReviewed: 2026-08-16
 ---
 
 # Ollama Router Idle Scale-Down
@@ -32,6 +32,7 @@ Does **not** count:
 - Admin `/router/v1/*`
 - Warm-keeper generate probes
 - Internal reconcile
+- Fleet unload / `ollama stop` (unload-intent generate/chat: no `inflight_inc`)
 
 ## Idle policy
 
@@ -58,6 +59,10 @@ If inflight is non-zero or the node is no longer idle, it **undrains** and skips
 Only then does Verda destroy use `delete_permanently`. Failed destroy **keeps
 draining** and **retains** Registry and FleetState ownership so reconcile can
 retry the still-billed resource.
+
+Operator cordon (`POST /router/v1/nodes/{id}/drain`) is a separate **cordoned**
+bit — not inventory/Verda `draining`. It excludes the node from ranking but
+never makes a fleet.yaml host destroyable and is not the idle teardown path.
 
 Trimming above `auto_scale_max_instances` uses the same drain-and-verify path.
 Victim order is lowest activity (`last_client_request_at` else `registered_at`),

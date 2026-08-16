@@ -49,7 +49,7 @@ async fn tick(
         .registry
         .snapshot()
         .into_iter()
-        .filter(|n| n.healthy && !n.draining && n.url.is_some())
+        .filter(|n| n.healthy && !n.draining && !n.cordoned && n.url.is_some())
         .collect();
     for node in nodes {
         if shutdown.is_cancelled() {

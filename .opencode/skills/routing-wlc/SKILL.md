@@ -11,13 +11,19 @@ Code: `crates/ollama-router-core/src/routing/` (pure functions, unit + proptest)
 ## Hard filters (drop, do not score)
 
 1. Healthy
-2. Label match
-3. Model present on disk (**holders only** for inference)
-4. `capacity_fits` (static VRAM + live headroom + reservations)
-5. Not saturated (`inflight < effective_max_inflight`)
+2. Not `draining` and not operator-`cordoned`
+3. Label match
+4. Model present on disk (**holders only** for inference)
+5. `capacity_fits` (static VRAM + live headroom + reservations)
+6. Not saturated (`inflight < effective_max_inflight`)
 
-All eligible saturated → `all_nodes_saturated` → 503. Never pick a saturated node
-as fallback.
+All eligible saturated → `all_nodes_saturated` → 503 (opt-in
+`saturation_wait_seconds` may wait first). Never pick a saturated node as
+fallback.
+
+Operator cordon (`POST /router/v1/nodes/{id}/drain` / `/undrain`) excludes from
+ranking, placement, bootstrap, and warm-keeper; probes continue. Separate from
+inventory/Verda `draining`.
 
 A generate/chat/embed miss (`model_missing`) is not a rank bypass: the model must
 be on disk before scoring. Optional proxy `auto_pull_on_miss` enqueues a
@@ -41,13 +47,16 @@ path (do not treat metrics `vram_gb()` → 0 as “CPU” for gates or preferenc
 2. Pressure penalty: elevated +2, critical +8
 3. Known GPU util (busy band ≥ 50%; unknown is middle, **not** `0`)
 4. Known free VRAM (tight band < 2 GiB; unknown is middle, **not** `0` full)
-5. `capacity_preference` (class bias over **known** VRAM/GPU)
-6. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
+5. Known CPU util (busy band ≥ 80%; unknown is middle `1.0`, **not** idle `0`)
+6. `capacity_preference` (class bias over **known** VRAM/GPU)
+7. Warm (loaded 0 / cold 1) + RAM-available-ratio tie-break
 
-`base_cap` is the ceiling **before** pressure derating. Utilization **dominates**
-GPU-util / free-VRAM bias and preference: a 48 GiB GPU at 2/8 (25%) beats a CPU
-at 1/2 (50%) for EMBED. Do not treat metrics `gpu_util_pct.unwrap_or(0)` or
-`vram_free_gb.unwrap_or(0)` as idle/full on the rank path.
+`load_key` = `(inflight, pressure, gpu_util, vram_free, cpu_util, preference,
+warm+ram)`. `base_cap` is the ceiling **before** pressure derating. Utilization
+**dominates** GPU-util / free-VRAM / CPU-util bias and preference: a 48 GiB GPU
+at 2/8 (25%) beats a CPU at 1/2 (50%) for EMBED. Do not treat metrics
+`gpu_util_pct.unwrap_or(0)` or `vram_free_gb.unwrap_or(0)` as idle/full on the
+rank path.
 
 ## Class preference
 

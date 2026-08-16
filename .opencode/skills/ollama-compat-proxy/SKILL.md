@@ -18,7 +18,7 @@ auto Hub-pull); create/copy/push/blobs = 501.
 
 | Path | Behavior |
 |------|----------|
-| `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). Size class may use catalog `details.parameter_size` when `:Nb` is absent. |
+| `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). Size class may use catalog `details.parameter_size` when `:Nb` is absent. **Unload-intent** (`keep_alive <= 0`, empty/absent prompt/messages): fan out to every healthy loaded holder (incl. cordoned; excl. inventory `draining`); router-owned `done_reason: "unload"`; no `inflight_inc`. |
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Passthrough to Ollama's OpenAI shim on the ranked node. Same `inflight_inc` / reservation / class ranking as native chat/embed. Do **not** rewrite `/v1/embeddings` to `/api/embed`. |
@@ -46,6 +46,11 @@ request path: Ollama `{"error": "…"}` on `/api/*`, OpenAI
 Kick coalesced async Verda demand-scale (`create_additional`) for those
 reasons. Never block the client on provision.
 
+When `saturation_wait_seconds` > 0 (default **0** = immediate 503), a
+`RoutingError::Saturated` loops re-rank / wait on registry `Notify` from
+`inflight_dec` until a free slot, the deadline, or client disconnect — never
+forward to a still-saturated node.
+
 Omitted node VRAM is **unknown** (not a CPU). LARGE/MEDIUM against unknown-only
 holders → `insufficient_capacity`. SMALL/EMBED may still forward to unknown.
 
@@ -72,7 +77,8 @@ Persist jobs in SQLite (see durable-model-operations wiki). Recover via live
 `/api/tags`. Default pull places on every healthy generate-class-eligible node.
 HTTP pull and delete stream fleet-job NDJSON; known insufficient disk skips a
 pull target (`skipped_disk`); unknown disk does not. Delete targets healthy
-non-draining holders; already-absent is a success stream. Opt-in
+non-draining holders; already-absent is a success stream. Cancel via
+`POST /router/v1/jobs/{id}/cancel` (`TargetStatus::Cancelled`). Opt-in
 `bootstrap_desired_models` background-ensures desired tiers (known VRAM ∩
 `min_vram_gb`). Do not log upstream bodies. Pull is not a stub NDJSON Hub-pull
 through one node.

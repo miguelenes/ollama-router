@@ -141,6 +141,8 @@ pub enum TargetStatus {
     Running,
     Success,
     Failed,
+    /// Operator cancel of an incomplete target (failure-like for job summary).
+    Cancelled,
     AlreadyPresent,
     AlreadyAbsent,
     SkippedUnhealthy,
@@ -157,6 +159,7 @@ impl TargetStatus {
             Self::Running => "running",
             Self::Success => "success",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
             Self::AlreadyPresent => "already_present",
             Self::AlreadyAbsent => "already_absent",
             Self::SkippedUnhealthy => "skipped_unhealthy",
@@ -196,20 +199,22 @@ impl FromStr for TargetStatus {
     type Err = ();
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim() {
-            "pending" => Ok(Self::Pending),
-            "running" => Ok(Self::Running),
-            "success" => Ok(Self::Success),
-            "failed" => Ok(Self::Failed),
-            "already_present" => Ok(Self::AlreadyPresent),
-            "already_absent" => Ok(Self::AlreadyAbsent),
-            "skipped_unhealthy" => Ok(Self::SkippedUnhealthy),
-            "skipped_capacity" => Ok(Self::SkippedCapacity),
-            "skipped_ram_pressure" => Ok(Self::SkippedRamPressure),
-            "skipped_disk" => Ok(Self::SkippedDisk),
-            "deleted" => Ok(Self::Deleted),
-            _ => Err(()),
-        }
+        Ok(match s.trim() {
+            "pending" => Self::Pending,
+            "running" => Self::Running,
+            "success" => Self::Success,
+            "failed" => Self::Failed,
+            "cancelled" => Self::Cancelled,
+            "already_present" => Self::AlreadyPresent,
+            "already_absent" => Self::AlreadyAbsent,
+            "skipped_unhealthy" => Self::SkippedUnhealthy,
+            "skipped_capacity" => Self::SkippedCapacity,
+            "skipped_ram_pressure" => Self::SkippedRamPressure,
+            "skipped_disk" => Self::SkippedDisk,
+            "deleted" => Self::Deleted,
+            // Additive forward-compat: old binary reading a newer status string.
+            _ => Self::Failed,
+        })
     }
 }
 
