@@ -1,8 +1,9 @@
-## Purpose
+# model-placement Specification
 
+## Purpose
 Puts a pulled model on every node that can actually run it so later generate/chat/embed can load-share across holders instead of pinning one disk.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Default pull targets every generate-class-eligible node
 

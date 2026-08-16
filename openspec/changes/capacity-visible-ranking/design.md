@@ -34,7 +34,7 @@ YAML `0` / `gpus: 0` remains a measured CPU. Omitted stays `None`. Add routing a
 
 ### 3. Preference uses known VRAM/GPU; utilization still first
 
-SMALL: known GPU (`gpus >= 1`), then unknown GPU count, then known CPU (`Some(0)`). EMBED and MEDIUM compare **known** VRAM only — omitted MUST NOT sort as `0` (would win as the “smallest GPU”). LARGE unknown is already excluded by the VRAM gate. `load_key` position 1 unchanged. Existing proptest (utilization beats preference; saturated never selected) stays.
+GPU-first, CPU as overflow: do not invert SMALL/EMBED toward CPU-home. Utilization (`load_key` position 1) still dominates — an idle GPU takes SMALL/embed even if a CPU holder is free. SMALL bands: known GPU (`gpus >= 1`), then unknown GPU count, then known CPU (`Some(0)`). EMBED and MEDIUM compare **known** VRAM only — omitted MUST NOT sort as `0` (would win as the “smallest GPU”). EMBED still prefers lower known VRAM, so a measured CPU (`Some(0)`) can win an **equal-load tie** against an 8 GiB GPU; that is existing WLC, not CPU-home. LARGE unknown is already excluded by the VRAM gate. Existing proptest (utilization beats preference; saturated never selected) stays.
 
 ### 4. Class hint from the catalog
 
@@ -42,7 +42,7 @@ SMALL: known GPU (`gpus >= 1`), then unknown GPU count, then known CPU (`Some(0)
 
 ### 5. Specs for existing WLC/placement are verify-first
 
-Do not rewrite `rank_nodes` sort key. Add tests only for new unknown-VRAM and `parameter_size` scenarios, plus a placement test that LARGE ensure omits unknown VRAM. Keep current stream/retry tests.
+Do not rewrite `rank_nodes` sort key. Add tests only for new unknown-VRAM and `parameter_size` scenarios, plus placement tests that LARGE ensure omits unknown VRAM and known CPU, and that MEDIUM default placement omits a known CPU. Keep current stream/retry tests.
 
 ### 6. Local-dev static capacity is GitOps
 

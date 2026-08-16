@@ -1,32 +1,100 @@
 schema: spec-driven
 
-# Project context (optional)
-# This is shown to AI when creating artifacts.
-# Add your tech stack, conventions, style guides, domain knowledge, etc.
-# Example:
-#   context: |
-#     Tech stack: TypeScript, React, Node.js
-#     We use conventional commits
-#     Domain: e-commerce platform
+# Injected into every artifact/apply/archive instruction. Constraints for the
+# author — do not paste this block into proposal/specs/design/tasks.
+context: |
+  ollama-router is a mixed CPU+GPU Ollama-compatible fleet proxy (Axum 0.8,
+  Tokio, Rust edition 2021, rustc 1.97). The router process needs no GPU.
+  One listen URL (prod :11434; task dev uses router :11435, host Ollama
+  :11434, agent :11436) load-balances generate, chat, and embed across
+  fleet.yaml hosts and optional Verda Cloud NVIDIA spot GPUs.
 
-# Per-artifact rules (optional)
-# Add custom rules for specific artifacts.
-# Example:
-#   rules:
-#     proposal:
-#       - Keep proposals under 500 words
-#       - Always include a "Non-goals" section
-#     tasks:
-#       - Break tasks into chunks of max 2 hours
+  Product is an honest fleet proxy, not a fake single daemon: list = union of
+  holders; infer = only nodes that already have the model; pull = placement
+  job (not native NDJSON); miss = 503 model_missing (not native 404);
+  create/copy/push/blobs = 501; auto_pull_on_miss stays default false.
 
-# Per-operation guidance (optional)
-# Add advisory guidance for how apply and archive work should be conducted.
-# This is separate from artifact rules above.
-# Example:
-#   operations:
-#     apply:
-#       guidance:
-#         - Keep test summaries concise
-#     archive:
-#       guidance:
-#         - Summarize the archive outcome before finishing
+  Inventory is OLLAMA_ROUTER_FLEET (fleet.yaml) + durable FleetState + Verda.
+  YAML overlays are tunables-only; top-level nodes: is a hard config error.
+  Never destroy fleet.yaml hosts. Verda spots are not listed in fleet.yaml.
+  One router replica (FleetState file lock is same-host only). No Redis, no
+  HA replicas. This repo is not Illumination; do not add Sail, PHP, Python
+  services, Thunder, or RunPod.
+
+  Cloud Ollama URLs are a self-hosted zrok private share (loopback). Public
+  :11434 and hostname public tunnels (*.zrok.io etc.) are public_url_blocked
+  and never healthy. fleet.yaml LAN URLs stay direct HTTP. Enroll learns the
+  share via POST /router/v1/nodes/enroll (fail-closed admin bearer) and must
+  not write fleet.yaml. Verda bootstrap is a startup script; the router never
+  SSH. Idle last_client_request_at comes only from inflight_inc on generate,
+  chat, embed, and OpenAI /v1 chat/completions, completions, embeddings.
+
+  Node-agent (crates/ollama-node-agent) on :11436; GiB = bytes / 1024³;
+  capacity probes soft-fail. Shared DTOs in ollama-capacity-types. Trust
+  pressure_level; do not reclassify RAM in the router.
+
+  Ranking is utilization-first WLC, then class preference. GPU-first: CPU is
+  overflow when the GPU is saturated or busier — do not invert SMALL/embed
+  toward CPU-home. Omitted VRAM/GPU is unknown, not a measured CPU (YAML 0 /
+  gpus: 0 is known CPU). MEDIUM/LARGE need known sufficient VRAM. EMBED
+  prefers lower known VRAM (a measured CPU can win an equal-load tie).
+
+  Stack: workspace Cargo.lock, thiserror in libraries, anyhow in the binary,
+  reqwest rustls-tls, no native-tls/openssl, tracing JSON, no unwrap/expect
+  in non-test lib code. Admin bearer unset → 403, no default. Local runner
+  is Task (Taskfile.yml); finish gate is sequential task check. Sensitivity:
+  never log bodies, prompts, embeddings, zrok share tokens, Verda
+  tokens/secrets, SSH keys, or the admin bearer.
+
+  Main specs live in openspec/specs/ after archive; until then capabilities
+  exist only as change deltas. Name capabilities after user-visible behavior
+  (api-tags, inference-routing, model-placement, request-class,
+  size-load-routing). Python tree at illumination/services/ollama-router/ is
+  behavior reference only — read, do not paste.
+
+rules:
+  proposal:
+    - "Lead with the user-visible gap (CLI, list/infer/pull contract, ranking lie), not an internal refactor."
+    - "State whether the change keeps the honest-fleet contract (list = union, infer = holders, pull = placement, miss = 503, 501 mutates) or explicitly reverses it."
+    - "Non-goals must name out-of-scope A-features unless reversing B: native pull NDJSON, default auto_pull_on_miss, 404-on-miss, fleet-union /api/ps, public tunnels, Thunder/RunPod, GPU-util in the sort key."
+    - "Distinguish unknown VRAM from measured CPU (vram_gb = 0, gpus = 0) whenever ranking, placement, or inflight caps are in scope."
+    - "Impact lists crates, deploy YAML, tests, and wiki/skills actually touched; mention sensitivity when HTTP, jobs, or health parse bodies."
+    - "Keep Why short; put algorithm and Option-vs-zero in design, not the proposal."
+  specs:
+    - "Each requirement is a SHALL with at least one WHEN/THEN scenario; scenarios are the acceptance tests."
+    - "Split capabilities by behavior: size-load-routing (unknown ≠ 0, VRAM gates), inference-routing (holders, WLC, stream), model-placement (pull targets), request-class (classify). Do not duplicate the same scenario across specs."
+    - "Inference is holders-only; miss is 503 model_missing; saturation is 503 all_nodes_saturated; unknown MEDIUM/LARGE is 503 insufficient_capacity."
+    - "Default pull/ensure targets healthy generate-class-eligible nodes; #all may widen; LARGE/MEDIUM skip known CPU and unknown VRAM."
+    - "Class preference uses known VRAM/GPU only; SMALL is GPU then unknown then CPU; omitted MUST NOT sort as 0 for EMBED/MEDIUM."
+    - "Classification MUST NOT log prompts or tag bodies; specs must not require logging secrets."
+  design:
+    - "Known vs zero is Option on the rank/placement path; do not blindly change metrics vram_gb() callers that want a numeric gauge."
+    - "Verify-first: do not rewrite rank_nodes sort key or the job orchestrator unless the change's goal is that rewrite; add tests for new unknown-VRAM and class-hint cases."
+    - "HTTP POST /api/pull uses placement_class = generate-class, not RequestClass::Pull."
+    - "GPU-first / CPU overflow stays unless the change explicitly chooses otherwise; EMBED lower-known-VRAM ties (CPU 0 vs 8 GiB) are existing WLC."
+    - "Fetch current Axum 0.8 / Tokio / reqwest / tower-http docs before designing those APIs; no Axum 0.7 GraphQL/WS guides."
+    - "Record rejected alternatives that would break agent soft-fail, tags listing, or fleet.yaml GitOps."
+  tasks:
+    - "Checkbox items mapped to spec scenarios; include unit/proxy tests for unknown ≠ 0, miss/capacity 503, and placement skips when those specs change."
+    - "End with wiki/skills listed in the proposal and sequential task check (fmt, clippy -D warnings, test --locked, deny)."
+    - "Do not add a Makefile, justfile, or npm scripts; do not install task in GitHub Actions."
+    - "fleet.local.yaml capacity comments: 0/0 = known CPU; omit = unknown. Mock GPU rows need gpus: 1 when the change touches inventory."
+    - "Keep tasks implementable in one apply pass; spike/investigate items belong in design risks, not as unchecked forever-tasks."
+
+operations:
+  apply:
+    guidance:
+      - "Implement only what tasks.md lists; if code reveals a spec gap, pause and update the change instead of silently narrowing behavior."
+      - "Before claiming done: clear diagnostics on edited files, then task check (sequential cargo fmt --check, clippy --all-targets -- -D warnings, cargo test --workspace --locked, cargo deny). If fmt --check fails, cargo fmt --all and re-run task check."
+      - "Stream NDJSON/SSE as it arrives; never buffer full inference bodies; no blocking I/O in async handlers."
+      - "Never log request/response bodies, prompts, embeddings, zrok share tokens, Verda tokens/secrets, SSH keys, or the admin bearer. Allowlist: node id, model name, request class, status, latency, reason codes, instance type, location, spot price, VRAM GiB."
+      - "Do not add Thunder, RunPod, public :11434 as healthy, enroll writes to fleet.yaml, Redis, HA replicas, or a Prometheus scrape of node-agent :11436."
+      - "Hot Prometheus metrics must not label by model name; /metrics and /healthz stay unauthenticated."
+      - "thiserror in libraries, anyhow only in the binary, rustls-tls, serde ignore extras on Verda/capacity JSON, deny_unknown_fields only on our YAML."
+      - "Update .opencode/wiki and ollama-compat-proxy / routing-wlc skills when tasks say so; update opencode-rag.json only if indexing include/exclude changes."
+  archive:
+    guidance:
+      - "Do not archive with unchecked tasks. Merge each delta into openspec/specs/<capability>/spec.md using the capability path from the change; do not flatten or rename api-tags, inference-routing, model-placement, request-class, or size-load-routing."
+      - "Keep honest-fleet, unknown-VRAM ≠ 0, Verda-only, and GPU-first/CPU-overflow requirements when those deltas land in main specs."
+      - "Summarize which main specs grew and that the change directory moved to archive; do not dump config context into the archive summary or main specs."
+      - "Wiki and skills updates belong in apply tasks; archive does not invent extra doc rewrites."

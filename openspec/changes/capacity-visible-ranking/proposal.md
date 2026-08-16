@@ -33,6 +33,6 @@ The router is meant to be one URL over a cluster: list the union, send generate/
 - `crates/ollama-router-core/src/routing/classify.rs` + proxy — `parameter_size` hint.
 - `crates/ollama-router-core/src/config/models.rs` / fleet snapshots — routing accessors; do not blindly change metrics `vram_gb()`.
 - `deploy/fleet.local.yaml`, `deploy/fleet.yaml` (mock GPU `gpus`).
-- Tests: unknown vs GPU, EMBED known-8GiB over unknown, LARGE unknown 503, classify `:latest`, placement skips unknown LARGE, existing WLC tests kept.
+- Tests: unknown vs GPU, EMBED/MEDIUM known-8GiB over unknown, LARGE unknown 503, classify `:latest`, placement skips unknown LARGE and MEDIUM-on-CPU, existing WLC tests kept.
 - Wiki + `ollama-compat-proxy` + `routing-wlc` (`.cursor` and `.opencode`).
 - Sensitivity unchanged.
