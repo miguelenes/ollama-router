@@ -1,8 +1,9 @@
-## Purpose
+# admin-node-drain Specification
 
+## Purpose
 Lets an operator cordon a node for maintenance through the admin API: a draining node stops receiving new work but keeps health probes and is never destroyed by the drain itself.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Operator drain and undrain via the admin API
 

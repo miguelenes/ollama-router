@@ -5,14 +5,14 @@
 
 ## 2. Operator cordon (drain API)
 
-- [ ] 2.1 Registry `cordoned` bit + snapshot field, set/cleared only by admin; ranking, placement targets, bootstrap, and warm-keeper exclude `draining || cordoned`; health/capacity probes continue; `should_remove_permanent` and Verda teardown still read only `draining`
+- [ ] 2.1 Registry `cordoned` bit + snapshot field, set/cleared only by admin; ranking, placement targets, bootstrap, and warm-keeper exclude `draining || cordoned`; health/capacity probes continue; `should_remove_permanent` and Verda teardown still read only `draining`; `apply_permanent_config` must not clear `cordoned` (unlike inventory `draining`)
 - [ ] 2.2 Admin routes `POST /router/v1/nodes/{id}/drain` and `/undrain` (fail-closed bearer; unset → 403; unknown id → 404; idempotent); nodes listing shows the state; `ollama_router_node_draining` reports `draining || cordoned`
-- [ ] 2.3 Tests: drained holder is never selected (sole holder → existing 503); drained fleet.yaml host survives reload reconcile and keeps probes; undrain restores ranking; 403 with unset token; gauge flips
+- [ ] 2.3 Tests: drained holder is never selected (sole holder → existing 503); drained fleet.yaml host survives reload reconcile, stays drained, and keeps probes; undrain restores ranking; 403 with unset token; gauge flips
 
 ## 3. Fleet unload (`ollama stop`)
 
-- [ ] 3.1 Detect unload-intent (`keep_alive <= 0` number or duration string, empty/absent `prompt`/`messages`) before ranking; fan out native unload to every healthy, non-draining node with the model in the ps union; router-owned `done_reason: "unload"` success object (zero targets = success); any target failure → 502 router-owned error, no upstream text; missing `model` → 400; no `inflight_inc`, no `last_client_request_at`; never log bodies
-- [ ] 3.2 Proxy tests: two loaded holders both receive unload; unloaded model returns success; non-empty prompt with `keep_alive: 0` stays ranked inference; unload does not set `last_client_request_at`
+- [ ] 3.1 Detect unload-intent (`keep_alive <= 0` number or duration string, empty/absent `prompt`/`messages`) before ranking; fan out native unload to every healthy node with the model in the ps union, including operator-cordoned holders, excluding inventory/Verda `draining`; router-owned `done_reason: "unload"` success object (zero targets = success); any target failure → 502 router-owned error, no upstream text; missing `model` → 400; no `inflight_inc`, no `last_client_request_at`; never log bodies
+- [ ] 3.2 Proxy tests: two loaded holders both receive unload; unloaded model returns success; non-empty prompt with `keep_alive: 0` stays ranked inference; unload still hits a cordoned loaded holder; unload does not set `last_client_request_at`
 
 ## 4. Job cancel
 

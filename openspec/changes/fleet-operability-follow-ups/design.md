@@ -23,7 +23,7 @@ See proposal.md (Why). Today: the proxy already parses the generate/chat body fo
 
 ### 1. Unload is a proxy fan-out, not a job and not a passthrough
 
-Detect unload-intent before ranking, from the already-parsed body: `keep_alive` parses to `<= 0` (number or duration string `"0s"`) **and** `prompt` (generate) / `messages` (chat) is absent or empty. Targets are the ps-union loaded holders (healthy, non-draining, model in `PsRecord`s). Fan out in parallel with the existing upstream client and default timeout; each target gets the native unload body for its endpoint. All-success (or zero targets) → router-owned `{"model", "created_at", "response": "", "done": true, "done_reason": "unload"}`; any failure → 502 router-owned error, no upstream text. No `inflight_inc`, no `last_client_request_at`, no idle reservation.
+Detect unload-intent before ranking, from the already-parsed body: `keep_alive` parses to `<= 0` (number or duration string `"0s"`) **and** `prompt` (generate) / `messages` (chat) is absent or empty. Targets are the ps-union loaded holders that are healthy and **not** inventory/Verda `draining`. Operator-**cordoned** holders stay in the target set (`ollama stop` must still unload them). Fan out in parallel with the existing upstream client and default timeout; each target gets the native unload body for its endpoint. All-success (or zero targets) → router-owned `{"model", "created_at", "response": "", "done": true, "done_reason": "unload"}`; any failure → 502 router-owned error, no upstream text. No `inflight_inc`, no `last_client_request_at`, no idle reservation.
 
 **Alternative considered:** durable SQLite job like pull/delete. Rejected — unload is fast, idempotent, and worthless after restart; a job adds schema and stream plumbing for nothing.
 
@@ -31,7 +31,7 @@ Detect unload-intent before ranking, from the already-parsed body: `keep_alive` 
 
 ### 2. Operator cordon is a separate bit from `draining`
 
-Add `cordoned: AtomicBool` to registry nodes, set only by the admin drain/undrain routes. Ranking, placement targets, bootstrap, and warm-keeper exclude `draining || cordoned`; health/capacity probes ignore it. `should_remove_permanent` and Verda teardown keep reading only `draining`, so a cordoned fleet.yaml host is never dropped or destroyed. Snapshot gains `cordoned`; the admin nodes listing shows it and `ollama_router_node_draining` reports `draining || cordoned` (the operator-facing meaning: "not taking new work").
+Add `cordoned: AtomicBool` to registry nodes, set only by the admin drain/undrain routes. Ranking, placement targets, bootstrap, and warm-keeper exclude `draining || cordoned`; health/capacity probes ignore it. `should_remove_permanent` and Verda teardown keep reading only `draining`, so a cordoned fleet.yaml host is never dropped or destroyed. Snapshot gains `cordoned`; the admin nodes listing shows it and `ollama_router_node_draining` reports `draining || cordoned` (the operator-facing meaning: "not taking new work"). `apply_permanent_config` currently clears inventory `draining` when a fleet.yaml host is still present — it MUST NOT clear `cordoned`. In-process inventory reload therefore keeps the cordon; process restart drops it (not persisted in FleetState).
 
 **Alternative considered:** reuse `draining`. Rejected — reload reconcile drops permanent draining nodes at zero inflight; a maintenance cordon would remove the node from the registry.
 
@@ -59,7 +59,7 @@ Registry gains `Arc<tokio::sync::Notify>`; `inflight_dec` calls `notify_waiters(
 
 ## Risks / Trade-offs
 
-- [Cordon lost on restart] → documented; operator re-drains after a restart (single replica, rare).
+- [Cordon lost on process restart] → documented; in-process fleet reload keeps cordon (`apply_permanent_config` must not clear it). Operator re-drains after a restart (single replica, rare).
 - [Unload misses a node loaded since the last probe] → idempotent; rerun after the next ps probe. Probe freshness is the same trust ps already has.
 - [`keep_alive` duration strings vary (`0`, `0s`, `-1m`)] → parse number or Go-style duration; only non-positive triggers unload; anything unparseable falls through to normal inference.
 - [Stricter sticky equality with a 7-field key] → equality only tightens; sticky promotion already requires exact key equality.

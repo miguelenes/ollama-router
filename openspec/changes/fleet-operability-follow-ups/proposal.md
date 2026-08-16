@@ -14,18 +14,23 @@ fails where a native daemon would have absorbed the burst.
 
 ## What Changes
 
-- `POST /api/generate` with `keep_alive <= 0` and no prompt becomes a fleet
-  **unload**: fan out to every healthy holder that has the model loaded, reply
-  with one CLI-compatible done/unload object. Not idle activity (matches
-  pull/delete). Keeps the honest-fleet contract — this is a fleet operation,
-  not a single-node passthrough.
+- `POST /api/generate` / `POST /api/chat` with `keep_alive <= 0` and an empty
+  or absent `prompt` / `messages` becomes a fleet **unload**: fan out to every
+  healthy holder that has the model loaded (including operator-cordoned
+  nodes; skip inventory/Verda teardown draining), reply with one
+  CLI-compatible done/unload object. Not idle activity (matches pull/delete).
+  Keeps the honest-fleet contract — this is a fleet operation, not a
+  single-node passthrough.
 - New admin routes `POST /router/v1/nodes/{id}/drain` and `/undrain`
-  (fail-closed bearer). Draining excludes a node from ranking and placement
-  targets but keeps health probes; it never destroys anything and never
-  touches `fleet.yaml`.
+  (fail-closed bearer). Operator drain is a **new cordon bit**, not the
+  existing Verda/inventory `draining` flag (reusing that flag would drop
+  fleet.yaml hosts on reload). Cordon excludes a node from ranking and
+  placement targets but keeps health probes; it never destroys anything and
+  never touches `fleet.yaml`.
 - `load_key` gains a known-CPU-util term after known free VRAM (unknown is a
   middle band, not `0` — same discipline as GPU util and free VRAM; a node
-  with omitted VRAM/GPU stays unknown, not a measured CPU).
+  with omitted VRAM/GPU stays unknown, not a measured CPU). This takes **CPU
+  util in the sort key** and **operator drain** out of the A-feature backlog.
 - New admin route `POST /router/v1/jobs/{id}/cancel`: terminal-marks a running
   pull/delete job's incomplete targets; NDJSON watchers see a terminal error
   line; router-owned reasons only.
@@ -46,10 +51,11 @@ tunnels, Thunder/RunPod, cross-request queue fairness or a persistent queue
 
 ### New Capabilities
 
-- `api-stop`: `ollama stop` / `keep_alive <= 0` generate is a fleet unload
-  across loaded holders, operationally quiet for idle.
-- `admin-node-drain`: operator drain/undrain of a node via the admin API;
-  draining excludes from ranking and placement without destroying.
+- `api-stop`: `ollama stop` / `keep_alive <= 0` generate or chat is a fleet
+  unload across loaded holders, operationally quiet for idle.
+- `admin-node-drain`: operator drain/undrain of a node via the admin API
+  (cordon bit, not inventory-remove draining); excludes from ranking and
+  placement without destroying.
 - `admin-job-cancel`: operator cancel of a running durable pull/delete job.
 
 ### Modified Capabilities
@@ -68,9 +74,10 @@ tunnels, Thunder/RunPod, cross-request queue fairness or a persistent queue
 - Config: `saturation_wait_seconds` policy knob (tunables-only YAML).
 - Tests: rank unit tests, proxy tests (unload fan-out, wait/503), admin tests
   (drain, cancel), jobs tests (cancel terminal semantics).
-- Docs: load-share + durable-model-operations wiki, `routing-wlc` +
-  `ollama-compat-proxy` + `idle-scale-down` skills, `openspec/config.yaml`
-  context/rules (CPU util and drain leave the A-feature non-goal list).
+- Docs: load-share, durable-model-operations, product, and idle-scale-down
+  wiki; `routing-wlc` + `ollama-compat-proxy` + `idle-scale-down` skills
+  (`.cursor` and `.opencode`); `openspec/config.yaml` context/rules (CPU util
+  and operator drain leave the A-feature non-goal list).
 - Sensitivity: unload detection reads `keep_alive`/`prompt` from the already
   parsed generate body — never log bodies; cancel and drain responses carry
   router-owned reasons only, never upstream detail text.

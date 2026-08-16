@@ -1,8 +1,9 @@
-## Purpose
+# api-stop Specification
 
+## Purpose
 Makes `ollama stop` honest against the fleet: an unload-intent generate/chat (`keep_alive <= 0`, no prompt/messages) unloads the model from every loaded holder, not just one ranked node.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Stop unloads every loaded holder
 

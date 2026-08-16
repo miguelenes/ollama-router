@@ -16,7 +16,7 @@ The system SHALL forward `POST /api/generate`, `/api/chat`, `/api/embed` (includ
 
 #### Scenario: saturated holders are not a fallback
 
-- **WHEN** every healthy holder of the model is at its inflight cap
+- **WHEN** `saturation_wait_seconds` is 0 (default) and every healthy holder of the model is at its inflight cap
 - **THEN** the client gets 503 `all_nodes_saturated` and no saturated node receives the request
 
 #### Scenario: known GPU util breaks an inflight tie
