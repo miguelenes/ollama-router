@@ -10,9 +10,12 @@ context: |
   fleet.yaml hosts and optional Verda Cloud NVIDIA spot GPUs.
 
   Product is an honest fleet proxy, not a fake single daemon: list = union of
-  holders; infer = only nodes that already have the model; pull = placement
-  job (not native NDJSON); miss = 503 model_missing (not native 404);
-  create/copy/push/blobs = 501; auto_pull_on_miss stays default false.
+  holders; ps = process-list union (one row per loaded node); show = holder
+  only (503 model_missing); version = router-owned (not a ranked Ollama);
+  infer = only nodes that already have the model; pull = placement job that
+  streams NDJSON progress (not a native Hub-pull through one node); miss =
+  503 model_missing (not native 404); create/copy/push/blobs = 501;
+  auto_pull_on_miss stays default false.
 
   Inventory is OLLAMA_ROUTER_FLEET (fleet.yaml) + durable FleetState + Verda.
   YAML overlays are tunables-only; top-level nodes: is a hard config error.
@@ -33,9 +36,10 @@ context: |
   capacity probes soft-fail. Shared DTOs in ollama-capacity-types. Trust
   pressure_level; do not reclassify RAM in the router.
 
-  Ranking is utilization-first WLC, then class preference. GPU-first: CPU is
-  overflow when the GPU is saturated or busier — do not invert SMALL/embed
-  toward CPU-home. Omitted VRAM/GPU is unknown, not a measured CPU (YAML 0 /
+  Ranking is utilization-first WLC, then RAM pressure, then known GPU util
+  (unknown util is not 0), then class preference. GPU-first: CPU is overflow
+  when the GPU is saturated or busier — do not invert SMALL/embed toward
+  CPU-home. Omitted VRAM/GPU is unknown, not a measured CPU (YAML 0 /
   gpus: 0 is known CPU). MEDIUM/LARGE need known sufficient VRAM. EMBED
   prefers lower known VRAM (a measured CPU can win an equal-load tie).
 
@@ -48,15 +52,16 @@ context: |
 
   Main specs live in openspec/specs/ after archive; until then capabilities
   exist only as change deltas. Name capabilities after user-visible behavior
-  (api-tags, inference-routing, model-placement, request-class,
-  size-load-routing). Python tree at illumination/services/ollama-router/ is
-  behavior reference only — read, do not paste.
+  (api-tags, api-ps, api-show, api-pull, api-version, inference-routing,
+  model-placement, request-class, size-load-routing). Python tree at
+  illumination/services/ollama-router/ is behavior reference only — read,
+  do not paste.
 
 rules:
   proposal:
     - "Lead with the user-visible gap (CLI, list/infer/pull contract, ranking lie), not an internal refactor."
     - "State whether the change keeps the honest-fleet contract (list = union, infer = holders, pull = placement, miss = 503, 501 mutates) or explicitly reverses it."
-    - "Non-goals must name out-of-scope A-features unless reversing B: native pull NDJSON, default auto_pull_on_miss, 404-on-miss, fleet-union /api/ps, public tunnels, Thunder/RunPod, GPU-util in the sort key."
+    - "Non-goals must name out-of-scope A-features unless reversing B: native Hub-pull through one node, default auto_pull_on_miss, 404-on-miss, agent-down unhealthy, public tunnels, Thunder/RunPod, vram_free/CPU util in the sort key, operator drain API."
     - "Distinguish unknown VRAM from measured CPU (vram_gb = 0, gpus = 0) whenever ranking, placement, or inflight caps are in scope."
     - "Impact lists crates, deploy YAML, tests, and wiki/skills actually touched; mention sensitivity when HTTP, jobs, or health parse bodies."
     - "Keep Why short; put algorithm and Option-vs-zero in design, not the proposal."
@@ -94,7 +99,7 @@ operations:
       - "Update .opencode/wiki and ollama-compat-proxy / routing-wlc skills when tasks say so; update opencode-rag.json only if indexing include/exclude changes."
   archive:
     guidance:
-      - "Do not archive with unchecked tasks. Merge each delta into openspec/specs/<capability>/spec.md using the capability path from the change; do not flatten or rename api-tags, inference-routing, model-placement, request-class, or size-load-routing."
+      - "Do not archive with unchecked tasks. Merge each delta into openspec/specs/<capability>/spec.md using the capability path from the change; do not flatten or rename api-tags, api-ps, api-show, api-pull, api-version, inference-routing, model-placement, request-class, or size-load-routing."
       - "Keep honest-fleet, unknown-VRAM ≠ 0, Verda-only, and GPU-first/CPU-overflow requirements when those deltas land in main specs."
       - "Summarize which main specs grew and that the change directory moved to archive; do not dump config context into the archive summary or main specs."
       - "Wiki and skills updates belong in apply tasks; archive does not invent extra doc rewrites."

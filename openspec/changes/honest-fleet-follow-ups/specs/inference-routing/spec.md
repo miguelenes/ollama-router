@@ -1,9 +1,4 @@
-# inference-routing Specification
-
-## Purpose
-Forwards generate, chat, and embed across a cluster as one URL: only nodes that already have the model, chosen by load first and size-class preference second, without buffering the stream.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Rank among holders by load, then size
 
@@ -67,12 +62,3 @@ When inflight utilization, RAM pressure, known-GPU-util bias, and known-free-VRA
 
 - **WHEN** three healthy holders of the same SMALL model exist — known GPU, unknown VRAM/GPU count, and known CPU (`vram = 0`, `gpus = 0`) — with equal inflight/cap, RAM pressure, GPU-util bias, and free-VRAM bias
 - **THEN** ranking order is known GPU, then unknown, then known CPU
-
-### Requirement: Stream and retry only before the first byte
-
-The system SHALL stream NDJSON or SSE chunks as they arrive and MUST NOT buffer the full inference body. It MAY retry another ranked holder only before the first upstream response byte. After the stream has begun, it MUST NOT retry.
-
-#### Scenario: retry stops after the stream starts
-
-- **WHEN** the chosen holder has already sent the first body byte
-- **THEN** a later upstream error is not retried on another node
