@@ -1,0 +1,8 @@
+---
+description: Rust quality gates
+alwaysApply: true
+---
+
+# Rust quality gates
+
+Before committing, run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`. Fix warnings instead of allowing them.

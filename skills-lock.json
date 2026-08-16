@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "grepai-ollama-setup": {
+      "source": "yoanbernabeu/grepai-skills",
+      "sourceType": "github",
+      "skillPath": "skills/getting-started/grepai-ollama-setup/SKILL.md",
+      "computedHash": "65a20af4dd38eb85e392615777f0445ea9f82843f094ae263c097f47758abaac"
+    },
     "multi-stage-dockerfile": {
       "source": "github/awesome-copilot",
       "sourceType": "github",
@@ -24,6 +30,18 @@
       "sourceType": "github",
       "skillPath": "skills/rust-best-practices/SKILL.md",
       "computedHash": "0ac6606adb27e64a31bdc8c1ed34e446ae0c14bff1c7648867c46e106adc048f"
+    },
+    "rust-router": {
+      "source": "actionbook/rust-skills",
+      "sourceType": "github",
+      "skillPath": "skills/rust-router/SKILL.md",
+      "computedHash": "787e5244b55d9d943abc49a81318bde7d1bbf88dd43bc60dc58ec74023ba3788"
+    },
+    "rust-testing": {
+      "source": "affaan-m/ecc",
+      "sourceType": "github",
+      "skillPath": "skills/rust-testing/SKILL.md",
+      "computedHash": "bd66d6441ff6d3a6acb89c902cd6a01bf58410aec3ecbc43d45409b3a3788ac8"
     }
   }
 }

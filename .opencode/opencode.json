@@ -1,78 +1,135 @@
 {
-  "$schema": "https://opencode.ai/config.json",
-  "lsp": {
-    "rust": {
-      "command": ["/home/menes/.cargo/bin/rust-analyzer"],
-      "extensions": [".rs"]
+    "$schema": "https://opencode.ai/config.json",
+    "lsp": {
+        "rust": {
+            "command": [
+                "/home/menes/.cargo/bin/rust-analyzer"
+            ],
+            "extensions": [
+                ".rs"
+            ]
+        },
+        "bash": {
+            "command": [
+                "npx",
+                "-y",
+                "bash-language-server",
+                "start"
+            ],
+            "extensions": [
+                ".sh",
+                ".bash",
+                ".zsh",
+                ".ksh"
+            ]
+        },
+        "yaml-ls": {
+            "command": [
+                "npx",
+                "-y",
+                "yaml-language-server",
+                "--stdio"
+            ],
+            "extensions": [
+                ".yaml",
+                ".yml"
+            ]
+        },
+        "dockerfile": {
+            "command": [
+                "npx",
+                "-y",
+                "dockerfile-language-server-nodejs",
+                "--stdio"
+            ],
+            "extensions": [
+                ".dockerfile",
+                "Dockerfile"
+            ]
+        },
+        "typescript": {
+            "command": [
+                "npx",
+                "-y",
+                "typescript-language-server",
+                "--stdio"
+            ],
+            "extensions": [
+                ".ts",
+                ".tsx",
+                ".js",
+                ".jsx",
+                ".mjs",
+                ".cjs",
+                ".mts",
+                ".cts"
+            ]
+        },
+        "json": {
+            "command": [
+                "npx",
+                "-y",
+                "--package=vscode-langservers-extracted",
+                "vscode-json-language-server",
+                "--stdio"
+            ],
+            "extensions": [
+                ".json",
+                ".jsonc"
+            ]
+        },
+        "taplo": {
+            "command": [
+                "/home/menes/.cargo/bin/taplo",
+                "lsp",
+                "stdio"
+            ],
+            "extensions": [
+                ".toml"
+            ]
+        },
+        "clangd": {
+            "disabled": true
+        }
     },
-    "bash": {
-      "command": ["npx", "-y", "bash-language-server", "start"],
-      "extensions": [".sh", ".bash", ".zsh", ".ksh"]
-    },
-    "yaml-ls": {
-      "command": ["npx", "-y", "yaml-language-server", "--stdio"],
-      "extensions": [".yaml", ".yml"]
-    },
-    "dockerfile": {
-      "command": ["npx", "-y", "dockerfile-language-server-nodejs", "--stdio"],
-      "extensions": [".dockerfile", "Dockerfile"]
-    },
-    "typescript": {
-      "command": ["npx", "-y", "typescript-language-server", "--stdio"],
-      "extensions": [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"]
-    },
-    "json": {
-      "command": [
-        "npx",
-        "-y",
-        "--package=vscode-langservers-extracted",
-        "vscode-json-language-server",
-        "--stdio"
-      ],
-      "extensions": [".json", ".jsonc"]
-    },
-    "taplo": {
-      "command": ["/home/menes/.cargo/bin/taplo", "lsp", "stdio"],
-      "extensions": [".toml"]
-    },
-    "clangd": {
-      "disabled": true
+    "instructions": [
+        "AGENTS.md",
+        ".cursor/rules/*.mdc",
+        "apps/*/AGENTS.md",
+        "packages/*/AGENTS.md",
+        "projects/*/AGENTS.md",
+        "services/*/AGENTS.md",
+        "web/AGENTS.md"
+    ],
+    "mcp": {
+        "docsrs": {
+            "type": "local",
+            "command": [
+                "/home/menes/.cargo/bin/docsrs-mcp"
+            ],
+            "enabled": true
+        },
+        "grafana": {
+            "type": "local",
+            "command": [
+                "uvx",
+                "mcp-grafana"
+            ],
+            "environment": {
+                "GRAFANA_URL": "http://127.0.0.1:3000"
+            },
+            "enabled": true
+        },
+        "prometheus": {
+            "type": "local",
+            "command": [
+                "uvx",
+                "prometheus-mcp-server"
+            ],
+            "environment": {
+                "PROMETHEUS_URL": "http://127.0.0.1:9090"
+            },
+            "enabled": true
+        }
     }
-  },
-  "instructions": [
-    ".cursor/rules/finish-check.mdc",
-    ".cursor/rules/project-mcps.mdc",
-    ".cursor/rules/sensitivity.mdc"
-  ],
-  "mcp": {
-    "docsrs": {
-      "type": "local",
-      "command": [
-        "/home/menes/.cargo/bin/docsrs-mcp"
-      ],
-      "enabled": true
-    },
-    "grafana": {
-      "type": "local",
-      "command": [
-        "uvx",
-        "mcp-grafana"
-      ],
-      "environment": {
-        "GRAFANA_URL": "http://127.0.0.1:3000"
-      },
-      "enabled": true
-    },
-    "prometheus": {
-      "type": "local",
-      "command": [
-        "uvx",
-        "prometheus-mcp-server"
-      ],
-      "environment": {
-        "PROMETHEUS_URL": "http://127.0.0.1:9090"
-      },
-      "enabled": true
-    }
-  }
 }

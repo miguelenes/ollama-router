@@ -1,0 +1,8 @@
+---
+description: Preserve streaming semantics
+alwaysApply: true
+---
+
+# Preserve streaming semantics
+
+When forwarding Ollama/OpenAI-compatible streaming responses, forward SSE chunks as they arrive (do not buffer or aggregate the full body). Keep Content-Type text/event-stream and propagate cancellation/EOF to upstream.

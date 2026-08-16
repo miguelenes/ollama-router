@@ -1,0 +1,8 @@
+---
+description: Ollama API compatibility
+alwaysApply: true
+---
+
+# Ollama API compatibility
+
+Keep the proxy compatible with both Ollama native endpoints (/api/chat, /api/generate) and OpenAI-compatible endpoints (/v1/chat/completions). Test changes against a live Ollama instance with curl before merging.
