@@ -1,0 +1,8 @@
+---
+description: Emit router metrics
+alwaysApply: true
+---
+
+# Emit router metrics
+
+Expose Prometheus metrics for request count, latency, and per-model/backend routing decisions. When metric names change, update dashboards. Grafana and Prometheus MCP are available for verifying queries.

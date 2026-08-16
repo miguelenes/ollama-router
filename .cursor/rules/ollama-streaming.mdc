@@ -1,0 +1,8 @@
+---
+description: Stream, don't buffer LLM responses
+alwaysApply: true
+---
+
+# Stream, don't buffer LLM responses
+
+Proxy Ollama responses as SSE/ndjson streams instead of reading full bodies into memory. Never call blocking I/O inside async handlers; use tokio async clients or spawn_blocking. Keep route handlers thin and put routing logic in dedicated modules.

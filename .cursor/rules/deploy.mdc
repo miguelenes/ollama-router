@@ -1,0 +1,10 @@
+---
+description: Compose package at deploy
+globs: deploy/**
+alwaysApply: false
+---
+
+# Compose package
+
+This directory is a Compose / infra package in the ollama-router monorepo.
+Follow `deploy/AGENTS.md` for package commands. Open the repo root in Cursor and OpenCode.

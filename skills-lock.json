@@ -13,6 +13,12 @@
       "skillPath": "skills/multi-stage-dockerfile/SKILL.md",
       "computedHash": "698bf93a84dae18fd7bd0b1d35c21427307fde78fbdf4624be9726f5f98189ca"
     },
+    "ollama": {
+      "source": "balloob/llm-skills",
+      "sourceType": "github",
+      "skillPath": "ollama/SKILL.md",
+      "computedHash": "3ef043aed7d3a38e44a8b66718b29c1fd2e4cbe922a6f9c759262ebc99289502"
+    },
     "prometheus-configuration": {
       "source": "wshobson/agents",
       "sourceType": "github",

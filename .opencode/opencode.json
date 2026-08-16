@@ -90,6 +90,14 @@
         },
         "clangd": {
             "disabled": true
+        },
+        "gopls": {
+            "command": [
+                "gopls"
+            ],
+            "extensions": [
+                ".go"
+            ]
         }
     },
     "instructions": [
@@ -99,7 +107,11 @@
         "packages/*/AGENTS.md",
         "projects/*/AGENTS.md",
         "services/*/AGENTS.md",
-        "web/AGENTS.md"
+        "web/AGENTS.md",
+        "console/AGENTS.md",
+        "console/*/AGENTS.md",
+        "nas-agent/AGENTS.md",
+        "stacks/*/AGENTS.md"
     ],
     "mcp": {
         "docsrs": {
@@ -131,5 +143,19 @@
             },
             "enabled": true
         }
+    },
+    "watcher": {
+        "ignore": [
+            ".git/**",
+            ".opencode/rag_db/**",
+            ".opencode/node_modules/**",
+            "node_modules/**",
+            "vendor/**"
+        ]
+    },
+    "compaction": {
+        "auto": true,
+        "prune": true,
+        "reserved": 10000
     }
 }
