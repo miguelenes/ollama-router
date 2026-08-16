@@ -26,4 +26,4 @@
 ## 4. Docs and gate
 
 - [x] 4.1 Product wiki (`ollama-router-product.md`, `ollama-router-load-share.md`) + `ollama-compat-proxy` + `routing-wlc` skills (`.cursor` and `.opencode`) + `openspec/config.yaml` context: `ps`/`show`/`pull`/`version` match the honest fleet; pull streams placement NDJSON (not a one-node Hub-pull); bootstrap is opt-in; GPU util, disk, and warm skips are known-only. Drop stale A-feature non-goals for fleet-union `/api/ps` and GPU-util-in-the-sort-key
-- [ ] 4.2 Run `task check`
+- [x] 4.2 Run `task check`
