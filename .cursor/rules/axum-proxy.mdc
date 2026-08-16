@@ -12,7 +12,8 @@ alwaysApply: false
   Once a stream has begun, never retry.
 - Rewrite `/api/embeddings` → `/api/embed` (Ollama ≤0.32 compat, not debt).
   Do **not** rewrite `/v1/embeddings`.
-- `GET /api/tags` is the **aggregated union** across healthy nodes.
+- `GET /api/tags` is a **CLI-compatible union** across healthy nodes (digest
+  ≥12 chars; placeholder SHA-256 of the name when the probe omitted digest).
   `GET /v1/models` and `GET /v1/models/{id}` use the same union.
 - Capacity / saturation / no-healthy → **503** + `Retry-After`. Body shape
   follows the request path (Ollama string on `/api/*`, OpenAI envelope on `/v1/*`).

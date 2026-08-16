@@ -46,7 +46,7 @@ base64 = "0.22"
 secrecy = "0.10"
 sha2 = "0.10"
 sysinfo = "0.35"
-time = { version = "0.3", default-features = false, features = ["formatting", "std"] }
+time = { version = "0.3", default-features = false, features = ["formatting", "parsing", "std"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

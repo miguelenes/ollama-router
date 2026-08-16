@@ -17,8 +17,8 @@ Code lives under `crates/ollama-router/src/proxy/` and `.../http/`.
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Passthrough to Ollama's OpenAI shim on the ranked node. Same `inflight_inc` / reservation / class ranking as native chat/embed. Do **not** rewrite `/v1/embeddings` to `/api/embed`. |
-| `GET /api/tags` | Aggregated **union** of healthy nodes' tags. Not a single-node passthrough. |
-| `GET /v1/models` | Same union in OpenAI list format (`id` / `object` / `created: 0` / `owned_by: library`). |
+| `GET /api/tags` | CLI-compatible **union** of healthy nodes (not names-only). Each row has `name`, `model`, `digest` (≥12 chars; SHA-256 hex of the normalized name when the probe omitted digest), plus probe `size` / `modified_at` / native `details` / `capabilities`. `details.router_nodes` lists holders. Not a passthrough. Not idle. |
+| `GET /v1/models` | Same union in OpenAI list format (`id` / `object` / `created` from `modified_at` Unix seconds else `0` / `owned_by: library`). |
 | `GET /v1/models/{id}` | Retrieve from that union (404 OpenAI-shaped if absent). Not a client forward. |
 | `POST /api/show` | Metadata passthrough (`model` or `name`). Forced Generic class. Not idle. |
 | `GET /api/ps`, `/api/version` | Diagnostic single-node passthrough. Not idle. |
@@ -64,5 +64,5 @@ Persist jobs in SQLite (see durable-model-operations wiki). Recover via live
 ## Never
 
 - Log prompts, bodies, embeddings, or tokens.
-- Count health / `/api/ps` / admin / warm-keeper as client activity.
+- Count health / `/api/tags` / `/v1/models` / `/api/ps` / admin / warm-keeper as client activity.
 - Add Thunder or RunPod routes.

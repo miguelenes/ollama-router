@@ -14,6 +14,7 @@ use crate::capacity::{
 };
 use crate::config::{Capacity, HealthConfig, NodeConfig, PolicyConfig, RouterConfig};
 use crate::fleet::ids::NodeId;
+use crate::fleet::tags::{merge_catalog, AggregatedTag, CatalogNode, TagRecord};
 
 /// Where a live registry row came from. Reload never drops `Verda` rows.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -342,6 +343,7 @@ struct Cold {
     healthy: bool,
     success_streak: u32,
     models: Arc<HashSet<String>>,
+    tag_records: Arc<HashMap<String, TagRecord>>,
     loaded_models: Arc<HashSet<String>>,
     loaded_vram_gb: Option<f64>,
     ram_available_gb: Option<f64>,
@@ -409,6 +411,7 @@ impl Node {
                 healthy: false,
                 success_streak: 0,
                 models: Arc::new(HashSet::new()),
+                tag_records: Arc::new(HashMap::new()),
                 loaded_models: Arc::new(HashSet::new()),
                 loaded_vram_gb: None,
                 ram_available_gb: None,
@@ -828,16 +831,47 @@ impl Registry {
     }
 
     /// Replace the on-disk model set reported by `/api/tags`.
+    ///
+    /// Drops tag records for names no longer present. Name-only updates keep
+    /// existing records for surviving names.
     pub fn update_models(&self, id: &NodeId, models: impl IntoIterator<Item = impl AsRef<str>>) {
         let Some(node) = self.node(id) else {
             return;
         };
-        node.cold_write().models = Arc::new(
-            models
-                .into_iter()
-                .map(|m| normalize_model(m.as_ref()))
-                .collect(),
-        );
+        let names: HashSet<String> = models
+            .into_iter()
+            .map(|m| normalize_model(m.as_ref()))
+            .filter(|m| !m.is_empty())
+            .collect();
+        let mut cold = node.cold_write();
+        let mut records = (*cold.tag_records).clone();
+        records.retain(|name, _| names.contains(name));
+        cold.models = Arc::new(names);
+        cold.tag_records = Arc::new(records);
+    }
+
+    /// Replace names and list records from a tags probe.
+    pub fn update_models_from_records(
+        &self,
+        id: &NodeId,
+        records: impl IntoIterator<Item = (impl AsRef<str>, TagRecord)>,
+    ) {
+        let Some(node) = self.node(id) else {
+            return;
+        };
+        let mut names = HashSet::new();
+        let mut map = HashMap::new();
+        for (name, record) in records {
+            let name = normalize_model(name.as_ref());
+            if name.is_empty() {
+                continue;
+            }
+            names.insert(name.clone());
+            map.insert(name, record);
+        }
+        let mut cold = node.cold_write();
+        cold.models = Arc::new(names);
+        cold.tag_records = Arc::new(map);
     }
 
     /// Record live `/api/ps` state (tests inject warmth).
@@ -1271,28 +1305,27 @@ impl Registry {
     }
 
     /// Healthy nodes' on-disk models, grouped for `/api/tags`.
-    pub fn aggregated_tags(&self) -> Vec<(String, Vec<String>)> {
-        let mut by_model: HashMap<String, Vec<String>> = HashMap::new();
-        for node in self.snapshot() {
-            if !node.healthy || node.draining {
+    pub fn aggregated_tags(&self) -> Vec<AggregatedTag> {
+        let inner = self.read();
+        let mut owned: Vec<(NodeId, HashSet<String>, HashMap<String, TagRecord>)> = Vec::new();
+        for node in inner.nodes.values() {
+            let draining = node.draining.load(Ordering::Acquire);
+            let cold = node.cold_read();
+            if !cold.healthy || draining {
                 continue;
             }
-            for model in node.models.iter() {
-                by_model
-                    .entry(model.clone())
-                    .or_default()
-                    .push(node.id.as_str().to_string());
-            }
+            owned.push((
+                node.id.clone(),
+                (*cold.models).clone(),
+                (*cold.tag_records).clone(),
+            ));
         }
-        let mut models: Vec<(String, Vec<String>)> = by_model
-            .into_iter()
-            .map(|(model, mut nodes)| {
-                nodes.sort();
-                (model, nodes)
-            })
-            .collect();
-        models.sort_by(|a, b| a.0.cmp(&b.0));
-        models
+        drop(inner);
+        merge_catalog(owned.iter().map(|(id, models, records)| CatalogNode {
+            id,
+            models,
+            records,
+        }))
     }
 }
 
@@ -1401,6 +1434,77 @@ mod tests {
         assert_eq!(suggested_max_inflight(12.0), 3);
         assert_eq!(suggested_max_inflight(24.0), 4);
         assert_eq!(suggested_max_inflight(48.0), 8);
+    }
+
+    fn two_node_registry() -> Registry {
+        let config = RouterConfig {
+            nodes: vec![node("a", 8.0, 1), node("b", 24.0, 1)],
+            ..Default::default()
+        };
+        Registry::new(&config)
+    }
+
+    #[test]
+    fn aggregated_tags_omits_unhealthy_nodes() {
+        let registry = two_node_registry();
+        registry.set_healthy(&nid("a"));
+        registry.update_models(&nid("a"), ["llama3.2:1b"]);
+        registry.update_models(&nid("b"), ["llama3.2:1b"]);
+        let rows = registry.aggregated_tags();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].nodes, vec!["a".to_string()]);
+        assert!(rows[0].digest.len() >= 12);
+    }
+
+    #[test]
+    fn update_models_from_records_replaces_catalog_and_prunes() {
+        let registry = two_node_registry();
+        let a = nid("a");
+        registry.set_healthy(&a);
+        registry.update_models_from_records(
+            &a,
+            [
+                (
+                    "llama3.2:1b",
+                    TagRecord {
+                        digest: "aaaaaaaaaaaa".into(),
+                        size: Some(10),
+                        modified_at: Some("2026-01-01T00:00:00Z".into()),
+                        details: None,
+                        capabilities: None,
+                    },
+                ),
+                (
+                    "qwen3:4b",
+                    TagRecord {
+                        digest: "bbbbbbbbbbbb".into(),
+                        size: Some(20),
+                        modified_at: None,
+                        details: None,
+                        capabilities: None,
+                    },
+                ),
+            ],
+        );
+        registry.update_models(&a, ["llama3.2:1b"]);
+        let rows = registry.aggregated_tags();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "llama3.2:1b");
+        assert_eq!(rows[0].digest, "aaaaaaaaaaaa");
+        assert_eq!(rows[0].size, Some(10));
+    }
+
+    #[test]
+    fn aggregated_tags_name_only_uses_placeholder_digest() {
+        let registry = two_node_registry();
+        registry.set_healthy(&nid("a"));
+        registry.update_models(&nid("a"), ["llama3.2:1b"]);
+        let digest = registry.aggregated_tags()[0].digest.clone();
+        assert_eq!(digest.len(), 64);
+        assert_eq!(
+            digest,
+            crate::fleet::tags::placeholder_digest("llama3.2:1b")
+        );
     }
 
     #[test]

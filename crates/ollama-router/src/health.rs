@@ -6,7 +6,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ollama_router_core::capacity::{bytes_to_gib, capacity_target, CapacityClient};
 use ollama_router_core::config::HealthConfig;
-use ollama_router_core::fleet::{routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel};
+use ollama_router_core::fleet::{
+    routing_url_blocked_reason, NodeId, NodeSnapshot, PressureLevel, TagRecord,
+};
 use ollama_router_core::http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 use serde::Deserialize;
 use tokio::sync::Semaphore;
@@ -224,9 +226,9 @@ async fn probe_cycle_inner(
     let request = state.client.get(&tags_url).timeout(probe_timeout).send();
     match request.await {
         Ok(resp) if resp.status().is_success() => {
-            match parse_tag_names(resp, health.max_probe_body_bytes).await {
-                Ok(names) => {
-                    state.registry.update_models(&node.id, names);
+            match parse_tags(resp, health.max_probe_body_bytes).await {
+                Ok(records) => {
+                    state.registry.update_models_from_records(&node.id, records);
                     state.registry.note_probe_success(&node.id);
                     if health.ps_probe_enabled {
                         probe_ps(state, health, node).await;
@@ -364,18 +366,33 @@ fn schedule_next(state: &AppState, health: &HealthConfig, id: &NodeId, rng: &mut
         .set_next_probe_at(id, Instant::now() + Duration::from_secs_f64(delay));
 }
 
-async fn parse_tag_names(
+async fn parse_tags(
     resp: reqwest::Response,
     max_bytes: u64,
-) -> Result<Vec<String>, ProbeBodyError> {
+) -> Result<Vec<(String, TagRecord)>, ProbeBodyError> {
     let bytes = read_reqwest_capped(resp, max_bytes).await?;
     let body = serde_json::from_slice::<TagsResponse>(&bytes).map_err(|_| ProbeBodyError::Parse)?;
     Ok(body
         .models
         .into_iter()
         .flatten()
-        .filter_map(|m| m.name)
-        .filter(|n| !n.trim().is_empty())
+        .filter_map(|m| {
+            let name = m
+                .name
+                .or(m.model)
+                .map(|n| n.trim().to_string())
+                .filter(|n| !n.is_empty())?;
+            Some((
+                name,
+                TagRecord {
+                    digest: m.digest.unwrap_or_default(),
+                    size: m.size,
+                    modified_at: m.modified_at.filter(|s| !s.trim().is_empty()),
+                    details: m.details,
+                    capabilities: m.capabilities,
+                },
+            ))
+        })
         .collect())
 }
 
@@ -388,6 +405,18 @@ struct TagsResponse {
 #[derive(Deserialize)]
 struct TagModel {
     name: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    digest: Option<String>,
+    #[serde(default)]
+    size: Option<u64>,
+    #[serde(default)]
+    modified_at: Option<String>,
+    #[serde(default)]
+    details: Option<serde_json::Value>,
+    #[serde(default)]
+    capabilities: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -452,4 +481,24 @@ pub async fn reload_permanent_inventory(state: &AppState) -> anyhow::Result<()> 
         "fleet inventory reloaded"
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tags_json_keeps_cli_fields_and_ignores_unknown() {
+        let body: TagsResponse = serde_json::from_str(
+            r#"{"models":[{"name":"llama3.2:1b","digest":"aaaaaaaaaaaa","size":1,"modified_at":"2026-08-01T00:00:00Z","details":{"family":"llama"},"capabilities":["completion"],"parameter_size":"1B"}]}"#,
+        )
+        .expect("tags json");
+        let model = &body.models.expect("models")[0];
+        assert_eq!(model.name.as_deref(), Some("llama3.2:1b"));
+        assert_eq!(model.digest.as_deref(), Some("aaaaaaaaaaaa"));
+        assert_eq!(model.size, Some(1));
+        assert_eq!(model.modified_at.as_deref(), Some("2026-08-01T00:00:00Z"));
+        assert_eq!(model.details.as_ref().unwrap()["family"], "llama");
+        assert_eq!(model.capabilities, Some(vec!["completion".into()]));
+    }
 }

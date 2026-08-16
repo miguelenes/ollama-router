@@ -24,10 +24,10 @@ pub use config::{
 };
 pub use fleet::{
     load_fleet_nodes, parse_fleet_yaml, routing_url_blocked_reason, share_id_looks_public,
-    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, EnrollPersist,
-    FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId, NodeOrigin, NodeSnapshot,
-    PressureLevel, Registry, RouterId, VerdaInstanceId, VerdaNodePersist, DEFAULT_FLEET_PATH,
-    DEFAULT_STATE_PATH,
+    url_host_is_public_ip, url_host_is_public_ipv4, url_host_is_public_share, AggregatedTag,
+    EnrollPersist, FleetState, FleetStateError, GpuSnapshot, InflightAdmit, NodeId, NodeOrigin,
+    NodeSnapshot, PressureLevel, Registry, RouterId, TagRecord, VerdaInstanceId, VerdaNodePersist,
+    DEFAULT_FLEET_PATH, DEFAULT_STATE_PATH,
 };
 pub use http_util::{read_reqwest_capped, reqwest_error_for_log, ProbeBodyError};
 pub use jobs::{

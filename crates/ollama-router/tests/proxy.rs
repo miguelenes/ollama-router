@@ -15,7 +15,7 @@ use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{
     Capacity, NodeConfig, PolicyConfig, RouterConfig, TimeoutsConfig, UpstreamPoolConfig,
 };
-use ollama_router_core::fleet::NodeId;
+use ollama_router_core::fleet::{NodeId, TagRecord};
 use ollama_router_core::routing::RoutingError;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -57,6 +57,14 @@ fn mark_ready(state: &AppState, id: &str, models: &[&str]) {
     let id = nid(id);
     state.registry.set_healthy(&id);
     state.registry.update_models(&id, models.iter().copied());
+}
+
+fn mark_ready_with_record(state: &AppState, id: &str, name: &str, record: TagRecord) {
+    let id = nid(id);
+    state.registry.set_healthy(&id);
+    state
+        .registry
+        .update_models_from_records(&id, [(name, record)]);
 }
 
 async fn send(state: AppState, req: Request<Body>) -> (StatusCode, HeaderMap, Bytes) {
@@ -419,6 +427,199 @@ async fn aggregated_tags_union() {
     assert!(names.contains(&"qwen3-embedding:8b"));
     assert!(names.contains(&"qwen3-embedding:0.6b"));
     assert!(names.contains(&"llama3.2:3b"));
+    for model in parsed["models"].as_array().unwrap() {
+        let digest = model["digest"].as_str().unwrap();
+        assert!(digest.len() >= 12, "{digest}");
+        assert!(model["details"]["router_nodes"].is_array());
+    }
+}
+
+#[tokio::test]
+async fn aggregated_tags_includes_probe_cli_fields() {
+    let state = state_from(fleet_config(vec![node(
+        "local",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready_with_record(
+        &state,
+        "local",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "55fc3abd386771e5b5d1bbcc732f3c3f4df6e9f9f08f1131f9cc27ba2d1eec5b".into(),
+            size: Some(1321098329),
+            modified_at: Some("2026-08-01T00:00:00Z".into()),
+            details: Some(json!({"family": "llama"})),
+            capabilities: Some(vec!["completion".into()]),
+        },
+    );
+    let (status, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/api/tags")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let model = &parsed["models"][0];
+    assert_eq!(model["name"], "llama3.2:1b");
+    assert_eq!(
+        model["digest"],
+        "55fc3abd386771e5b5d1bbcc732f3c3f4df6e9f9f08f1131f9cc27ba2d1eec5b"
+    );
+    assert_eq!(model["size"], 1321098329);
+    assert_eq!(model["modified_at"], "2026-08-01T00:00:00Z");
+    assert_eq!(model["details"]["family"], "llama");
+    assert_eq!(model["details"]["router_nodes"], json!(["local"]));
+    assert_eq!(model["capabilities"], json!(["completion"]));
+    assert!(state
+        .registry
+        .last_client_request_at(&nid("local"))
+        .is_none());
+    assert_eq!(state.registry.inflight(&nid("local")), 0);
+}
+
+#[tokio::test]
+async fn aggregated_tags_digest_conflict_keeps_newest() {
+    let state = state_from(fleet_config(vec![
+        node("a", "http://127.0.0.1:9", 8.0, 1, None),
+        node("b", "http://127.0.0.1:10", 24.0, 1, None),
+    ]));
+    mark_ready_with_record(
+        &state,
+        "a",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "aaaaaaaaaaaa".into(),
+            size: Some(1),
+            modified_at: Some("2026-01-01T00:00:00Z".into()),
+            details: None,
+            capabilities: None,
+        },
+    );
+    mark_ready_with_record(
+        &state,
+        "b",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "bbbbbbbbbbbb".into(),
+            size: Some(2),
+            modified_at: Some("2026-08-01T00:00:00Z".into()),
+            details: None,
+            capabilities: None,
+        },
+    );
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/api/tags")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let models = parsed["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["digest"], "bbbbbbbbbbbb");
+    assert_eq!(models[0]["details"]["router_nodes"], json!(["a", "b"]));
+}
+
+#[tokio::test]
+async fn aggregated_tags_omits_unhealthy_holders() {
+    let state = state_from(fleet_config(vec![
+        node("a", "http://127.0.0.1:9", 8.0, 1, None),
+        node("b", "http://127.0.0.1:10", 24.0, 1, None),
+    ]));
+    mark_ready_with_record(
+        &state,
+        "a",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "aaaaaaaaaaaa".into(),
+            size: Some(1),
+            modified_at: Some("2026-01-01T00:00:00Z".into()),
+            details: None,
+            capabilities: None,
+        },
+    );
+    mark_ready_with_record(
+        &state,
+        "b",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "bbbbbbbbbbbb".into(),
+            size: Some(2),
+            modified_at: Some("2026-08-01T00:00:00Z".into()),
+            details: None,
+            capabilities: None,
+        },
+    );
+    state.registry.set_unhealthy(&nid("b"));
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/api/tags")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let models = parsed["models"].as_array().unwrap();
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0]["digest"], "aaaaaaaaaaaa");
+    assert_eq!(models[0]["details"]["router_nodes"], json!(["a"]));
+}
+
+#[tokio::test]
+async fn openai_models_created_from_modified_at() {
+    let state = state_from(fleet_config(vec![node(
+        "local",
+        "http://127.0.0.1:9",
+        8.0,
+        1,
+        None,
+    )]));
+    mark_ready_with_record(
+        &state,
+        "local",
+        "llama3.2:1b",
+        TagRecord {
+            digest: "aaaaaaaaaaaa".into(),
+            size: Some(1),
+            modified_at: Some("2026-08-01T00:00:00Z".into()),
+            details: None,
+            capabilities: None,
+        },
+    );
+    let (status, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/v1/models")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    let created = parsed["data"][0]["created"].as_i64().unwrap();
+    assert!(created > 0, "{created}");
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/v1/models/llama3.2:1b")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["created"], created);
 }
 
 #[tokio::test]

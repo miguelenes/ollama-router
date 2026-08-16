@@ -7,7 +7,7 @@ sourceRefs:
   - crates/ollama-router/src/proxy
   - crates/ollama-router-verda
   - crates/ollama-router-core/src/jobs
-lastReviewed: 2026-08-14
+lastReviewed: 2026-08-16
 ---
 
 # ollama-router product surface
@@ -77,10 +77,19 @@ land). There is no single-node mutate passthrough.
 
 `/api/embeddings` → `/api/embed` is Ollama ≤0.32 protocol compatibility, not debt.
 
+`GET /api/tags` is a **CLI-compatible union** of healthy, non-draining nodes
+(not names-only). Each row includes `name`, `model`, and a `digest` of at least
+12 characters so `ollama list` can slice it. The digest is the probe value when
+present; otherwise a stable SHA-256 hex of the normalized name. Probe `size`,
+`modified_at`, native `details`, and `capabilities` are forwarded when known.
+`details.router_nodes` lists every healthy holder. Listing is not inflight or
+idle activity.
+
 OpenAI `POST /v1/chat/completions`, `/v1/completions`, and `/v1/embeddings` are
 passthrough to the ranked node's Ollama shim (same idle / reservation / class
-ranking as native inference). `GET /v1/models/{id}` is served from the
-aggregated tags union. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
+ranking as native inference). `GET /v1/models` and `GET /v1/models/{id}` use the
+same union; `created` is Unix seconds from the winning `modified_at` when
+parseable, else `0`. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
 `/api/create`, and `/api/blobs*` are rejected (`not_a_fleet_operation`).
 
 Cloud instance tag `managed_by=ollama-router`. FleetState `managed_by=verda`

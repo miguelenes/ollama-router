@@ -23,7 +23,9 @@ use futures_util::Stream;
 use http_body_util::{BodyExt, Limited};
 use ollama_router_core::cloud::DemandScale;
 use ollama_router_core::config::{PolicyConfig, TimeoutsConfig};
-use ollama_router_core::fleet::{normalize_model, InflightAdmit, NodeId, NodeSnapshot, Registry};
+use ollama_router_core::fleet::{
+    normalize_model, AggregatedTag, InflightAdmit, NodeId, NodeSnapshot, Registry,
+};
 use ollama_router_core::http_util::reqwest_error_for_log;
 use ollama_router_core::jobs::{JobId, JobStatus, ModelOrchestrator, OrchestratorError};
 use ollama_router_core::routing::{
@@ -795,13 +797,7 @@ fn aggregated_tags(state: &AppState) -> Response {
         .registry
         .aggregated_tags()
         .into_iter()
-        .map(|(name, nodes)| {
-            json!({
-                "name": name,
-                "model": name,
-                "details": { "router_nodes": nodes },
-            })
-        })
+        .map(ollama_tag_json)
         .collect();
     let mut res = json_error(StatusCode::OK, json!({ "models": models }), None);
     if state.config.debug_headers {
@@ -814,19 +810,45 @@ fn aggregated_tags(state: &AppState) -> Response {
     res
 }
 
+fn ollama_tag_json(row: AggregatedTag) -> Value {
+    let mut details = match row.details {
+        Some(Value::Object(map)) => Value::Object(map),
+        _ => json!({}),
+    };
+    details["router_nodes"] = json!(row.nodes);
+    let mut obj = json!({
+        "name": row.name,
+        "model": row.name,
+        "digest": row.digest,
+        "details": details,
+    });
+    if let Some(size) = row.size {
+        obj["size"] = json!(size);
+    }
+    if let Some(modified_at) = row.modified_at {
+        obj["modified_at"] = json!(modified_at);
+    }
+    if let Some(capabilities) = row.capabilities {
+        obj["capabilities"] = json!(capabilities);
+    }
+    obj
+}
+
+fn openai_model_json(row: &AggregatedTag) -> Value {
+    json!({
+        "id": row.name,
+        "object": "model",
+        "created": row.created_unix(),
+        "owned_by": "library",
+    })
+}
+
 fn aggregated_openai_models(state: &AppState) -> Response {
     let data: Vec<Value> = state
         .registry
         .aggregated_tags()
-        .into_iter()
-        .map(|(name, _nodes)| {
-            json!({
-                "id": name,
-                "object": "model",
-                "created": 0,
-                "owned_by": "library",
-            })
-        })
+        .iter()
+        .map(openai_model_json)
         .collect();
     let mut res = json_error(
         StatusCode::OK,
@@ -1283,20 +1305,11 @@ pub(crate) fn openai_model_by_id(state: &AppState, id: &str) -> Response {
         .registry
         .aggregated_tags()
         .into_iter()
-        .find(|(name, _nodes)| name == &target);
+        .find(|row| row.name == target);
     match found {
-        Some((name, _nodes)) => {
+        Some(row) => {
             state.metrics.observe_discovery("openai_models");
-            json_error(
-                StatusCode::OK,
-                json!({
-                    "id": name,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "library",
-                }),
-                None,
-            )
+            json_error(StatusCode::OK, openai_model_json(&row), None)
         }
         None => router_error(
             "/v1/models",
