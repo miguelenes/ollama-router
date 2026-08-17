@@ -12,6 +12,8 @@ unblocks CI regardless of GitHub account billing state.
 - `compose.yaml` — `woodpeckerci/woodpecker-server:v3` (web UI + GitHub
   forge integration on loopback `:8000`, gRPC `:9000` on the Tailscale
   address) and a **CI** agent (`role=ci`, Docker socket on this host).
+  GitHub webhooks use Tailscale Funnel (`WOODPECKER_EXPERT_WEBHOOK_HOST`);
+  Compose does not publish `:8000` on the LAN.
 - `agent-nas.compose.yaml` — second agent on the swarm **manager**
   (`role=swarm-manager`, host network) so `docker stack deploy` can run.
   Pin `swarm-deploy.yml` to that label. Swarm overlay cannot reach the
@@ -19,12 +21,14 @@ unblocks CI regardless of GitHub account billing state.
 - `agent-nas.stack.yml` — overlay form; kept for a manager that has
   Tailscale in the host netns. Prefer the compose file.
 - `.env.example` — copy to `.env` and fill in (never commit).
+- `up.sh` — `task woodpecker:up` runs this: Compose up, Funnel on `:8000`,
+  recreate the server if the webhook host changed.
 
 ## Provisioning (first run)
 
 1. **GitHub OAuth App** (owner account): Settings → Developer settings →
    OAuth Apps → New OAuth App.
-   - Homepage URL: your `WOODPECKER_HOST` (e.g. `http://192.168.1.50:8000`)
+   - Homepage URL: your `WOODPECKER_HOST` (loopback, e.g. `http://127.0.0.1:8000`)
    - Authorization callback URL: `${WOODPECKER_HOST}/authorize`
    - Copy the Client ID and Client secret into `.env`
      (`WOODPECKER_GITHUB_CLIENT` / `WOODPECKER_GITHUB_SECRET`).
@@ -32,18 +36,24 @@ unblocks CI regardless of GitHub account billing state.
 2. **Agent secret**: `openssl rand -hex 32` → `WOODPECKER_AGENT_SECRET`
    (shared between server and agent; never commit).
 
-3. **Start**:
+3. **Start** (Compose + Tailscale Funnel on `:8000`):
    ```bash
-   cd deploy/woodpecker
-   cp .env.example .env      # fill in WOODPECKER_*
-   docker compose up -d
+   cp deploy/woodpecker/.env.example deploy/woodpecker/.env
+   # fill WOODPECKER_* ; pin WOODPECKER_EXPERT_WEBHOOK_HOST to the Funnel URL
+   task woodpecker:up
    ```
+   Funnel must be enabled on the tailnet once (`tailscale funnel` prints a
+   `login.tailscale.com/f/funnel` URL if it is not). `--bg` resumes after
+   reboot; `task woodpecker:up` re-applies it on deploy. Do not publish
+   `:8000` on the LAN and do not use a trycloudflare URL.
 
 4. **Activate the repository** (admin rights required): open
-   `http://127.0.0.1:8000/` (compose binds loopback only), log in via GitHub, add a new repository
-   and activate `miguelenes/ollama-router`. GitHub webhooks cannot reach loopback;
-   trigger `verify.yml` from the UI (`manual`) after activate until a public
-   `WOODPECKER_HOST` exists. Woodpecker still registers the forge webhook.
+   `http://127.0.0.1:8000/` (compose binds loopback only; OAuth stays here),
+   log in via GitHub, add a new repository and activate
+   `miguelenes/ollama-router`. GitHub posts webhooks to Funnel
+   (`WOODPECKER_EXPERT_WEBHOOK_HOST`, e.g. `https://desktop.bicorn-beta.ts.net`).
+   Recreate the server after changing that value (`task woodpecker:up` does
+   so when it differs from the running container).
 
 5. **Mark the repository as trusted** (Repo Settings → trusted). The agent
    pipelines mount `/var/run/docker.sock` and run `docker stack deploy`;

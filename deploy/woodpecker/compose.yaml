@@ -6,9 +6,10 @@
 # gRPC port (9000).
 #
 #   cp .env.example .env   # fill in WOODPECKER_* values (never commit)
-#   docker compose up -d
-#   # open http://<WOODPECKER_HOST>/ , log in via GitHub, activate the repo,
+#   task woodpecker:up     # compose + Tailscale Funnel on :8000
+#   # open http://127.0.0.1:8000/ , log in via GitHub, activate the repo,
 #   # mark the repository as "trusted" (socket mounts require it)
+#   # GitHub webhooks use Funnel (WOODPECKER_EXPERT_WEBHOOK_HOST), not LAN.
 #
 # See README.md for the full activation runbook.
 
@@ -19,6 +20,8 @@ services:
     ports:
       # Loopback only — GitHub OAuth redirect works from this host; do not
       # publish :8000 on the LAN/public interface (Docker-socket CI).
+      # Tailscale Funnel (`task woodpecker:up`) is the public webhook/UI
+      # path; it proxies 127.0.0.1:8000 without publishing the port.
       - "127.0.0.1:8000:8000"
       # gRPC for a remote agent on the swarm manager (NAS). Bind specific
       # host IPs only — not 0.0.0.0. Tailscale is not in the NAS host
@@ -36,7 +39,7 @@ services:
       WOODPECKER_DEFAULT_APPROVAL_MODE: forks
       WOODPECKER_HOST: ${WOODPECKER_HOST}
       # Public URL GitHub posts webhooks to (loopback WOODPECKER_HOST cannot
-      # be a GitHub hook target). Empty = same as WOODPECKER_HOST.
+      # be a GitHub hook target). Set to the Tailscale Funnel HTTPS URL.
       WOODPECKER_EXPERT_WEBHOOK_HOST: ${WOODPECKER_EXPERT_WEBHOOK_HOST:-}
       WOODPECKER_GITHUB: "true"
       WOODPECKER_GITHUB_CLIENT: ${WOODPECKER_GITHUB_CLIENT}

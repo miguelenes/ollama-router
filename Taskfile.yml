@@ -246,6 +246,21 @@ tasks:
             target/release/ollama-node-agent.exe "$VER" dist/agent
         sh: [bash, -euo, pipefail, -c]
 
+  woodpecker:up:
+    desc: Start Woodpecker compose and enable Tailscale Funnel on :8000
+    cmds:
+      - bash deploy/woodpecker/up.sh
+
+  woodpecker:down:
+    desc: Stop Woodpecker compose (keeps volumes; Funnel stays enabled)
+    cmds:
+      - docker compose -f deploy/woodpecker/compose.yaml --env-file deploy/woodpecker/.env down --remove-orphans
+
+  woodpecker:ps:
+    desc: Show Woodpecker compose status
+    cmds:
+      - docker compose -f deploy/woodpecker/compose.yaml --env-file deploy/woodpecker/.env ps
+
   zrok:fetch:
     desc: Download official zrok-instance compose into .local/zrok (no tokens; not vendored)
     cmds:
