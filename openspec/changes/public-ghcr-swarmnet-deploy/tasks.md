@@ -1,32 +1,38 @@
-## 1. GHCR package publish
+## 1. Woodpecker provisioning
 
-- [x] 1.1 Confirm `.github/workflows/docker.yml` still bakes and pushes target `router` to `ghcr.io/<owner>/<repo>` with edge/sha/semver/`latest` metadata; keep attestation gated on `!github.event.repository.private` (spec: Router image is published to GHCR; Provenance attestation when the repository is public)
-- [x] 1.2 Document in `deploy/swarm/README.md` (or a short `deploy/ghcr.md`) how consumers pull the public package vs the fleet local-registry image (no dual-push on the swarm path)
+- [x] 1.1 Add `deploy/woodpecker/` compose: `woodpeckerci/woodpecker-server:v3` + `woodpeckerci/woodpecker-agent:v3` (Docker socket mount, `WOODPECKER_AGENT_SECRET`), GitHub OAuth App env (`WOODPECKER_GITHUB_CLIENT`/`SECRET`, `WOODPECKER_HOST`, `WOODPECKER_OPEN`), persistent volumes, `.env.example`
+- [x] 1.2 Write `deploy/woodpecker/README.md`: create GitHub OAuth App, set `WOODPECKER_HOST`, generate agent secret, start the stack, activate the repo (admin rights), confirm the agent is online
+- [ ] 1.3 Create Woodpecker repository secrets: `REGISTRY_TOKEN` (GHCR fine-grained PAT, `read/write:packages`), `PAGES_TOKEN` (`contents:write` for `gh-pages`); leave gates `FLEET_REGISTRY_PUSH_ENABLED` / `SWARM_DEPLOY_ENABLED` unset (off)
 
-## 2. Self-hosted runner wiring
+## 2. Verify + image pipelines
 
-- [x] 2.1 Choose and document runner labels (`self-hosted`, `linux`, plus `ollama-router` and/or shared fleet label); add compose profile or runbook steps to register the runner on the host that can reach `:5005` (spec: Docker push and swarm deploy jobs use a self-hosted runner)
-- [x] 2.2 Add fleet-registry push job(s) with `runs-on` set to those labels and gate `FLEET_REGISTRY_PUSH_ENABLED` (default off) (spec: Runner enablement is gated)
+- [x] 2.1 Add `.woodpecker/verify.yml`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --locked`, `cargo deny check advisories bans`, `cargo llvm-cov --fail-under-lines 80` (ignore `**/main.rs`); runs on the fleet agent (spec: Fleet-local jobs run on a fleet-hosted Woodpecker agent; Verify runs on the fleet agent)
+- [x] 2.2 Add `.woodpecker/image.yml`: bake target `router`, run the container, probe `/healthz` on a non-conflicting published port (no port collision with a running router on the agent)
+- [ ] 2.3 Skip fork pull requests on the fleet agent so untrusted code never runs on the Docker-socket host (spec: Fork pull requests are not executed)
 
-## 3. Fleet local registry push (swarm path)
+## 3. Publish pipelines
 
-- [x] 3.1 Add workflow steps that bake `router` and push **only** to `vars.FLEET_REGISTRY` (default `127.0.0.1:5005`) with `latest` + git SHA tags; do not push that job’s image to `ghcr.io` (spec: Swarm deploy images come only from the fleet local registry)
-- [x] 3.2 Support optional `DEPLOY_REGISTRY` when pull hostname differs from push hostname; document nas loopback vs LAN IP (spec: Swarm deploy images come only from the fleet local registry)
+- [x] 3.1 Add `.woodpecker/publish-ghcr.yml`: push bake target `router` to `ghcr.io/<owner>/<repo>` (lowercase) with edge/sha/semver/`latest` metadata on default-branch push and `v*` tags; provenance attestation (`buildx --attest=type=provenance,mode=max`) when the repository is public (spec: Router image is published to GHCR; Provenance attestation when the repository is public)
+- [x] 3.2 Add `.woodpecker/fleet-push.yml`: guard on `FLEET_REGISTRY_PUSH_ENABLED == 'true'`; bake `router` and push **only** to `FLEET_REGISTRY` (default `127.0.0.1:5005`) with `latest` + git SHA tags; never `ghcr.io` (spec: Swarm deploy images come only from the fleet local registry; Runner enablement is gated)
+- [x] 3.3 Support optional `DEPLOY_REGISTRY` when the pull hostname differs from the push hostname; document nas loopback vs LAN IP (spec: Swarm deploy images come only from the fleet local registry)
 
-## 4. Swarm stack and deploy gate
+## 4. Swarm deploy
 
-- [x] 4.1 Add `deploy/swarm/` stack compose (one router replica, local-registry image ref, mounts for fleet.yaml + FleetState, secret/env placeholders only) and a CI check or documented grep that stack refs exclude `ghcr.io` (spec: Stack image refs are local-registry only; One router replica and no fleet.yaml writes from CI)
-- [x] 4.2 Add deploy job gated by `SWARM_DEPLOY_ENABLED` (in addition to push gate) that updates the stack via `docker stack deploy` or Portainer API—whichever the nas runner already supports—without writing `fleet.yaml` (spec: Deploy is separately gated from registry push)
-- [x] 4.3 Write bootstrap + rollback runbook (`deploy/swarm/README.md`): create secrets, place inventory, enable variables, roll back to previous SHA tag (spec: Deploy artifacts contain no live secrets)
+- [x] 4.1 `deploy/swarm/ollama-router.stack.yml` already committed: one router replica, `${DEPLOY_REGISTRY:-127.0.0.1:5005}/ollama-router` image ref, fleet.yaml read-only mount, secret/env placeholders only — reused unchanged (spec: Stack image refs are local-registry only; One router replica and no fleet.yaml writes from CI)
+- [x] 4.2 Move the no-`ghcr.io` stack-refs grep check into `.woodpecker/verify.yml` (stack image refs must exclude `ghcr.io`)
+- [x] 4.3 Add `.woodpecker/swarm-deploy.yml`: `depends_on` fleet-push; guard on **both** `FLEET_REGISTRY_PUSH_ENABLED` and `SWARM_DEPLOY_ENABLED`; `docker stack deploy` the new SHA tag; never writes `fleet.yaml` (spec: Deploy is separately gated from registry push)
+- [x] 4.4 Confirm `deploy/swarm/README.md` bootstrap + rollback (create secrets, place inventory, enable gates, roll back to previous SHA tag) matches Woodpecker secrets (spec: Deploy artifacts contain no live secrets)
 
-## 5. Public Pages and visibility
+## 5. Pages + visibility
 
-- [x] 5.1 Ensure README links the GitHub Pages URL (`/ollama-router/` base); verify `pages.yml` still builds and deploys on `main` (spec: README points at the live site; Pages Actions source is enabled)
-- [ ] 5.2 OWNER GATE: configure Pages source = Actions, confirm a green Pages deploy, then set repository visibility to **public**; confirm GHCR package visibility and that attestations run on the next publish (spec: Visibility flip is an owner gate; Public promotion includes live GitHub Pages)
+- [x] 5.1 Add `.woodpecker/pages.yml`: build the site (`npm ci`, `npm run lint:openapi`, secret scan over `src`/`public`/`openapi`, `npm run build:openapi`, `npm run build`), push `site/dist` to the `gh-pages` branch (spec: Pages branch is published; Site is published to GitHub Pages; Pages publish runs on the fleet agent)
+- [x] 5.2 README already links the public site URL (path base `/ollama-router/`) — committed (spec: README points at the live site)
+- [ ] 5.3 OWNER GATE: set Pages source = Deploy from a branch (`gh-pages`), confirm a green Pages deploy, confirm GHCR package visibility and that attestation runs on the next publish (spec: Pages source is an owner gate; Visibility flip is an owner gate; Public promotion includes live GitHub Pages)
 
-## 6. Validation
+## 6. Decommission GitHub Actions + validation
 
-- [ ] 6.1 With gates off, confirm default-branch CI verify still passes without a self-hosted runner
-- [ ] 6.2 With push gate on (deploy off), confirm local-registry image appears and stack is unchanged
-- [ ] 6.3 With both gates on, confirm stack updates to the new SHA and `/healthz` responds on the published route
-- [ ] 6.4 After public flip, confirm Pages URL serves the site and GHCR pull works anonymously (or per package visibility settings)
+- [ ] 6.1 Remove `.github/workflows/` (ci, docker, pages, deploy-swarm, codeql, dependency-review, release-agent) once the Woodpecker pipelines are green
+- [ ] 6.2 With gates unset, confirm default-branch verify still passes on the fleet agent (no GitHub-hosted runner)
+- [ ] 6.3 With push gate on (deploy off), confirm the local-registry image appears and the stack is unchanged
+- [ ] 6.4 With both gates on, confirm the stack updates to the new SHA and `/healthz` responds on the published route
+- [ ] 6.5 Confirm the Pages URL serves the site and GHCR pull works anonymously (or per package visibility settings)

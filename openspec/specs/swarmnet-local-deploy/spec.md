@@ -13,7 +13,7 @@ The swarmnet deploy path SHALL push the router image to the fleet local registry
 #### Scenario: Push-on-merge updates the local registry tag
 
 - **WHEN** fleet-registry push is enabled and a change lands on the default branch
-- **THEN** the self-hosted job pushes `router` to the configured fleet registry with `latest` and the git SHA tag
+- **THEN** the fleet CI agent pushes `router` to the configured fleet registry with `latest` and the git SHA tag
 
 #### Scenario: Stack image refs are local-registry only
 
