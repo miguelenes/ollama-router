@@ -30,8 +30,5 @@ steps:
       - REG="$${FLEET_REGISTRY:-127.0.0.1:5005}"
       - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - REF="$${REG}/ollama-router"
-      - IMAGES="$${REF}:latest,$${REF}:$${SHA}"
-      # Push only to the fleet local registry. This pipeline never logs in
-      # to or pushes ghcr.io; the swarm path is local-registry only (spec
-      # swarmnet-local-deploy).
-      - docker buildx bake router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      # bake --set "*.tags=a,b" is one invalid tag on docker:27; use build -t twice.
+      - docker buildx build --target router --push -t "$${REF}:latest" -t "$${REF}:$${SHA}" --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .
