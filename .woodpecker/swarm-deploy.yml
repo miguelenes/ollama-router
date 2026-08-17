@@ -37,12 +37,12 @@ steps:
     commands:
       - set -e
       # Quote: YAML treats `if [` as a flow sequence, not a shell command.
-      - 'if [ "${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ] || [ "${SWARM_DEPLOY_ENABLED:-}" != "true" ]; then echo "deploy gate off: skipping stack update"; exit 0; fi'
+      - 'if [ "$${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ] || [ "$${SWARM_DEPLOY_ENABLED:-}" != "true" ]; then echo "deploy gate off: skipping stack update"; exit 0; fi'
       # Runs on the Swarm manager (or a host with DOCKER_HOST pointing at it).
-      # The stack file interpolates ${DEPLOY_REGISTRY} / ${ROUTER_TAG} from
+      # The stack file interpolates $${DEPLOY_REGISTRY} / $${ROUTER_TAG} from
       # this step's environment.
-      - FLEET_REGISTRY="${FLEET_REGISTRY:-127.0.0.1:5005}"
-      - export DEPLOY_REGISTRY="${DEPLOY_REGISTRY:-$FLEET_REGISTRY}"
-      - export ROUTER_TAG="sha-$(echo "$CI_COMMIT_SHA" | cut -c1-7)"
+      - FLEET_REGISTRY="$${FLEET_REGISTRY:-127.0.0.1:5005}"
+      - export DEPLOY_REGISTRY="$${DEPLOY_REGISTRY:-$$FLEET_REGISTRY}"
+      - export ROUTER_TAG="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - docker stack deploy --prune --with-registry-auth -c deploy/swarm/ollama-router.stack.yml ollama-router
       - docker service ls --filter name=ollama-router_router

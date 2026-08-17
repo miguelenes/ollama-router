@@ -19,7 +19,7 @@ steps:
         from_secret: REGISTRY_TOKEN
     commands:
       - apk add --no-cache curl jq
-      - 'VIS=$(curl -fsS -H "Authorization: Bearer $REGISTRY_TOKEN" "https://api.github.com/repos/$CI_REPO" | jq -r .private)'
+      - 'VIS=$$(curl -fsS -H "Authorization: Bearer $$REGISTRY_TOKEN" "https://api.github.com/repos/$$CI_REPO" | jq -r .private)'
       - echo "REPO_PRIVATE=$VIS" > vis.env
 
   - name: publish
@@ -33,13 +33,13 @@ steps:
       - set -e
       # visibility from the previous step (shared workspace)
       - . ./vis.env
-      - docker login ghcr.io -u "$CI_REPO_OWNER" --password-stdin <<< "$REGISTRY_TOKEN"
-      - REF="ghcr.io/$(echo "$CI_REPO" | tr '[:upper:]' '[:lower:]')"
-      - SHA="sha-$(echo "$CI_COMMIT_SHA" | cut -c1-7)"
+      - docker login ghcr.io -u "$$CI_REPO_OWNER" --password-stdin <<< "$$REGISTRY_TOKEN"
+      - REF="ghcr.io/$$(echo "$$CI_REPO" | tr '[:upper:]' '[:lower:]')"
+      - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - TAGS="$SHA"
-      - 'if [ "$CI_COMMIT_EVENT" = "push" ] && [ "$CI_COMMIT_BRANCH" = "main" ]; then TAGS="edge,$TAGS"; fi'
-      - 'if [ -n "${CI_COMMIT_TAG:-}" ]; then ver="${CI_COMMIT_TAG#v}"; major="${ver%%.*}"; rest="${ver#*.}"; minor="${rest%%.*}"; TAGS="$CI_COMMIT_TAG,$major,$major.$minor,latest,$TAGS"; fi'
-      - IMAGES=""; for t in $(echo "$TAGS" | tr ',' ' '); do IMAGES="$IMAGES,${REF}:${t}"; done; IMAGES="${IMAGES#,}"
+      - 'if [ "$$CI_COMMIT_EVENT" = "push" ] && [ "$$CI_COMMIT_BRANCH" = "main" ]; then TAGS="edge,$$TAGS"; fi'
+      - 'if [ -n "$${CI_COMMIT_TAG:-}" ]; then ver="$${CI_COMMIT_TAG#v}"; major="$${ver%%.*}"; rest="$${ver#*.}"; minor="$${rest%%.*}"; TAGS="$$CI_COMMIT_TAG,$$major,$$major.$$minor,latest,$$TAGS"; fi'
+      - IMAGES=""; for t in $$(echo "$$TAGS" | tr ',' ' '); do IMAGES="$$IMAGES,$${REF}:$$t"; done; IMAGES="$${IMAGES#,}"
       - ATTR=""
-      - 'if [ "${REPO_PRIVATE}" = "false" ]; then ATTR="--attest type=provenance,mode=max"; fi'
-      - docker buildx bake --target router --push $ATTR --set "*.tags=${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - 'if [ "$${REPO_PRIVATE}" = "false" ]; then ATTR="--attest type=provenance,mode=max"; fi'
+      - docker buildx bake --target router --push $$ATTR --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"

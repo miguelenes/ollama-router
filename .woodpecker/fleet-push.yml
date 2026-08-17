@@ -27,12 +27,12 @@ steps:
     commands:
       - set -e
       # Quote: YAML treats `if [` as a flow sequence, not a shell command.
-      - 'if [ "${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ]; then echo "gate off: skipping fleet registry push"; exit 0; fi'
-      - REG="${FLEET_REGISTRY:-127.0.0.1:5005}"
-      - SHA="sha-$(echo "$CI_COMMIT_SHA" | cut -c1-7)"
-      - REF="${REG}/ollama-router"
-      - IMAGES="${REF}:latest,${REF}:${SHA}"
+      - 'if [ "$${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ]; then echo "gate off: skipping fleet registry push"; exit 0; fi'
+      - REG="$${FLEET_REGISTRY:-127.0.0.1:5005}"
+      - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
+      - REF="$${REG}/ollama-router"
+      - IMAGES="$${REF}:latest,$${REF}:$${SHA}"
       # Push only to the fleet local registry. This pipeline never logs in
       # to or pushes ghcr.io; the swarm path is local-registry only (spec
       # swarmnet-local-deploy).
-      - docker buildx bake --target router --push --set "*.tags=${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - docker buildx bake --target router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"

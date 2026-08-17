@@ -27,13 +27,13 @@ steps:
         from_secret: PAGES_TOKEN
     commands:
       - set -e
-      # Quote: YAML treats `if [` as a flow sequence, not a shell command.
-      - 'if [ -z "${PAGES_TOKEN:-}" ]; then echo "PAGES_TOKEN secret not set: skipping Pages publish"; exit 0; fi'
+      # Woodpecker preprocesses ${VAR}; use $$ so the shell reads runtime secrets.
+      - 'if [ -z "$${PAGES_TOKEN:-}" ]; then echo "PAGES_TOKEN secret not set: skipping Pages publish"; exit 0; fi'
       - apk add --no-cache git
       - git checkout --orphan gh-pages
       - git rm -rf --quiet .
       - cp -r site/dist/* .
       - touch .nojekyll
       - git add -A
-      - git -c user.name="CI" -c user.email="ci@localhost" commit -m "Deploy site from ${CI_COMMIT_SHA}"
-      - git push --force "https://x-access-token:${PAGES_TOKEN}@github.com/${CI_REPO}" gh-pages
+      - git -c user.name="CI" -c user.email="ci@localhost" commit -m "Deploy site from $${CI_COMMIT_SHA}"
+      - git push --force "https://x-access-token:$${PAGES_TOKEN}@github.com/$${CI_REPO}" gh-pages

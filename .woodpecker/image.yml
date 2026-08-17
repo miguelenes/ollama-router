@@ -27,8 +27,8 @@ steps:
     commands:
       - docker run -d --name ollama-router-ci -p 127.0.0.1:0:11434 ollama-router:ci
       - trap "docker rm -f ollama-router-ci >/dev/null 2>&1 || true" EXIT
-      - PORT=$(docker port ollama-router-ci 11434 | head -n1 | sed "s/.*://")
-      - 'i=0; while [ "$i" -lt 30 ]; do if wget -qO- "http://127.0.0.1:${PORT}/healthz"; then exit 0; fi; i=$((i+1)); sleep 1; done'
+      - PORT=$$(docker port ollama-router-ci 11434 | head -n1 | sed "s/.*://")
+      - 'i=0; while [ "$$i" -lt 30 ]; do if wget -qO- "http://127.0.0.1:$${PORT}/healthz"; then exit 0; fi; i=$$((i+1)); sleep 1; done'
       - docker logs ollama-router-ci || true
       - echo "healthz did not become ready" >&2
       - exit 1
