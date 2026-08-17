@@ -34,6 +34,8 @@ steps:
       - git rm -rf --quiet .
       - cp -r site/dist/* .
       - touch .nojekyll
+      # Drop the site/ tree so `git add -A` cannot pick up node_modules from build.
+      - rm -rf site
       - git add -A
       - git -c user.name="CI" -c user.email="ci@localhost" commit -m "Deploy site from $${CI_COMMIT_SHA}"
       - git push --force "https://x-access-token:$${PAGES_TOKEN}@github.com/$${CI_REPO}" gh-pages
