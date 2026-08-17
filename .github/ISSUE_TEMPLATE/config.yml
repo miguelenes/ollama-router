@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
-  - name: Report a security vulnerability
-    url: https://github.com/miguelenes/ollama-router/security/advisories/new
-    about: Report security issues privately. Do not file a public GitHub issue.
+  - name: Documentation
+    url: https://miguelenes.github.io/ollama-router/
+    about: Read the docs site before opening an issue.
+  - name: Security advisories
+    url: https://github.com/miguelenes/ollama-router/security/advisories
+    about: Report vulnerabilities privately here — see SECURITY.md.

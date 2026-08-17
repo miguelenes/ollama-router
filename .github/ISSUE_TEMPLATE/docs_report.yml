@@ -1,0 +1,25 @@
+name: Docs report
+description: Report stale, missing, or wrong documentation (site, README, OpenAPI reference).
+labels: ["docs"]
+body:
+  - type: input
+    id: page
+    attributes:
+      label: Page or file
+      description: URL on the docs site or repo path.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is wrong
+      description: >
+        Quote the passage and state the shipped behavior it should describe
+        instead. Docs must match the honest-fleet contract.
+    validations:
+      required: true
+  - type: textarea
+    id: fix
+    attributes:
+      label: Suggested fix
+      description: Proposed wording, or a pointer to the source of truth.

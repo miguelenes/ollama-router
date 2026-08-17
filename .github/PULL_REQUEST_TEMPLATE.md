@@ -1,9 +1,21 @@
-## Summary
+<!--
+Read the docs before submitting: https://miguelenes.github.io/ollama-router/
+Never include prompts, embeddings, tokens, share tokens, SSH keys, or
+RUNPOD_API_KEY in this PR.
+-->
 
--
+## What
 
-## Checklist
+<!-- What does this PR change and why? -->
 
-- [ ] `task check` and `task coverage` (or CI) are green — line coverage ≥ 80%
-- [ ] No request/response bodies, prompts, embeddings, or secrets in logs, tests, or this PR
-- [ ] GitHub Actions stay pinned to version tags (`@v7`), not commit hashes
+## Honest-fleet check
+
+- [ ] Keeps list = union / infer = holders-only / pull = placement / miss = 503 `model_missing`
+- [ ] No Thunder, no public tunnels as healthy, no fleet.yaml writes from enroll
+- [ ] Streams are forwarded as they arrive; retries only pre-first-byte
+
+## Verification
+
+- [ ] `task check` green
+- [ ] `task coverage` ≥ 80% (Rust/test changes)
+- [ ] Docs updated when behavior changed (site + README where relevant)

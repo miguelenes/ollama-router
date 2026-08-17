@@ -163,7 +163,7 @@ tools are not in Cursor.
 
 - **Cursor:** do not call `search_semantic`, `get_file_skeleton`, `find_usages`,
   `describe_image`, or quirk tools (`add_quirk` / `recall_quirks` / `update_quirk`
-  / `delete_quirk`). Use Grep, Read, Glob, and IDE search. Memory is MemoryAI.
+  / `delete_quirk`). Use Grep, Read, Glob, and IDE search.
   Do not run `opencode-rag mcp` or put RAG in `.cursor/mcp.json`.
 - **OpenCode:** the plugin injects those tools at runtime. Follow
   `.opencode/skills/opencode-rag/SKILL.md`.

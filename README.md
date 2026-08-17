@@ -19,10 +19,12 @@
   <img src="https://img.shields.io/badge/axum-0.8-2dd4bf?style=flat-square" alt="Axum 0.8">
   <img src="https://img.shields.io/badge/tls-rustls-0f766e?style=flat-square" alt="rustls only">
   <img src="https://img.shields.io/badge/docker-HEALTHCHECK-2496ed?style=flat-square&logo=docker&logoColor=white" alt="Docker HEALTHCHECK">
-  <img src="https://img.shields.io/badge/license-proprietary-6b7280?style=flat-square" alt="proprietary license">
+  <img src="https://img.shields.io/badge/license-Apache--2.0-3da639?style=flat-square" alt="Apache-2.0 license">
 </p>
 
 <p align="center">
+  <a href="https://miguelenes.github.io/ollama-router/">Docs</a>
+  &nbsp;·&nbsp;
   <a href="#quick-start">Quick start</a>
   &nbsp;·&nbsp;
   <a href="#architecture">Architecture</a>
@@ -214,4 +216,4 @@ SQLite (`/var/lib/ollama-router/model-operations.sqlite3`) keeps operation id, k
 
 ## License
 
-Copyright © ollama-router authors. All rights reserved. This software is **proprietary**; see `license = "proprietary"` in [`Cargo.toml`](Cargo.toml).
+Apache License 2.0 — see [LICENSE](LICENSE).

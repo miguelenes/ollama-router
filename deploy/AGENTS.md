@@ -16,7 +16,7 @@ Docker Compose / Swarm orchestration. Nested apps (for example `console/` or `na
 ## Agent environment
 
 - Open **this folder** as the workspace in Cursor or OpenCode.
-- User-global Cursor (`~/.cursor/mcp.json`) and OpenCode MCP already provide MemoryAI, Context7, and GitHub.
+- User-global Cursor (`~/.cursor/mcp.json`) and OpenCode MCP already provide Context7 and GitHub.
 - Project `.cursor/mcp.json` / `opencode.json` `mcp` is stack-specific only.
 - Cursor rules: `.cursor/rules/*.mdc`
 - OpenCode: `opencode.json` loads `AGENTS.md` and Cursor rules

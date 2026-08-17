@@ -1,0 +1,40 @@
+name: Bug report
+description: Report a bug in the router, node agent, or docs.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste prompts, embeddings, tokens, share tokens, SSH keys, or
+        `RUNPOD_API_KEY`. Redact secrets before submitting.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Router version (`GET /api/version`) and how it was installed.
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: Observed behavior, including status codes and reason codes.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What did you expect
+      description: Expected behavior per the docs.
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction
+      description: Minimal steps; sanitized curl/commands are fine.
+  - type: textarea
+    id: fleet
+    attributes:
+      label: Fleet context
+      description: >
+        Node count, CPU/GPU mix, fleet.yaml shape (redacted). Do not paste
+        real URLs or tokens.

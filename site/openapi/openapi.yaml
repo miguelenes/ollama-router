@@ -1,0 +1,433 @@
+openapi: 3.1.0
+info:
+  title: ollama-router admin API
+  version: 0.1.0
+  license:
+    name: Apache-2.0
+    identifier: Apache-2.0
+  description: |
+    Admin surface under `/router/v1/*`. Every endpoint requires
+    `Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN`. There is **no default
+    secret**: when the token is unset, the whole admin API fails closed with
+    **403**.
+
+    Unauthenticated endpoints: `GET /healthz`, `GET /readyz`, `GET /metrics`.
+
+    Sensitivity: the router never logs request bodies, prompts, share tokens,
+    or the admin bearer. This document uses env-var placeholders only.
+
+tags:
+  - name: nodes
+    description: Live inventory, adoption, enrollment, and operator cordon.
+  - name: models
+    description: Desired tiers and placement-aware ensure/delete.
+  - name: jobs
+    description: In-memory model operations and cancellation.
+  - name: fleet
+    description: Stats, reload, and readiness diagnostics.
+  - name: cloud
+    description: Verda spot and RunPod pod managers.
+
+servers:
+  - url: /
+    description: Any router listen origin
+
+security:
+  - bearerAuth: []
+
+paths:
+  /router/v1/nodes:
+    get:
+      tags: [nodes]
+      summary: Live inventory
+      description: Live node inventory — no secrets, no share tokens.
+      operationId: listNodes
+      responses:
+        "200":
+          description: Inventory rows for fleet, FleetState, and cloud nodes.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    put:
+      tags: [nodes]
+      summary: Debug/adopt a node
+      description: >
+        Debug/adopt path: upsert a URL + labels into the live registry. Never
+        writes fleet.yaml.
+      operationId: putNode
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Node URL and labels to adopt.
+      responses:
+        "200":
+          description: Node adopted into the live registry.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/nodes/enroll:
+    post:
+      tags: [nodes]
+      summary: Enroll a tunneled node
+      description: >
+        Hydrates zrok private-share reachability for a node (origin=verda or
+        origin=runpod only update an existing matching managed_by row).
+        Enroll never writes fleet.yaml.
+      operationId: enrollNode
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: >
+                Enrollment payload: node id, origin, and the zrok private-share
+                token. The raw share is never logged or persisted in YAML.
+      responses:
+        "200":
+          description: Enrollment recorded in FleetState.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/nodes/{id}/drain:
+    post:
+      tags: [nodes]
+      summary: Cordon a node
+      description: Operator cordon — drains existing work and stops new routing.
+      operationId: drainNode
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: Node draining.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /router/v1/nodes/{id}/undrain:
+    post:
+      tags: [nodes]
+      summary: Uncordon a node
+      description: Reverse the operator cordon; the node is eligible again.
+      operationId: undrainNode
+      parameters:
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200":
+          description: Node undrained.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /router/v1/models:
+    get:
+      tags: [models]
+      summary: Desired tiers and presence matrix
+      description: Desired model tiers, presence matrix, and placement-eligible ids.
+      operationId: listModels
+      responses:
+        "200":
+          description: Model tiers and placement matrix.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/models/ensure:
+    post:
+      tags: [models]
+      summary: Placement-aware pull
+      description: >
+        Placement-aware model ensure. Default placement targets healthy
+        generate-class-eligible nodes; LARGE/MEDIUM skip known CPU and unknown
+        VRAM.
+      operationId: ensureModels
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Models to ensure plus optional placement hints.
+      responses:
+        "200":
+          description: Jobs enqueued.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/models/delete:
+    post:
+      tags: [models]
+      summary: Placement-aware delete
+      description: Delete models across the fleet via a placement job.
+      operationId: deleteModels
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: true
+              description: Models to delete plus optional placement hints.
+      responses:
+        "200":
+          description: Jobs enqueued.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/jobs:
+    get:
+      tags: [jobs]
+      summary: List model operations
+      description: In-memory model operations (pull/delete jobs).
+      operationId: listJobs
+      responses:
+        "200":
+          description: Job list.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/jobs/{id}:
+    get:
+      tags: [jobs]
+      summary: Get one job
+      description: One model operation by id.
+      operationId: getJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Job status and per-target progress.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /router/v1/jobs/{id}/cancel:
+    post:
+      tags: [jobs]
+      summary: Cancel a job
+      description: Cancel a running model operation.
+      operationId: cancelJob
+      parameters:
+        - $ref: "#/components/parameters/JobId"
+      responses:
+        "200":
+          description: Cancellation requested.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+  /router/v1/stats:
+    get:
+      tags: [fleet]
+      summary: Compact counters
+      description: Compact counters and gauges.
+      operationId: stats
+      responses:
+        "200":
+          description: Stats payload.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/reload:
+    post:
+      tags: [fleet]
+      summary: Reload fleet.yaml
+      description: Same as SIGHUP — reload the GitOps inventory.
+      operationId: reload
+      responses:
+        "200":
+          description: Reload triggered.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/readiness:
+    get:
+      tags: [fleet]
+      summary: Fleet readiness
+      description: >
+        Consolidated readiness: ready, action_required, or recovering, with
+        ranked blockers and next actions.
+      operationId: readiness
+      responses:
+        "200":
+          description: Readiness state.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/readiness/recheck:
+    post:
+      tags: [fleet]
+      summary: Re-run readiness diagnostics
+      description: >
+        Immediate diagnostic probe; does not count as client activity for the
+        idle timer.
+      operationId: readinessRecheck
+      responses:
+        "200":
+          description: Recheck triggered.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/verda/status:
+    get:
+      tags: [cloud]
+      summary: Verda manager status
+      description: Verda spot lifecycle state.
+      operationId: verdaStatus
+      responses:
+        "200":
+          description: Verda state.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/verda/ensure:
+    post:
+      tags: [cloud]
+      summary: Ensure Verda capacity
+      description: >
+        Adopt-first ensure. Demand scale coalesces create_additional only;
+        instances are tagged managed_by=ollama-router.
+      operationId: verdaEnsure
+      responses:
+        "200":
+          description: Ensure started.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/verda/destroy:
+    post:
+      tags: [cloud]
+      summary: Destroy Verda instances
+      description: >
+        Deletes Verda instances with delete_permanently — spot billing stops
+        only on delete. Fleet.yaml hosts are never destroyed.
+      operationId: verdaDestroy
+      responses:
+        "200":
+          description: Destroy started.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/runpod/status:
+    get:
+      tags: [cloud]
+      summary: RunPod manager status
+      description: RunPod interruptible pod lifecycle state.
+      operationId: runpodStatus
+      responses:
+        "200":
+          description: RunPod state.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/runpod/ensure:
+    post:
+      tags: [cloud]
+      summary: Ensure RunPod capacity
+      description: Best $/VRAM selection within the hourly cap.
+      operationId: runpodEnsure
+      responses:
+        "200":
+          description: Ensure started.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/runpod/destroy:
+    post:
+      tags: [cloud]
+      summary: Terminate RunPod pods
+      description: >
+        Terminates pods permanently (never stop-only). Fleet.yaml hosts are
+        never destroyed.
+      operationId: runpodDestroy
+      responses:
+        "200":
+          description: Terminate started.
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: >
+        `Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN`. Unset token → the
+        admin API is disabled (403); there is no default secret.
+  parameters:
+    NodeId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Node id.
+    JobId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+      description: Job id.
+  responses:
+    BadRequest:
+      description: Malformed request body or invalid parameters.
+    Unauthorized:
+      description: Missing or wrong bearer token.
+    Forbidden:
+      description: >
+        Admin API disabled — OLLAMA_ROUTER_ADMIN_TOKEN unset (fail-closed) or
+        the caller is not authorized.
+    NotFound:
+      description: Unknown node or job id.

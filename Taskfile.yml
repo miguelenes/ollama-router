@@ -79,6 +79,18 @@ tasks:
     cmds:
       - docker compose -f deploy/compose.yaml restart
 
+  site:dev:
+    desc: Docs site dev server (Astro Starlight on site/)
+    cmds:
+      - npm --prefix site run dev
+
+  site:build:
+    desc: Build the docs site (OpenAPI lint + render + static build)
+    cmds:
+      - npm --prefix site run lint:openapi
+      - npm --prefix site run build:openapi
+      - npm --prefix site run build
+
   compose:ps:
     desc: Show compose observability status
     cmds:

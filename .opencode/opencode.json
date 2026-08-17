@@ -144,6 +144,9 @@
             "enabled": true
         }
     },
+    "plugin": [
+        "./.opencode/plugins/skills-analytics.js"
+    ],
     "watcher": {
         "ignore": [
             ".git/**",

@@ -47,7 +47,9 @@
             ".opencode/node_modules",
             ".opencode/plugins",
             ".cursor/skills",
-            "deploy/observability/grafana/dashboards/stack"
+            "deploy/observability/grafana/dashboards/stack",
+            "site/node_modules",
+            "site/dist"
         ],
         "excludeFiles": [
             "Cargo.lock",

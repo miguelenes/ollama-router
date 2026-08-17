@@ -1,0 +1,22 @@
+/* ollama-router brand tokens — mark.svg palette: teal #2dd4bf / #0f766e,
+   amber #f59e0b, ink #1c2733, warm paper #f4f1ea */
+
+:root {
+  --sl-color-accent: #0f766e;
+  --sl-color-accent-high: #2dd4bf;
+  --sl-color-text-accent: #0f766e;
+}
+
+:root[data-theme='light'] {
+  --sl-color-bg-nav: #f4f1ea;
+  --sl-color-hairline-shade: #d4cdc2;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-bg-nav: #070b10;
+  --sl-color-hairline-shade: #1c2733;
+}
+
+.site-title {
+  font-weight: 600;
+}

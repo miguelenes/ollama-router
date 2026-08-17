@@ -27,20 +27,17 @@ Probe **after** a successful Ollama `/api/tags` health check.
 ## GiB
 
 `bytes as f64 / (1024.0 * 1024.0 * 1024.0)`. sysinfo returns **bytes**.
-Dividing by `1024²` inflates figures 1024× and breaks RAM thresholds.
 nvidia-smi memory columns are MiB (`/ 1024` → GiB).
 
 ## Soft-fail
 
 Agent unreachable → node stays healthy if `/api/tags` works; keep last
 discovered capacity; set `capacity_error`; degrade to static / `ps_lower_bound`.
-Never flip the node unhealthy solely because `:11436` is down.
 
 ## Merge
 
 Effective capacity fills omitted static fields from discovery. Explicit static
-VRAM/RAM **cap** discovered values. Trust the agent's `pressure_level` when
-present; until then keep `Unknown`. Do not reclassify in the router.
+VRAM/RAM **cap** discovered values.
 
 `apply_capacity_report` also persists `vram_free_known`, used VRAM, mean GPU
 util, `gpu_backend`, CPU%, loaded-model count, disk, and bounded per-GPU rows.
@@ -51,6 +48,13 @@ label by model name. Do not extend `node_info` labels — backend lives on
 
 Gate VRAM/util/RAM in PromQL on `*_known == 1`. A full GPU is free=0 with
 known=1. Prometheus must not scrape production `:11436`.
+
+## Gotcha
+
+- Dividing by `1024²` instead of `1024³` inflates GiB figures 1024× and
+  breaks RAM thresholds.
+- Never flip a node unhealthy solely because `:11436` is down.
+- Trust the agent's `pressure_level`; never reclassify it in the router.
 
 ## Tests
 

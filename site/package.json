@@ -1,0 +1,22 @@
+{
+  "name": "ollama-router-docs",
+  "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "astro dev",
+    "build": "npm run gen:og && astro build",
+    "preview": "astro preview",
+    "lint:openapi": "redocly lint openapi/openapi.yaml",
+    "build:openapi": "redocly build-docs openapi/openapi.yaml --output=public/openapi.html",
+    "gen:og": "node scripts/gen-og.mjs"
+  },
+  "dependencies": {
+    "@astrojs/starlight": "^0.41.7",
+    "astro": "^7.2.2",
+    "sharp": "^0.35.3"
+  },
+  "devDependencies": {
+    "@redocly/cli": "^2.46.1"
+  }
+}

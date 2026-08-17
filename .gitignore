@@ -35,3 +35,7 @@ id_rsa*
 
 # AI Code Review temporary files
 .ai-code-review/
+
+# Docs site build output (source: site/)
+site/dist/
+site/.astro/
