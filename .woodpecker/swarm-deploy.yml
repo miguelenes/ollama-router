@@ -1,0 +1,47 @@
+# Update the live ollama-router Swarm stack from the fleet local registry.
+# Replaces the swarm-deploy job of .github/workflows/deploy-swarm.yml.
+#
+# Deploy is separately gated from registry push: requires BOTH secrets
+# FLEET_REGISTRY_PUSH_ENABLED == "true" AND SWARM_DEPLOY_ENABLED == "true".
+# Otherwise the steps are skipped and the pipeline stays green.
+# DEPLOY_REGISTRY may differ from FLEET_REGISTRY when the push host is
+# loopback but swarm nodes must pull via the LAN IP (deploy/swarm/README.md).
+#
+# CI never writes fleet.yaml; the stack mounts inventory read-only and
+# treats secrets as host env / Swarm secrets.
+
+when:
+  event: push
+  branch: main
+
+depends_on:
+  - name: fleet-push
+    optional: true
+
+steps:
+  - name: swarm-deploy
+    image: docker:27
+    environment:
+      FLEET_REGISTRY_PUSH_ENABLED:
+        from_secret: FLEET_REGISTRY_PUSH_ENABLED
+      SWARM_DEPLOY_ENABLED:
+        from_secret: SWARM_DEPLOY_ENABLED
+      FLEET_REGISTRY:
+        from_secret: FLEET_REGISTRY
+      DEPLOY_REGISTRY:
+        from_secret: DEPLOY_REGISTRY
+    when:
+      evaluate: 'FLEET_REGISTRY_PUSH_ENABLED == "true" && SWARM_DEPLOY_ENABLED == "true"'
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    commands:
+      - set -e
+      - if [ "${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ] || [ "${SWARM_DEPLOY_ENABLED:-}" != "true" ]; then echo "deploy gate off: skipping stack update"; exit 0; fi
+      # Runs on the Swarm manager (or a host with DOCKER_HOST pointing at it).
+      # The stack file interpolates ${DEPLOY_REGISTRY} / ${ROUTER_TAG} from
+      # this step's environment.
+      - FLEET_REGISTRY="${FLEET_REGISTRY:-127.0.0.1:5005}"
+      - export DEPLOY_REGISTRY="${DEPLOY_REGISTRY:-$FLEET_REGISTRY}"
+      - export ROUTER_TAG="sha-$(echo "$CI_COMMIT_SHA" | cut -c1-7)"
+      - docker stack deploy --prune --with-registry-auth -c deploy/swarm/ollama-router.stack.yml ollama-router
+      - docker service ls --filter name=ollama-router_router

@@ -162,11 +162,13 @@ This workspace indexes via `opencode-rag.json` for the **OpenCode plugin**. Thos
 tools are not in Cursor.
 
 - **Cursor:** do not call `search_semantic`, `get_file_skeleton`, `find_usages`,
-  `describe_image`, or quirk tools (`add_quirk` / `recall_quirks` / `update_quirk`
-  / `delete_quirk`). Use Grep, Read, Glob, and IDE search.
-  Do not run `opencode-rag mcp` or put RAG in `.cursor/mcp.json`.
-- **OpenCode:** the plugin injects those tools at runtime. Follow
-  `.opencode/skills/opencode-rag/SKILL.md`.
+  or `describe_image`. Use Grep, Glob, Read, and IDE search. Memory is mem0
+  (`search_memories` / `add_memory`). Do not run `opencode-rag mcp` or put RAG
+  in `.cursor/mcp.json`.
+- **OpenCode:** the plugin injects RAG tools at runtime. Follow
+  `.opencode/skills/opencode-rag/SKILL.md`. Experiential memory via the RAG
+  plugin is disabled (`memory.enabled: false` in `opencode-rag.json`); use mem0
+  for persistence.
 
 `opencode-rag init` may restore a longer “ALWAYS use OpenCodeRAG tools” block
 here. Cursor’s `.cursor/rules/opencode-rag.mdc` is the durable override.

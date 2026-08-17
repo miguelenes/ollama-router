@@ -5,7 +5,8 @@
             "command": [
                 "/home/menes/.cargo/bin/docsrs-mcp"
             ],
-            "enabled": true
+            "enabled": true,
+            "timeout": 8000
         },
         "grafana": {
             "type": "local",
@@ -16,7 +17,8 @@
             "environment": {
                 "GRAFANA_URL": "http://127.0.0.1:3000"
             },
-            "enabled": true
+            "enabled": true,
+            "timeout": 8000
         },
         "prometheus": {
             "type": "local",
@@ -27,7 +29,8 @@
             "environment": {
                 "PROMETHEUS_URL": "http://127.0.0.1:9090"
             },
-            "enabled": true
+            "enabled": true,
+            "timeout": 8000
         }
     }
 }

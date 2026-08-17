@@ -1,0 +1,38 @@
+# Build the Starlight docs site and publish it to GitHub Pages via the
+# gh-pages branch. Replaces .github/workflows/pages.yml.
+#
+# Pages source must be set to "Deploy from a branch" (gh-pages) — Actions
+# source is impossible without GitHub Actions runs (owner gate, task 5.3).
+# Secret: PAGES_TOKEN (fine-grained PAT, contents:write on this repo).
+
+when:
+  event: [push, manual]
+  branch: main
+
+steps:
+  - name: build
+    image: node:20-bookworm-slim
+    directory: site
+    commands:
+      - npm ci
+      - npm run lint:openapi
+      - if grep -rInE '(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|RUNPOD_API_KEY=[^$ ]|zrok_[A-Za-z0-9]{20,}|verda_[A-Za-z0-9]{20,})' src public openapi; then echo "possible live secret found in site content" >&2; exit 1; fi
+      - npm run build:openapi
+      - npm run build
+
+  - name: publish
+    image: alpine:3.20
+    environment:
+      PAGES_TOKEN:
+        from_secret: PAGES_TOKEN
+    commands:
+      - set -e
+      - if [ -z "${PAGES_TOKEN:-}" ]; then echo "PAGES_TOKEN secret not set: skipping Pages publish"; exit 0; fi
+      - apk add --no-cache git
+      - git checkout --orphan gh-pages
+      - git rm -rf --quiet .
+      - cp -r site/dist/* .
+      - touch .nojekyll
+      - git add -A
+      - git -c user.name="CI" -c user.email="ci@localhost" commit -m "Deploy site from ${CI_COMMIT_SHA}"
+      - git push --force "https://x-access-token:${PAGES_TOKEN}@github.com/${CI_REPO}" gh-pages

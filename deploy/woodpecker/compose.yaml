@@ -1,0 +1,48 @@
+# Woodpecker CI — server + agent for the ollama-router fleet.
+#
+# The agent mounts the host Docker socket so pipelines can bake, push to the
+# fleet local registry, probe /healthz, and run `docker stack deploy`.
+# Host networking is NOT used; the agent reaches the server on the internal
+# gRPC port (9000).
+#
+#   cp .env.example .env   # fill in WOODPECKER_* values (never commit)
+#   docker compose up -d
+#   # open http://<WOODPECKER_HOST>/ , log in via GitHub, activate the repo,
+#   # mark the repository as "trusted" (socket mounts require it)
+#
+# See README.md for the full activation runbook.
+
+services:
+  woodpecker-server:
+    image: woodpeckerci/woodpecker-server:v3
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - woodpecker-server-data:/var/lib/woodpecker/
+    environment:
+      WOODPECKER_OPEN: "true"
+      WOODPECKER_HOST: ${WOODPECKER_HOST}
+      WOODPECKER_GITHUB: "true"
+      WOODPECKER_GITHUB_CLIENT: ${WOODPECKER_GITHUB_CLIENT}
+      WOODPECKER_GITHUB_SECRET: ${WOODPECKER_GITHUB_SECRET}
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_LOG_LEVEL: info
+
+  woodpecker-agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    command: agent
+    restart: unless-stopped
+    depends_on:
+      - woodpecker-server
+    volumes:
+      - woodpecker-agent-config:/etc/woodpecker
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WOODPECKER_SERVER: woodpecker-server:9000
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_MAX_WORKFLOWS: "2"
+
+volumes:
+  woodpecker-server-data:
+  woodpecker-agent-config:

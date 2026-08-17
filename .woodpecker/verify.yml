@@ -1,0 +1,30 @@
+# Rust verify + fleet-safety checks. Runs on the fleet Woodpecker agent
+# (Docker backend) for every default-branch push and pull request.
+# Mirrors the old .github/workflows/ci.yml jobs, adapted to Woodpecker:
+# one container runs the whole sequential gate (components and installed
+# tools live in that container), then the stack-refs grep runs separately.
+
+when:
+  event: [push, pull_request]
+
+steps:
+  - name: verify
+    image: rust:1.97-slim-bookworm
+    commands:
+      # llvm-tools is not in the default rustup profile; clippy/rustfmt are.
+      - rustup component add llvm-tools-preview
+      - cargo fmt --all -- --check
+      - cargo clippy --workspace --all-targets -- -D warnings
+      - cargo test --workspace --locked
+      - cargo install cargo-deny cargo-llvm-cov
+      - cargo deny check advisories bans
+      - cargo llvm-cov --workspace --locked --fail-under-lines 80 --summary-only --ignore-filename-regex "(^|/)main\.rs$"
+
+  # The swarmnet deploy path must pull only from the fleet local registry.
+  # Any ghcr.io *image ref* in deploy/swarm/ is a spec violation
+  # (swarmnet-local-deploy: "Stack image refs are local-registry only").
+  # Docs prose about the public package stays fine; only `image:` refs count.
+  - name: swarm-stack-refs
+    image: alpine:3.20
+    commands:
+      - if grep -rInE "^[[:space:]]*image:[[:space:]]*.*ghcr\.io" --include="*.yml" --include="*.yaml" deploy/swarm/; then echo "deploy/swarm image refs must use the fleet local registry only (no ghcr.io)" >&2; exit 1; fi

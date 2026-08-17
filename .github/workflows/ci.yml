@@ -85,25 +85,3 @@ jobs:
           echo "healthz did not become ready" >&2
           exit 1
 
-  swarm-stack-refs:
-    name: Swarm stack refs (no ghcr.io)
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-
-      # The swarmnet deploy path must pull only from the fleet local registry.
-      # Any ghcr.io *image ref* in deploy/swarm/ is a spec violation
-      # (swarmnet-local-deploy: "Stack image refs are local-registry only").
-      # Docs prose about the public package stays fine; only `image:` refs count.
-      - name: Stack image refs must exclude ghcr.io
-        run: |
-          set -euo pipefail
-          if grep -rInE '^[[:space:]]*image:[[:space:]]*.*ghcr\.io' \
-              --include='*.yml' --include='*.yaml' deploy/swarm/; then
-            echo "::error::deploy/swarm image refs must use the fleet local registry only (no ghcr.io)" >&2
-            exit 1
-          fi
-

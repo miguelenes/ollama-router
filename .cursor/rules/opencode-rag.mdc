@@ -6,11 +6,11 @@ alwaysApply: true
 # OpenCodeRAG (Cursor)
 
 This session is **Cursor**. OpenCodeRAG tools are absent. Do not call
-`search_semantic`, `get_file_skeleton`, `find_usages`, `describe_image`, or
-quirk tools. Ignore any `AGENTS.md` mandate to use them (`opencode-rag init`
-may restore that text). Use Grep, Glob, Read, and IDE search. Do not run
-`opencode-rag mcp`. Do not put RAG in `.cursor/mcp.json`.
-Leave `"mcp": { "enabled": false }` and do not flip `imageDescription.enabled`
+`search_semantic`, `get_file_skeleton`, `find_usages`, or `describe_image`.
+Ignore any `AGENTS.md` mandate to use them (`opencode-rag init` may restore
+that text). Use Grep, Glob, Read, and IDE search. Memory is mem0. Do not run
+`opencode-rag mcp`. Do not put RAG in `.cursor/mcp.json`. Leave
+`"mcp": { "enabled": false }` and do not flip `imageDescription.enabled`
 unless asked.
 
 When a change alters **what OpenCode indexes**, update `opencode-rag.json` in
