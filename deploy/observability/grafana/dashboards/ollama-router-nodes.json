@@ -2,7 +2,7 @@
   "annotations": {
     "list": []
   },
-  "description": "Per-node health, load, VRAM, RAM, GPU util, and routing. Grafana uses router /metrics for fleet telemetry (RAM, GPU util, known-vs-zero VRAM). Local compose may also scrape mock node-agent :11436 for ollama_up; do not add production :11436 scrape jobs. Duration histogram is class-only (not per-node). Do not query by model name. vram_free_gb=0 is empty only when vram_free_known=1. VRAM ledger / placement (reserved, loaded, used, free, total) is collapsed by default.",
+  "description": "Per-node health, load, VRAM, RAM, GPU util, and routing. Router /metrics only (ollama_router_node_* and ollama_router_tunnel_up); do not add production :11436 scrape jobs. Duration histogram is class-only (not per-node). Do not query by model name. vram_free_gb=0 is empty only when vram_free_known=1. VRAM ledger / placement (reserved, loaded, used, free, total) is collapsed by default.",
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
@@ -647,7 +647,7 @@
         "type": "prometheus",
         "uid": "prometheus"
       },
-      "description": "Join of router gauges on node. vram_free_gb=0 with vram_free_known=1 is a full GPU; known=0 is unknown (CPU/Metal). req/s and 5xx/s are 5m rates. models is on-disk count; loaded is /api/ps or agent count. Per-node cloud price/location are not exported.",
+      "description": "Join of router gauges on node. vram_free_gb=0 with vram_free_known=1 is a full GPU; known=0 is unknown (CPU/Metal). req/s and 5xx/s are 5m rates. models is on-disk count; loaded is /api/ps count. node_ollama_up is router-reported local Ollama reachability. Per-node cloud price/location are not exported.",
       "fieldConfig": {
         "defaults": {
           "custom": {
@@ -1108,7 +1108,7 @@
             "uid": "prometheus"
           },
           "editorMode": "code",
-          "expr": "ollama_up and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+          "expr": "ollama_router_node_ollama_up and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
           "legendFormat": "__auto",
           "refId": "K",
           "exemplar": false,
@@ -1320,7 +1320,7 @@
               "Value #H": "5xx_per_s",
               "Value #I": "vram_used_est",
               "Value #J": "models",
-              "Value #K": "ollama_up",
+              "Value #K": "node_ollama_up",
               "Value #L": "ram_available_gb",
               "Value #M": "gpu_util_pct",
               "Value #N": "backend_info",
@@ -1404,7 +1404,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
+        "w": 8,
         "x": 0,
         "y": 17
       },
@@ -1467,8 +1467,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 12,
-        "x": 12,
+        "w": 8,
+        "x": 8,
         "y": 17
       },
       "id": 14,
@@ -1508,6 +1508,86 @@
         }
       ],
       "title": "Healthy vs snapshot count",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "1 when FleetState enroll has tunnel_backend=zrok and a safe overlay URL; 0 when the private share is down. Permanent LAN nodes may omit the series.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "none"
+            }
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "color": "red",
+                  "index": 0,
+                  "text": "down"
+                },
+                "1": {
+                  "color": "green",
+                  "index": 1,
+                  "text": "up"
+                }
+              }
+            }
+          ],
+          "min": 0,
+          "max": 1,
+          "decimals": 0
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 17
+      },
+      "id": 44,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "ollama_router_tunnel_up and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
+          "legendFormat": "{{node}}",
+          "refId": "A",
+          "range": true
+        }
+      ],
+      "title": "Tunnel up (0/1)",
       "type": "timeseries"
     },
     {
@@ -3913,79 +3993,6 @@
         }
       ],
       "title": "Discovery rate",
-      "type": "timeseries"
-    },
-    {
-      "datasource": {
-        "type": "prometheus",
-        "uid": "prometheus"
-      },
-      "description": "On-disk model count per selected node. Join on fleet ids. Agent ollama_models is the same count from local /api/tags.",
-      "fieldConfig": {
-        "defaults": {
-          "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "drawStyle": "line",
-            "fillOpacity": 15,
-            "lineWidth": 1,
-            "pointSize": 5,
-            "showPoints": "never",
-            "spanNulls": false,
-            "stacking": {
-              "group": "A",
-              "mode": "none"
-            }
-          },
-          "decimals": 0,
-          "min": 0
-        },
-        "overrides": []
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 9,
-        "x": 15,
-        "y": 153
-      },
-      "id": 43,
-      "options": {
-        "legend": {
-          "displayMode": "list",
-          "placement": "bottom",
-          "showLegend": true
-        },
-        "tooltip": {
-          "mode": "multi",
-          "sort": "none"
-        }
-      },
-      "targets": [
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "ollama_router_node_models and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
-          "legendFormat": "router {{node}}",
-          "range": true,
-          "refId": "A"
-        },
-        {
-          "datasource": {
-            "type": "prometheus",
-            "uid": "prometheus"
-          },
-          "editorMode": "code",
-          "expr": "ollama_models and on(node) ollama_router_node_info{node=~\"$node\", origin=~\"$origin\", role=~\"$role\"}",
-          "legendFormat": "agent {{node}}",
-          "range": true,
-          "refId": "B"
-        }
-      ],
-      "title": "Models on disk (router vs agent)",
       "type": "timeseries"
     },
     {

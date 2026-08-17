@@ -84,6 +84,30 @@ async fn router_ui_serves_html_index() {
 }
 
 #[tokio::test]
+async fn router_ui_client_side_route_falls_back_to_index() {
+    let state = AppState::from_config(RouterConfig::default()).expect("state");
+    let response = make_app(state)
+        .oneshot(
+            Request::builder()
+                .uri("/router/ui/jobs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let ct = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    assert!(ct.contains("text/html"), "{ct}");
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("<div id=\"root\"></div>"), "{text}");
+}
+
+#[tokio::test]
 async fn router_ui_missing_asset_is_404() {
     let state = AppState::from_config(RouterConfig::default()).expect("state");
     let response = make_app(state)

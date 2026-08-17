@@ -6,7 +6,7 @@ sourceRefs:
   - crates/ollama-capacity-types
   - crates/ollama-router-core/src/capacity
   - crates/ollama-router-core/src/fleet
-lastReviewed: 2026-08-14
+lastReviewed: 2026-08-17
 ---
 
 # Ollama node agent
@@ -53,8 +53,11 @@ booleans mark a real sample. A full GPU is `vram_free_gb=0` **and**
 `ollama_router_node_*` on `GET /metrics`. Prometheus scrapes the **router**
 only for fleet dashboards. Do not add production scrape jobs for agent
 `:11436` (agents do not know the fleet.yaml node id; Verda spots churn).
-`task compose:mock` may still scrape mock `:11436` for `ollama_up`. Grafana gates
-VRAM panels on `vram_free_known == 1`, not `vram_free_gb > 0`.
+`task compose:mock` may still scrape mock `:11436` for the prefixed
+`ollama_node_agent_*` families (`ollama_node_agent_ollama_up`,
+`ollama_node_agent_models`, `ollama_node_agent_gpu_vram_gb`,
+`ollama_node_agent_ram_available_gb`, `ollama_node_agent_gpu_utilization_pct`).
+Grafana gates VRAM panels on `vram_free_known == 1`, not `vram_free_gb > 0`.
 
 **Collect.** `/v1/*` and `/metrics` share a 2s TTL cache so router probes do
 not stack `nvidia-smi`. GPU subprocesses stay at 2s timeout; sysinfo runs in
@@ -74,6 +77,18 @@ degrades to static / `ps_lower_bound` values.
 Default probe URL: `http://{ollama-url-host}:11436/...`. Override per node with
 fleet.yaml `capacity_url`. On tunneled hosts the router reaches `:11434` and
 `:11436` through the private share, not a public or LAN bind.
+
+Documented env knobs (also in shipped `config.yaml` comments):
+`OLLAMA_NODE_AGENT_HOST` / `OLLAMA_NODE_AGENT_PORT` (serve bind),
+`OLLAMA_NODE_AGENT_TOKEN` (optional bearer), `ZROK_ENABLE_TOKEN` (`setup` only,
+never logged), `OLLAMA_NODE_AGENT_DISCOVERED_V4` (test seam: comma-separated
+IPv4 list before UDP discovery), `OLLAMA_NODE_AGENT_WINDOWS_ZIP` (Windows:
+install from the standalone zip instead of `OllamaSetup.exe`).
+
+The macOS `.pkg` ships the tunnel LaunchDaemon with `Disabled=true` and
+postinstall boot-out so a fresh install never crash-loops; `setup` enables
+and bootstraps it only after share reservation. The agent daemon plist starts
+on install.
 
 `GET /v1/status` is how a later router slice can learn `gpu_backend`
 (`cpu|cuda|rocm|metal|unknown`) without guessing labels. Metal reports

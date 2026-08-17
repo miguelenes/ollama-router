@@ -68,11 +68,26 @@ async fn async_main(command: Commands) -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Setup {
+            print_plist: true, ..
+        } => {
+            print!("{}", ollama_node_agent::setup::agent_plist_text());
+            Ok(())
+        }
+        Commands::Setup {
+            print_tunnel_plist: true,
+            ..
+        } => {
+            print!("{}", ollama_node_agent::setup::tunnel_plist());
+            Ok(())
+        }
+        Commands::Setup {
             config,
             enable_token,
             enroll_url,
             enroll_token_env,
             print_unit: false,
+            print_plist: false,
+            print_tunnel_plist: false,
         } => {
             ollama_node_agent::init_tracing();
             let cfg = AgentConfig::load(config.as_deref()).context("load config")?;

@@ -20,5 +20,7 @@
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>Disabled</key>
+  <true/>
 </dict>
 </plist>

@@ -2,12 +2,12 @@
 
 use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, State};
 use axum::http::{header, Request, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get, post};
 use axum::{Json, Router};
 use ollama_router_core::cloud::{DemandScale, NoopDemandScale};
 use ollama_router_core::config::RouterConfig;
@@ -159,6 +159,13 @@ async fn readyz(State(state): State<AppState>) -> Response {
             }
         }
     }
+    let default_max = state.config.policy.default_max_inflight;
+    if !healthy.iter().any(|n| !n.is_saturated(default_max)) {
+        return json_status(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ready": false, "reason": "all nodes saturated"}),
+        );
+    }
     json_status(
         StatusCode::OK,
         json!({
@@ -169,9 +176,11 @@ async fn readyz(State(state): State<AppState>) -> Response {
 }
 
 async fn metrics(State(state): State<AppState>) -> Response {
-    state
-        .metrics
-        .refresh_gauges(&state.registry, &state.fleet_state);
+    state.metrics.refresh_gauges(
+        &state.registry,
+        &state.fleet_state,
+        Some(state.pool.available_permits()),
+    );
     match state.metrics.encode_text() {
         Ok(body) => (
             [(header::CONTENT_TYPE, metrics::METRICS_CONTENT_TYPE)],
@@ -190,7 +199,7 @@ async fn proxy_route(State(state): State<AppState>, req: Request<axum::body::Bod
 }
 
 async fn openai_model_route(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    proxy::openai_model_by_id(&state, &id)
+    proxy::openai_model_by_id(&state, &id, Instant::now())
 }
 
 async fn ui_index() -> Response {
@@ -219,19 +228,51 @@ fn ui_mime(path: &str) -> Option<&'static str> {
     }
 }
 
-async fn ui_asset(Path(path): Path<String>) -> Response {
-    let Some(file) = UiAssets::get(&path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    let Some(content_type) = ui_mime(&path) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
-    (
-        [(header::CONTENT_TYPE, content_type)],
-        file.data.into_owned(),
-    )
-        .into_response()
+fn ui_requested_static_asset(path: &str) -> bool {
+    ui_mime(path).is_some()
 }
+
+async fn ui_asset(Path(path): Path<String>) -> Response {
+    if let Some(file) = UiAssets::get(&path) {
+        if let Some(content_type) = ui_mime(&path) {
+            return (
+                [(header::CONTENT_TYPE, content_type)],
+                file.data.into_owned(),
+            )
+                .into_response();
+        }
+    }
+    if ui_requested_static_asset(&path) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    ui_index().await
+}
+
+/// Registered admin API `operationId` values (mirrors `make_app()` `/router/v1/*` routes).
+/// Keep in sync with `site/openapi/openapi.yaml`.
+pub const ADMIN_OPERATION_IDS: &[&str] = &[
+    "cancelJob",
+    "deleteModels",
+    "drainNode",
+    "enrollNode",
+    "ensureModels",
+    "getJob",
+    "listJobs",
+    "listModels",
+    "listNodes",
+    "putNode",
+    "readiness",
+    "readinessRecheck",
+    "reload",
+    "runpodDestroy",
+    "runpodEnsure",
+    "runpodStatus",
+    "stats",
+    "undrainNode",
+    "verdaDestroy",
+    "verdaEnsure",
+    "verdaStatus",
+];
 
 pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
     let mut res = Json(body).into_response();
@@ -249,6 +290,14 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/ui/", get(ui_index))
         .route("/router/ui/{*path}", get(ui_asset))
         .route("/api/tags", get(proxy_route))
+        .route("/api/ps", get(proxy_route))
+        .route("/api/version", get(proxy_route))
+        .route("/api/generate", post(proxy_route))
+        .route("/api/chat", post(proxy_route))
+        .route("/api/embed", post(proxy_route))
+        .route("/api/embeddings", post(proxy_route))
+        .route("/api/stop", post(proxy_route))
+        .route("/api/blobs/{*digest}", any(proxy_route))
         .route("/v1/models", get(proxy_route))
         .route("/v1/models/{*id}", get(openai_model_route))
         .route("/v1/chat/completions", post(proxy_route))
@@ -283,6 +332,9 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/v1/runpod/status", get(admin::runpod_status))
         .route("/router/v1/runpod/ensure", post(admin::runpod_ensure))
         .route("/router/v1/runpod/destroy", post(admin::runpod_destroy))
+        // Wrong method on a registered path must reach the proxy so envelopes
+        // stay Ollama/OpenAI-shaped (Axum's default 405 would skip `.fallback`).
+        .method_not_allowed_fallback(proxy_route)
         .fallback(proxy_route)
         .with_state(state)
         .layer(TraceLayer::new_for_http().make_span_with(RequestIdMakeSpan))

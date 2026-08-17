@@ -1,0 +1,30 @@
+{
+  "local": {
+    "url": "http://127.0.0.1:11434",
+    "tunnel_backend": "zrok",
+    "enrolled_at": 1700000000.0
+  },
+  "desk": {
+    "url": "http://127.0.0.1:42000",
+    "capacity_url": "http://127.0.0.1:42001",
+    "tunnel_backend": "zrok",
+    "ollama_share_id": "desk-ollama",
+    "agent_share_id": "desk-agent",
+    "enrolled_at": 1700000100.0
+  },
+  "verda-inst-abc": {
+    "url": "http://127.0.0.1:41990",
+    "managed_by": "verda",
+    "verda_instance_id": "inst-abc",
+    "verda_location": "HEL",
+    "verda_instance_type": "gpu-l4",
+    "verda_spot_price_per_hour": 0.42
+  },
+  "runpod-pod1": {
+    "url": "http://127.0.0.1:41991",
+    "managed_by": "runpod",
+    "runpod_pod_id": "pod1",
+    "runpod_gpu_type": "NVIDIA L4",
+    "runpod_cost_per_hour": 0.39
+  }
+}

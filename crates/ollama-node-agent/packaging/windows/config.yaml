@@ -4,6 +4,9 @@
 # ZROK_ENABLE_TOKEN in the environment (not this file; not a VPN). Do not also
 # run the Ollama tray app on :11434 — NVIDIA under LocalSystem conflicts with a
 # user-session tray.
+# Optional test seams (normally unset):
+#   OLLAMA_NODE_AGENT_DISCOVERED_V4=192.168.1.10,10.0.0.5  # LAN IP discovery override
+#   OLLAMA_NODE_AGENT_WINDOWS_ZIP=1  # zip install instead of OllamaSetup.exe
 listen: loopback
 port: 11436
 ollama:

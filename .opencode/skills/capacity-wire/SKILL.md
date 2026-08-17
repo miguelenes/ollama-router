@@ -47,7 +47,12 @@ label by model name. Do not extend `node_info` labels — backend lives on
 `ollama_router_node_backend_info{node,backend}`.
 
 Gate VRAM/util/RAM in PromQL on `*_known == 1`. A full GPU is free=0 with
-known=1. Prometheus must not scrape production `:11436`.
+known=1. Prometheus must not scrape production `:11436`. Agent `/metrics`
+families use the `ollama_node_agent_` prefix (`ollama_node_agent_ollama_up`,
+`ollama_node_agent_models`, `ollama_node_agent_gpu_vram_gb`,
+`ollama_node_agent_ram_available_gb`, `ollama_node_agent_gpu_utilization_pct`).
+Mock compose may scrape those; production dashboards use router-emitted
+`ollama_router_node_*` only.
 
 ## Gotcha
 

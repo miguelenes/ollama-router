@@ -348,12 +348,74 @@
       "type": "timeseries"
     },
     {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "description": "Demand and ensure_failed cloud events split by route/failure reason. Empty reason label is omitted. Provider-split totals without a reason filter still match alerts.",
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 50,
+            "lineWidth": 1,
+            "pointSize": 5,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            }
+          },
+          "min": 0,
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
+      "id": 11,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "editorMode": "code",
+          "expr": "sum by (event, provider, reason) (rate(ollama_router_cloud_events_total{event=~\"demand|ensure_failed\", provider=~\"$provider\", reason!=\"\"}[5m]))",
+          "legendFormat": "{{provider}} {{event}} {{reason}}",
+          "range": true,
+          "refId": "A"
+        }
+      ],
+      "title": "Cloud events by reason (demand / ensure_failed)",
+      "type": "timeseries"
+    },
+    {
       "collapsed": false,
       "gridPos": {
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 14
+        "y": 22
       },
       "id": 7,
       "title": "Demand / routing",
@@ -391,7 +453,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 15
+        "y": 23
       },
       "id": 8,
       "options": {
@@ -427,7 +489,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 23
+        "y": 31
       },
       "id": 9,
       "title": "Spots",
@@ -565,7 +627,7 @@
         "h": 8,
         "w": 24,
         "x": 0,
-        "y": 24
+        "y": 32
       },
       "id": 10,
       "options": {
@@ -771,7 +833,7 @@
         "h": 1,
         "w": 24,
         "x": 0,
-        "y": 32
+        "y": 40
       },
       "id": 11,
       "title": "Logs",
@@ -787,7 +849,7 @@
         "h": 10,
         "w": 24,
         "x": 0,
-        "y": 33
+        "y": 41
       },
       "id": 12,
       "options": {

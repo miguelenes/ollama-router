@@ -22,6 +22,8 @@ use crate::fleet::tags::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NodeOrigin {
     Permanent,
+    /// Debug/adopt admin surface (`PUT /router/v1/nodes`, enroll `origin: adopt`).
+    Adopt,
     Verda,
     Runpod,
 }
@@ -30,6 +32,7 @@ impl NodeOrigin {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Permanent => "permanent",
+            Self::Adopt => "adopt",
             Self::Verda => "verda",
             Self::Runpod => "runpod",
         }
@@ -561,7 +564,7 @@ impl Node {
             return false;
         }
         match self.origin {
-            NodeOrigin::Permanent => self.draining.load(Ordering::Acquire),
+            NodeOrigin::Permanent | NodeOrigin::Adopt => self.draining.load(Ordering::Acquire),
             NodeOrigin::Verda | NodeOrigin::Runpod => self.forget_pending.load(Ordering::Acquire),
         }
     }
@@ -1279,6 +1282,23 @@ impl Registry {
         sweep_drained_locked(&mut inner);
     }
 
+    /// Insert or refresh an adopt/debug node. Does not overwrite permanent or cloud rows.
+    pub fn upsert_adopt(&self, config: NodeConfig) {
+        let mut inner = self.write();
+        let id = config.id.clone();
+        match inner.nodes.get(&id) {
+            Some(existing) if existing.origin == NodeOrigin::Adopt => {
+                existing.apply_permanent_config(config);
+            }
+            Some(_) => {}
+            None => {
+                inner
+                    .nodes
+                    .insert(id, Arc::new(Node::from_config(config, NodeOrigin::Adopt)));
+            }
+        }
+    }
+
     /// Insert or refresh a Verda ephemeral (tests / future manager). Does not overwrite Permanent.
     pub fn upsert_verda(&self, config: NodeConfig) {
         let mut inner = self.write();
@@ -1476,10 +1496,11 @@ fn remarge(cold: &mut Cold) {
 fn upsert_permanent_locked(inner: &mut Inner, config: NodeConfig) {
     let id = config.id.clone();
     match inner.nodes.get(&id) {
-        Some(existing) if existing.origin == NodeOrigin::Verda => {
+        Some(existing) if matches!(existing.origin, NodeOrigin::Verda | NodeOrigin::Adopt) => {
             tracing::warn!(
                 node = %id,
-                "fleet.yaml id collides with a Verda node; leaving Verda row in place"
+                origin = existing.origin.as_str(),
+                "fleet.yaml id collides with a non-permanent node; leaving row in place"
             );
         }
         Some(existing) => {
@@ -1816,6 +1837,27 @@ mod tests {
         let snap = registry.get(&nid("runpod-pod-1")).unwrap();
         assert_eq!(snap.origin, NodeOrigin::Runpod);
         assert_eq!(snap.origin.as_str(), "runpod");
+    }
+
+    #[test]
+    fn upsert_adopt_sets_adopt_origin_and_does_not_count_as_verda() {
+        let registry = Registry::new(&RouterConfig::default());
+        registry.upsert_adopt(node("verda-like-desk", 8.0, 1));
+        let snap = registry.get(&nid("verda-like-desk")).unwrap();
+        assert_eq!(snap.origin, NodeOrigin::Adopt);
+        assert_eq!(snap.origin.as_str(), "adopt");
+        let verda_n = registry
+            .snapshot()
+            .iter()
+            .filter(|n| n.origin == NodeOrigin::Verda)
+            .count();
+        assert_eq!(verda_n, 0);
+        registry.upsert_verda(node("verda-real", 24.0, 1));
+        registry.upsert_adopt(node("verda-real", 8.0, 1));
+        assert_eq!(
+            registry.get(&nid("verda-real")).unwrap().origin,
+            NodeOrigin::Verda
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub trait DemandScale: Send + Sync {
 /// Cloud lifecycle counters. Implemented in the binary (`Metrics`); this crate
 /// stays free of prometheus.
 pub trait FleetEvents: Send + Sync {
-    fn cloud_event(&self, provider: &'static str, event: &'static str);
+    fn cloud_event(&self, provider: &'static str, event: &'static str, reason: Option<&str>);
 }
 
 /// No-op when the binary has not attached metrics.
@@ -26,7 +26,7 @@ pub trait FleetEvents: Send + Sync {
 pub struct NoopFleetEvents;
 
 impl FleetEvents for NoopFleetEvents {
-    fn cloud_event(&self, _provider: &'static str, _event: &'static str) {}
+    fn cloud_event(&self, _provider: &'static str, _event: &'static str, _reason: Option<&str>) {}
 }
 
 /// No-op when no cloud provider is enabled.

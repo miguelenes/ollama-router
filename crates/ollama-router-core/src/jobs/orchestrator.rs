@@ -578,8 +578,21 @@ impl PullOrchestrator {
             state.inflight.insert(key, id);
         }
         self.persist(&job).await;
+        self.observe_started(&job);
         self.spawn_run(id, ineligible, ram_blocked, disk_blocked);
         Ok(job)
+    }
+
+    fn observe_started(&self, job: &Job) {
+        let observer = self
+            .inner
+            .observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if let Some(observer) = observer {
+            observer.job_started(job.kind);
+        }
     }
 
     fn spawn_run(

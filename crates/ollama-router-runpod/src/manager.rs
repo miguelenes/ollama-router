@@ -151,7 +151,7 @@ impl RunpodManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
     }
 
-    fn emit(&self, event: &'static str) {
+    fn emit(&self, event: &'static str, reason: Option<&str>) {
         let events = self
             .inner
             .events
@@ -159,7 +159,7 @@ impl RunpodManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(events) = events {
-            events.cloud_event("runpod", event);
+            events.cloud_event("runpod", event, reason);
         }
     }
 
@@ -314,7 +314,7 @@ impl RunpodManager {
         }
         self.ensure_locked(create)
             .await
-            .inspect_err(|_| self.emit("ensure_failed"))
+            .inspect_err(|_| self.emit("ensure_failed", Some("provision_failed")))
     }
 
     async fn ensure_locked(&self, create: bool) -> Result<Value, RunpodError> {
@@ -360,7 +360,7 @@ impl RunpodManager {
             None,
         )
         .await;
-        self.emit("adopt");
+        self.emit("adopt", None);
         json!({
             "status": "adopted",
             "node_id": node_id.as_str(),
@@ -384,7 +384,7 @@ impl RunpodManager {
         }
         self.create_additional_locked()
             .await
-            .inspect_err(|_| self.emit("ensure_failed"))
+            .inspect_err(|_| self.emit("ensure_failed", Some("provision_failed")))
     }
 
     async fn create_additional_locked(&self) -> Result<Value, RunpodError> {
@@ -712,7 +712,7 @@ impl RunpodManager {
         }
         match self.wait_running(&pod_id).await {
             Ok(pod) => {
-                self.emit("create");
+                self.emit("create", None);
                 Ok(pod)
             }
             Err(err) => {
@@ -803,10 +803,11 @@ impl RunpodManager {
                     tracing::info!(pod_id = %pod_id, "runpod_destroyed");
                     deleted.push(pod_id.clone());
                     self.forget_pod(&pod_id).await;
-                    self.emit("destroy");
+                    self.emit("destroy", None);
                 }
                 Err(err) => {
                     tracing::error!(pod_id = %pod_id, error = %err, "runpod_destroy_failed");
+                    self.emit("destroy", Some("destroy_failed"));
                     failed.push(pod_id);
                 }
             }
@@ -1038,7 +1039,7 @@ impl RunpodManager {
                 tracing::info!(pod_id = %victim, "runpod_orphan_reclaimed");
                 self.forget_pod(victim.as_str()).await;
                 self.lock_orphan_first_seen().remove(victim.as_str());
-                self.emit("destroy");
+                self.emit("destroy", None);
             }
             Err(err) => {
                 tracing::error!(pod_id = %victim, error = %err, "runpod_orphan_reclaim_failed");
@@ -1066,7 +1067,7 @@ impl RunpodManager {
                 Ok(_) => {
                     self.forget_pod(pid).await;
                     terminated += 1;
-                    self.emit("destroy");
+                    self.emit("destroy", None);
                 }
                 Err(err) => {
                     tracing::error!(pod_id = pid, error = %err, "runpod_interrupt_cleanup_failed");
@@ -1138,7 +1139,7 @@ impl RunpodManager {
                     self.inner.registry.upsert_runpod(node);
                     self.persist_runpod_log(&node_id, "", pod, &choice.gpu_type_id, None)
                         .await;
-                    self.emit("adopt");
+                    self.emit("adopt", None);
                 }
             }
         }
@@ -1206,7 +1207,7 @@ impl RunpodManager {
                     pod_id = %cand.instance_id,
                     "runpod_idle_scale_down"
                 );
-                self.emit("idle");
+                self.emit("idle", None);
             }
         }
     }
@@ -1248,7 +1249,7 @@ impl RunpodManager {
                     pod_id = %cand.instance_id,
                     "runpod_excess_scale_down"
                 );
-                self.emit("destroy");
+                self.emit("destroy", None);
                 count = count.saturating_sub(1);
             }
         }
@@ -1349,7 +1350,7 @@ impl DemandScale for RunpodManager {
         });
         let inner = self.inner.clone();
         let shutdown = self.inner.shutdown.clone();
-        self.emit("demand");
+        self.emit("demand", Some(reason_code));
         *slot = Some(tokio::spawn(async move {
             let mgr = RunpodManager { inner };
             if shutdown.is_cancelled() {

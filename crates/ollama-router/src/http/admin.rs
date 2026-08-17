@@ -329,10 +329,9 @@ fn readiness_view(state: &AppState) -> Response {
         .list_jobs()
         .into_iter()
         .find(|job| job.kind.as_str() == "provision" && job.status.is_incomplete());
-    let verda_recovery = state.verda.as_ref().map(|manager| manager.recovery());
     let recovery = active_job_recovery
         .and_then(|job| serde_json::to_value(job).ok())
-        .or_else(|| verda_recovery.filter(|value| !value.is_null()));
+        .or_else(|| merge_cloud_recovery(state));
     Json(json!({
         "ready": ready,
         "state": if ready { "ready" } else if recovery.is_some() { "recovering" } else { "action_required" },
@@ -346,11 +345,65 @@ fn readiness_view(state: &AppState) -> Response {
                 .filter(|n| n.draining || n.cordoned)
                 .count(),
             "permanent": nodes.iter().filter(|n| n.origin == NodeOrigin::Permanent).count(),
+            "adopt": nodes.iter().filter(|n| n.origin == NodeOrigin::Adopt).count(),
             "verda": nodes.iter().filter(|n| n.origin == NodeOrigin::Verda).count(),
+            "runpod": nodes.iter().filter(|n| n.origin == NodeOrigin::Runpod).count(),
         },
         "recovery": recovery,
         "enrolled_nodes": state_map.keys().collect::<Vec<_>>(),
     })).into_response()
+}
+
+/// Merge reconciling snapshots from every enabled cloud manager.
+fn merge_cloud_recovery(state: &AppState) -> Option<serde_json::Value> {
+    merge_cloud_recovery_values(
+        state.verda.as_ref().map(|mgr| mgr.recovery()),
+        state.runpod.as_ref().map(|mgr| mgr.recovery()),
+    )
+}
+
+fn merge_cloud_recovery_values(
+    verda: Option<serde_json::Value>,
+    runpod: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    if let Some(value) = verda.filter(|value| !value.is_null()) {
+        out.insert("verda".into(), value);
+    }
+    if let Some(value) = runpod.filter(|value| !value.is_null()) {
+        out.insert("runpod".into(), value);
+    }
+    if out.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Object(out))
+    }
+}
+
+#[cfg(test)]
+mod readiness_recovery_tests {
+    use super::merge_cloud_recovery_values;
+    use serde_json::json;
+
+    #[test]
+    fn merge_cloud_recovery_includes_both_providers() {
+        let merged = merge_cloud_recovery_values(
+            Some(json!({"stage": "provisioning", "status": "running"})),
+            Some(json!({"stage": "enrollment", "status": "pending"})),
+        )
+        .expect("recovery");
+        assert_eq!(merged["verda"]["stage"], "provisioning");
+        assert_eq!(merged["runpod"]["stage"], "enrollment");
+    }
+
+    #[test]
+    fn merge_cloud_recovery_omits_null_providers() {
+        assert!(merge_cloud_recovery_values(None, None).is_none());
+        let only_runpod = merge_cloud_recovery_values(None, Some(json!({"stage": "provisioning"})))
+            .expect("runpod");
+        assert!(only_runpod.get("verda").is_none());
+        assert_eq!(only_runpod["runpod"]["stage"], "provisioning");
+    }
 }
 
 pub async fn recheck(State(state): State<AppState>, headers: HeaderMap) -> Response {
@@ -454,7 +507,7 @@ pub async fn put_node(
     if existing.is_none() {
         state
             .registry
-            .upsert_verda(ollama_router_core::config::NodeConfig {
+            .upsert_adopt(ollama_router_core::config::NodeConfig {
                 id: id.clone(),
                 url: None,
                 capacity_url: None,
@@ -785,7 +838,7 @@ pub async fn enroll_node(
         }
         EnrollOrigin::Fleet => match state.registry.origin(&id) {
             Some(NodeOrigin::Permanent) => {}
-            Some(NodeOrigin::Verda | NodeOrigin::Runpod) => {
+            Some(NodeOrigin::Verda | NodeOrigin::Runpod | NodeOrigin::Adopt) => {
                 return enroll_reason(
                     StatusCode::CONFLICT,
                     "origin_mismatch",
@@ -804,7 +857,7 @@ pub async fn enroll_node(
             if state.registry.get(&id).is_none() {
                 state
                     .registry
-                    .upsert_verda(ollama_router_core::config::NodeConfig {
+                    .upsert_adopt(ollama_router_core::config::NodeConfig {
                         id: id.clone(),
                         url: None,
                         capacity_url: None,
@@ -963,11 +1016,11 @@ pub async fn stats(State(state): State<AppState>, headers: HeaderMap) -> Respons
     if let Some(resp) = require_admin(&state, &headers) {
         return resp;
     }
-    Json(
-        state
-            .metrics
-            .stats_json(&state.registry, &state.fleet_state),
-    )
+    Json(state.metrics.stats_json(
+        &state.registry,
+        &state.fleet_state,
+        Some(state.pool.available_permits()),
+    ))
     .into_response()
 }
 

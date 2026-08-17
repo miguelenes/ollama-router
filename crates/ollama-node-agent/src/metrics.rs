@@ -18,18 +18,25 @@ pub struct AgentMetrics {
 impl AgentMetrics {
     pub fn new() -> Result<Self, prometheus::Error> {
         let registry = Registry::new();
-        let ollama_up = IntGauge::new("ollama_up", "1 if GET /api/tags succeeded")?;
+        let ollama_up = IntGauge::new(
+            "ollama_node_agent_ollama_up",
+            "1 if GET /api/tags succeeded",
+        )?;
         let ollama_models = IntGauge::new(
-            "ollama_models",
+            "ollama_node_agent_models",
             "On-disk model count from GET /api/tags (no names)",
         )?;
-        let vram_gb = Gauge::new("ollama_gpu_vram_gb", "Sum of GPU VRAM (GiB)")?;
-        let ram_available_gb = Gauge::new("ram_available_gb", "Available RAM (GiB)")?;
+        let vram_gb = Gauge::new("ollama_node_agent_gpu_vram_gb", "Sum of GPU VRAM (GiB)")?;
+        let ram_available_gb =
+            Gauge::new("ollama_node_agent_ram_available_gb", "Available RAM (GiB)")?;
         let ram_available_known = IntGauge::new(
             "ollama_node_agent_ram_available_known",
             "1 if ram_available_gb was measured",
         )?;
-        let gpu_util = Gauge::new("gpu_utilization_pct", "Mean GPU utilization percent")?;
+        let gpu_util = Gauge::new(
+            "ollama_node_agent_gpu_utilization_pct",
+            "Mean GPU utilization percent",
+        )?;
         let gpu_util_known = IntGauge::new(
             "ollama_node_agent_gpu_util_known",
             "1 if gpu_utilization_pct was measured",

@@ -16,6 +16,7 @@ pub use types::{Job, JobId, JobKind, JobStatus, JobTarget, TargetStatus};
 
 /// Terminal job hook. Implemented in the binary (`Metrics`).
 pub trait JobObserver: Send + Sync {
+    fn job_started(&self, kind: JobKind);
     fn job_terminal(&self, kind: JobKind, status: JobStatus);
 }
 

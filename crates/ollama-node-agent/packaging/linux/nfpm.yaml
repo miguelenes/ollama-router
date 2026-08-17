@@ -7,7 +7,7 @@ version: ${AGENT_VERSION}
 section: net
 priority: optional
 maintainer: ollama-router maintainers
-description: Node-local Ollama capacity agent (HTTP :11436)
+description: Node-local Ollama installer, supervisor, and capacity agent (:11436)
 homepage: https://github.com/miguelenes/ollama-router
 license: proprietary
 contents:

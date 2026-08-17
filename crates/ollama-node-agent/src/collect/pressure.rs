@@ -67,7 +67,7 @@ pub fn from_sysinfo(sys: &System, cpu_usage_pct: Option<f64>) -> Pressure {
         load5,
         load15,
         cpu_cores: Some(cpu_cores),
-        collected_at: epoch_now(),
+        collected_at: crate::time_util::epoch_now(),
         load_1m: load1,
         load_per_cpu,
         ram_available_source: source,
@@ -76,11 +76,6 @@ pub fn from_sysinfo(sys: &System, cpu_usage_pct: Option<f64>) -> Pressure {
         psi_cpu_some_avg10,
         platform: Some(std::env::consts::OS.into()),
     }
-}
-
-fn epoch_now() -> Option<f64> {
-    let ns = time::OffsetDateTime::now_utc().unix_timestamp_nanos();
-    Some(ns as f64 / 1_000_000_000.0)
 }
 
 pub fn classify_pressure(p: &Pressure) -> &'static str {

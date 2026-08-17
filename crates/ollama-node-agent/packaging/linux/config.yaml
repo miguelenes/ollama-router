@@ -5,6 +5,9 @@
 #   export ZROK_ENABLE_TOKEN=…   # never commit; never a YAML literal
 #   sudo --preserve-env=ZROK_API_ENDPOINT,ZROK_ENABLE_TOKEN ollama-node-agent setup
 # That is not a VPN. Same-LAN hosts keep direct URLs in fleet.yaml.
+# Optional test seams (normally unset):
+#   OLLAMA_NODE_AGENT_DISCOVERED_V4=192.168.1.10,10.0.0.5  # LAN IP discovery override
+#   OLLAMA_NODE_AGENT_WINDOWS_ZIP=1  # Windows only: zip install instead of Setup.exe
 listen: loopback
 port: 11436
 ollama:

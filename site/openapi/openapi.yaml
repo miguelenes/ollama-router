@@ -320,7 +320,7 @@ paths:
   /router/v1/verda/ensure:
     post:
       tags: [cloud]
-      summary: Ensure Verda capacity
+      summary: Ensure Verda spot fleet
       description: >
         Adopt-first ensure. Demand scale coalesces create_additional only;
         instances are tagged managed_by=ollama-router.
@@ -367,7 +367,7 @@ paths:
   /router/v1/runpod/ensure:
     post:
       tags: [cloud]
-      summary: Ensure RunPod capacity
+      summary: Ensure RunPod interruptible pods
       description: Best $/VRAM selection within the hourly cap.
       operationId: runpodEnsure
       responses:

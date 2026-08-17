@@ -143,11 +143,11 @@ async fn metrics_is_open() {
     )
     .unwrap();
     for name in [
-        "ollama_up",
-        "ollama_models",
-        "ollama_gpu_vram_gb",
-        "ram_available_gb",
-        "gpu_utilization_pct",
+        "ollama_node_agent_ollama_up",
+        "ollama_node_agent_models",
+        "ollama_node_agent_gpu_vram_gb",
+        "ollama_node_agent_ram_available_gb",
+        "ollama_node_agent_gpu_utilization_pct",
         "agent_collect_seconds",
     ] {
         assert!(body.contains(name), "missing metric {name}");

@@ -31,6 +31,24 @@ The router probes these endpoints on `:11436`:
 - GPU discovery is first-class for NVIDIA (`nvidia-smi`) and AMD ROCm
   (`rocm-smi`/`amd-smi`); Auto order is NVIDIA → macOS Metal → ROCm → CPU.
 - Prometheus scrapes the **router only**, never node-agent `:11436`.
+- Agent `/metrics` families use the `ollama_node_agent_*` prefix (for example
+  `ollama_node_agent_ollama_up`, `ollama_node_agent_models`).
+
+## Environment knobs
+
+| Variable | Purpose |
+| --- | --- |
+| `OLLAMA_NODE_AGENT_HOST` / `OLLAMA_NODE_AGENT_PORT` | Override `serve` bind (also in config.yaml). |
+| `ZROK_ENABLE_TOKEN` | zrok enable token for `setup` only (never logged). |
+| `OLLAMA_NODE_AGENT_DISCOVERED_V4` | Comma-separated IPv4 list injected before UDP discovery (test seam for LAN bind). |
+| `OLLAMA_NODE_AGENT_WINDOWS_ZIP` | Set to `1` on Windows to install from the standalone zip instead of `OllamaSetup.exe`. |
+
+## macOS tunnel daemon
+
+The `.pkg` ships the tunnel LaunchDaemon with `Disabled=true` and does not
+bootstrap it on install. After `setup` reserves zrok private shares it runs
+`launchctl enable` and `launchctl bootstrap` for the tunnel plist. The agent
+daemon plist is unchanged and starts on pkg install.
 
 ## Enrollment (cloud hosts)
 

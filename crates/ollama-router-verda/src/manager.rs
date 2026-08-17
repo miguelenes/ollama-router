@@ -162,7 +162,7 @@ impl VerdaManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(events);
     }
 
-    fn emit(&self, event: &'static str) {
+    fn emit(&self, event: &'static str, reason: Option<&str>) {
         let events = self
             .inner
             .events
@@ -170,7 +170,7 @@ impl VerdaManager {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clone();
         if let Some(events) = events {
-            events.cloud_event("verda", event);
+            events.cloud_event("verda", event, reason);
         }
     }
 
@@ -361,7 +361,7 @@ impl VerdaManager {
         }
         self.ensure_locked(create)
             .await
-            .inspect_err(|_| self.emit("ensure_failed"))
+            .inspect_err(|_| self.emit("ensure_failed", Some("provision_failed")))
     }
 
     async fn ensure_locked(&self, create: bool) -> Result<Value, VerdaError> {
@@ -405,7 +405,7 @@ impl VerdaManager {
         }
         self.create_additional_locked()
             .await
-            .inspect_err(|_| self.emit("ensure_failed"))
+            .inspect_err(|_| self.emit("ensure_failed", Some("provision_failed")))
     }
 
     async fn create_additional_locked(&self) -> Result<Value, VerdaError> {
@@ -471,7 +471,7 @@ impl VerdaManager {
             None,
         )
         .await;
-        self.emit("adopt");
+        self.emit("adopt", None);
         json!({
             "status": "adopted",
             "node_id": node_id.as_str(),
@@ -775,7 +775,7 @@ impl VerdaManager {
                 {
                     inst.hostname = Some(hostname);
                 }
-                self.emit("create");
+                self.emit("create", None);
                 Ok(inst)
             }
             Err(err) => {
@@ -956,10 +956,11 @@ impl VerdaManager {
                     tracing::info!(instance_id = %instance_id, "verda_destroyed");
                     deleted.push(instance_id.clone());
                     self.forget_instance(&instance_id).await;
-                    self.emit("destroy");
+                    self.emit("destroy", None);
                 }
                 Err(err) => {
                     tracing::error!(instance_id = %instance_id, error = %err, "verda_destroy_failed");
+                    self.emit("destroy", Some("destroy_failed"));
                     failed.push(instance_id);
                 }
             }
@@ -1233,7 +1234,7 @@ impl VerdaManager {
                 tracing::info!(instance_id = %victim, "verda_orphan_reclaimed");
                 self.forget_instance(victim.as_str()).await;
                 self.lock_orphan_first_seen().remove(victim.as_str());
-                self.emit("destroy");
+                self.emit("destroy", None);
             }
             Err(err) => {
                 tracing::error!(
@@ -1366,7 +1367,7 @@ impl VerdaManager {
                     instance_id = %cand.instance_id,
                     "verda_idle_scale_down"
                 );
-                self.emit("idle");
+                self.emit("idle", None);
             }
         }
     }
@@ -1408,7 +1409,7 @@ impl VerdaManager {
                     instance_id = %cand.instance_id,
                     "verda_excess_scale_down"
                 );
-                self.emit("destroy");
+                self.emit("destroy", None);
                 count = count.saturating_sub(1);
             }
         }
@@ -1509,7 +1510,7 @@ impl DemandScale for VerdaManager {
         });
         let inner = self.inner.clone();
         let shutdown = self.inner.shutdown.clone();
-        self.emit("demand");
+        self.emit("demand", Some(reason_code));
         *slot = Some(tokio::spawn(async move {
             let mgr = VerdaManager { inner };
             if shutdown.is_cancelled() {

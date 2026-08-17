@@ -223,21 +223,21 @@ async fn agent_metrics(State(state): State<CapacityState>) -> Response {
     let n = state.ollama.lock_models().len();
     let vram = state.role.vram_gb();
     let body = format!(
-        "# HELP ollama_up 1 if GET /api/tags succeeded\n\
-         # TYPE ollama_up gauge\n\
-         ollama_up 1\n\
-         # HELP ollama_models On-disk model count from GET /api/tags (no names)\n\
-         # TYPE ollama_models gauge\n\
-         ollama_models {n}\n\
-         # HELP ollama_gpu_vram_gb Sum of GPU VRAM (GiB)\n\
-         # TYPE ollama_gpu_vram_gb gauge\n\
-         ollama_gpu_vram_gb {vram}\n\
-         # HELP ram_available_gb Available RAM (GiB)\n\
-         # TYPE ram_available_gb gauge\n\
-         ram_available_gb 0\n\
-         # HELP gpu_utilization_pct Mean GPU utilization percent\n\
-         # TYPE gpu_utilization_pct gauge\n\
-         gpu_utilization_pct 0\n"
+        "# HELP ollama_node_agent_ollama_up 1 if GET /api/tags succeeded\n\
+         # TYPE ollama_node_agent_ollama_up gauge\n\
+         ollama_node_agent_ollama_up 1\n\
+         # HELP ollama_node_agent_models On-disk model count from GET /api/tags (no names)\n\
+         # TYPE ollama_node_agent_models gauge\n\
+         ollama_node_agent_models {n}\n\
+         # HELP ollama_node_agent_gpu_vram_gb Sum of GPU VRAM (GiB)\n\
+         # TYPE ollama_node_agent_gpu_vram_gb gauge\n\
+         ollama_node_agent_gpu_vram_gb {vram}\n\
+         # HELP ollama_node_agent_ram_available_gb Available RAM (GiB)\n\
+         # TYPE ollama_node_agent_ram_available_gb gauge\n\
+         ollama_node_agent_ram_available_gb 0\n\
+         # HELP ollama_node_agent_gpu_utilization_pct Mean GPU utilization percent\n\
+         # TYPE ollama_node_agent_gpu_utilization_pct gauge\n\
+         ollama_node_agent_gpu_utilization_pct 0\n"
     );
     ([(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response()
 }

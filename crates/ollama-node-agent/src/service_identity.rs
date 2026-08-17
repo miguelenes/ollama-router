@@ -84,34 +84,72 @@ mod tests {
     }
 
     #[test]
-    fn macos_plist_file_is_canonical() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("packaging/macos/com.ollama.node-agent.plist");
-        let on_disk = std::fs::read_to_string(path).expect("plist");
+    fn macos_agent_plist_matches_binary_print() {
         assert_eq!(
-            on_disk,
-            include_str!("../packaging/macos/com.ollama.node-agent.plist")
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("packaging/macos/com.ollama.node-agent.plist")
+            )
+            .expect("agent plist"),
+            crate::setup::agent_plist_text()
         );
+    }
+
+    #[test]
+    fn macos_tunnel_plist_matches_binary_print() {
+        assert_eq!(
+            std::fs::read_to_string(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("packaging/macos/com.ollama.node-agent.tunnel.plist")
+            )
+            .expect("tunnel plist"),
+            crate::setup::tunnel_plist()
+        );
+    }
+
+    #[test]
+    fn macos_plist_file_is_canonical() {
+        let on_disk = crate::setup::agent_plist_text();
         assert!(on_disk.contains("com.ollama.node-agent"));
         assert!(on_disk.contains("/Library/Application Support/ollama-node-agent/config.yaml"));
         assert!(!on_disk.contains("OLLAMA_NODE_AGENT_HOST"));
         assert!(on_disk.contains("<key>KeepAlive</key>"));
         assert!(on_disk.contains("<key>RunAtLoad</key>"));
         assert!(on_disk.contains("/usr/local/bin/ollama-node-agent"));
-        let tunnel_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("packaging/macos/com.ollama.node-agent.tunnel.plist");
-        let tunnel_on_disk = std::fs::read_to_string(tunnel_path).expect("tunnel plist");
-        assert_eq!(tunnel_on_disk, crate::setup::tunnel_plist());
+        let tunnel_on_disk = crate::setup::tunnel_plist();
         assert!(tunnel_on_disk.contains("com.ollama.node-agent.tunnel"));
+        assert!(tunnel_on_disk.contains("<key>Disabled</key>"));
     }
 
     #[test]
-    fn macos_postinstall_bootstraps_launchd_and_skips_ollama() {
+    fn pack_pkg_agent_plist_drift_would_fail_cmp() {
+        let canonical = crate::setup::agent_plist_text();
+        let drifted = format!("<!-- drift -->\n{canonical}");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generated = dir.path().join("generated.plist");
+        let checked_in = dir.path().join("checked-in.plist");
+        std::fs::write(&generated, canonical).expect("write generated");
+        std::fs::write(&checked_in, &drifted).expect("write drifted");
+        let status = std::process::Command::new("cmp")
+            .args([
+                "-s",
+                checked_in.to_str().unwrap(),
+                generated.to_str().unwrap(),
+            ])
+            .status()
+            .expect("cmp");
+        assert!(!status.success());
+    }
+
+    #[test]
+    fn macos_postinstall_bootstraps_agent_not_tunnel() {
         let path =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("packaging/macos/scripts/postinstall");
         let script = std::fs::read_to_string(path).expect("postinstall");
         assert!(script.contains("launchctl bootout system/com.ollama.node-agent"));
+        assert!(script.contains("launchctl bootout system/com.ollama.node-agent.tunnel"));
         assert!(script.contains("launchctl bootstrap system"));
+        assert!(!script.contains("com.ollama.node-agent.tunnel.plist"));
         assert!(!script.contains("brew"));
         assert!(!script.contains("Ollama.app"));
         assert!(!script.to_lowercase().contains("ollama.com"));

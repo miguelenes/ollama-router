@@ -11,15 +11,20 @@ ARCH=$2
 VERSION=$3
 OUTDIR=$4
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CANONICAL_PLIST="$SCRIPT_DIR/com.ollama.node-agent.plist"
+CANONICAL_AGENT_PLIST="$SCRIPT_DIR/com.ollama.node-agent.plist"
+CANONICAL_TUNNEL_PLIST="$SCRIPT_DIR/com.ollama.node-agent.tunnel.plist"
 CONFIG="$SCRIPT_DIR/config.yaml"
 
 if [[ ! -f "$BINARY" ]]; then
   echo "missing binary: $BINARY" >&2
   exit 1
 fi
-if [[ ! -f "$CANONICAL_PLIST" ]]; then
-  echo "missing plist: $CANONICAL_PLIST" >&2
+if [[ ! -f "$CANONICAL_AGENT_PLIST" ]]; then
+  echo "missing plist: $CANONICAL_AGENT_PLIST" >&2
+  exit 1
+fi
+if [[ ! -f "$CANONICAL_TUNNEL_PLIST" ]]; then
+  echo "missing plist: $CANONICAL_TUNNEL_PLIST" >&2
   exit 1
 fi
 if [[ ! -f "$CONFIG" ]]; then
@@ -40,11 +45,14 @@ chmod 755 "$root/usr/local/bin/ollama-node-agent"
 strip "$root/usr/local/bin/ollama-node-agent"
 chmod 755 "$root/usr/local/bin/ollama-node-agent"
 
-cp "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"
-cp "$SCRIPT_DIR/com.ollama.node-agent.tunnel.plist" \
-  "$root/Library/LaunchDaemons/com.ollama.node-agent.tunnel.plist"
-if ! cmp -s "$CANONICAL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"; then
-  echo "staged plist drifted from $CANONICAL_PLIST" >&2
+"$BINARY" setup --print-plist > "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"
+"$BINARY" setup --print-tunnel-plist > "$root/Library/LaunchDaemons/com.ollama.node-agent.tunnel.plist"
+if ! cmp -s "$CANONICAL_AGENT_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.plist"; then
+  echo "agent plist from setup --print-plist drifted from $CANONICAL_AGENT_PLIST" >&2
+  exit 1
+fi
+if ! cmp -s "$CANONICAL_TUNNEL_PLIST" "$root/Library/LaunchDaemons/com.ollama.node-agent.tunnel.plist"; then
+  echo "tunnel plist from setup --print-tunnel-plist drifted from $CANONICAL_TUNNEL_PLIST" >&2
   exit 1
 fi
 cp "$CONFIG" "$root/Library/Application Support/ollama-node-agent/config.yaml"

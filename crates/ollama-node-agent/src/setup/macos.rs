@@ -6,10 +6,11 @@ use std::path::Path;
 use tokio::process::Command;
 
 use super::{
-    install_self_binary, tunnel, write_bytes_idempotent, write_token_file, ConvergeState,
-    SetupContext, SUPERVISOR_LAUNCHD,
+    agent_plist_text, install_self_binary, privileged_io, tunnel, write_bytes_idempotent,
+    write_token_file, ConvergeState, SetupContext, SUPERVISOR_LAUNCHD,
 };
 use crate::collect::{ollama_tags_ok, ollama_version};
+use crate::time_util::now_rfc3339;
 
 pub async fn converge(
     ctx: &SetupContext<'_>,
@@ -29,8 +30,9 @@ pub async fn converge(
         tracing::info!("dry-run: skip brew/pkg install");
     } else {
         install_ollama_macos().await?;
-        state.ollama_installed = ollama_version().await.is_some();
-        state.ollama_version = ollama_version().await;
+        let version = ollama_version().await;
+        state.ollama_installed = version.is_some();
+        state.ollama_version = version;
     }
 
     write_token_file(&ctx.paths.token_file, ctx.config.bearer_token())?;
@@ -41,7 +43,7 @@ pub async fn converge(
     )?;
 
     let plist_path = ctx.paths.unit_dir.join("com.ollama.node-agent.plist");
-    write_bytes_idempotent(&plist_path, agent_plist().as_bytes())?;
+    write_bytes_idempotent(&plist_path, agent_plist_text().as_bytes())?;
     state.unit_written = true;
     state.supervisor = Some(SUPERVISOR_LAUNCHD.into());
     let tunnel_plist_path = ctx
@@ -96,6 +98,13 @@ pub async fn converge(
         }
         if ctx.config.tunnel.enable {
             let status = Command::new("launchctl")
+                .args(["enable", "system/com.ollama.node-agent.tunnel"])
+                .status()
+                .await?;
+            if !status.success() {
+                tracing::warn!("launchctl enable tunnel failed; LaunchDaemon may need root");
+            }
+            let status = Command::new("launchctl")
                 .args([
                     "bootstrap",
                     "system",
@@ -123,7 +132,7 @@ fn write_macos_env(
     extra: &std::collections::BTreeMap<String, String>,
 ) -> anyhow::Result<()> {
     let dir = Path::new("/Library/Application Support/Ollama");
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir).map_err(privileged_io)?;
     let env_path = dir.join("env");
     let mut body = format!("OLLAMA_HOST={bind}\n");
     if let Some(models) = models_dir.filter(|d| !d.is_empty()) {
@@ -135,12 +144,13 @@ fn write_macos_env(
         }
         body.push_str(&format!("{k}={v}\n"));
     }
-    let _ = std::fs::write(env_path, body);
+    write_bytes_idempotent(&env_path, body.as_bytes()).map_err(|err| {
+        anyhow::anyhow!(
+            "failed to write Ollama env file {}: {err}",
+            env_path.display()
+        )
+    })?;
     Ok(())
-}
-
-fn agent_plist() -> &'static str {
-    include_str!("../../packaging/macos/com.ollama.node-agent.plist")
 }
 
 async fn install_ollama_macos() -> anyhow::Result<()> {
@@ -161,19 +171,13 @@ async fn install_ollama_macos() -> anyhow::Result<()> {
     anyhow::bail!("install Ollama.app or `brew install ollama`, then re-run setup")
 }
 
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn plist_contains_label() {
-        let p = agent_plist();
+        let p = agent_plist_text();
         assert!(p.contains("com.ollama.node-agent"));
         assert!(p.contains("/usr/local/bin/ollama-node-agent"));
         assert!(p.contains("<key>KeepAlive</key>"));
@@ -183,5 +187,6 @@ mod tests {
         assert!(t.contains("com.ollama.node-agent.tunnel"));
         assert!(t.contains("tunnel"));
         assert!(t.contains("HOME"));
+        assert!(t.contains("<key>Disabled</key>"));
     }
 }

@@ -70,7 +70,7 @@ fn refresh_gauges_exports_ram_util_and_known_flags() {
     registry.apply_capacity_report(&nid("gpu"), &report, Some(PressureLevel::Ok));
 
     let metrics = Metrics::new().expect("metrics");
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
     assert!(body.contains("ollama_router_node_vram_free_known{node=\"gpu\"} 1"));
     assert!(body.contains("ollama_router_node_vram_free_gb{node=\"gpu\"} 0"));
@@ -102,7 +102,7 @@ fn refresh_gauges_unknown_free_is_known_zero() {
     };
     registry.apply_capacity_report(&nid("cpu"), &report, None);
     let metrics = Metrics::new().expect("metrics");
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
     assert!(body.contains("ollama_router_node_vram_free_known{node=\"cpu\"} 0"));
     assert!(body.contains("ollama_router_node_gpu_util_known{node=\"cpu\"} 0"));
@@ -141,7 +141,7 @@ fn refresh_gauges_tunnel_up_when_zrok_enroll() {
         ..Default::default()
     });
     let metrics = Metrics::new().expect("metrics");
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
     assert!(
         body.contains("ollama_router_tunnel_up{node=\"gpu\"} 1"),
@@ -196,7 +196,7 @@ fn refresh_gauges_uses_snapshot_when_lock_held_and_disk_unreadable() {
     });
     let metrics = Metrics::new().expect("metrics");
     let start = Instant::now();
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     assert!(
         start.elapsed() < Duration::from_millis(200),
         "scrape blocked on flock: {:?}",
@@ -223,14 +223,14 @@ fn refresh_gauges_draining_includes_cordoned() {
     });
     assert!(registry.set_cordoned(&nid("gpu"), true));
     let metrics = Metrics::new().expect("metrics");
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
     assert!(
         body.contains("ollama_router_node_draining{node=\"gpu\"} 1"),
         "{body}"
     );
     assert!(registry.set_cordoned(&nid("gpu"), false));
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
     assert!(
         body.contains("ollama_router_node_draining{node=\"gpu\"} 0"),
@@ -301,10 +301,12 @@ fn cloud_metrics_attribute_per_provider() {
     });
 
     let metrics = Metrics::new().expect("metrics");
-    metrics.cloud_event("verda", "create");
-    metrics.cloud_event("runpod", "create");
-    metrics.cloud_event("verda", "destroy");
-    metrics.refresh_gauges(&registry, &fleet_state);
+    metrics.cloud_event("verda", "create", None);
+    metrics.cloud_event("runpod", "create", None);
+    metrics.cloud_event("verda", "destroy", None);
+    metrics.cloud_event("verda", "demand", Some("insufficient_capacity"));
+    metrics.cloud_event("verda", "ensure_failed", Some("provision_failed"));
+    metrics.refresh_gauges(&registry, &fleet_state, None);
     let body = metrics.encode_text().expect("encode");
 
     assert!(
@@ -326,25 +328,40 @@ fn cloud_metrics_attribute_per_provider() {
         "{body}"
     );
     assert!(
-        body.contains("ollama_router_cloud_events_total{event=\"create\",provider=\"verda\"} 1")
-            || body.contains(
-                "ollama_router_cloud_events_total{provider=\"verda\",event=\"create\"} 1"
-            ),
+        body.contains(
+            "ollama_router_cloud_events_total{event=\"create\",provider=\"verda\",reason=\"\"} 1"
+        ) || body.contains(
+            "ollama_router_cloud_events_total{provider=\"verda\",event=\"create\",reason=\"\"} 1"
+        ),
         "{body}"
     );
     assert!(
-        body.contains("ollama_router_cloud_events_total{event=\"create\",provider=\"runpod\"} 1")
-            || body.contains(
-                "ollama_router_cloud_events_total{provider=\"runpod\",event=\"create\"} 1"
-            ),
+        body.contains(
+            "ollama_router_cloud_events_total{event=\"create\",provider=\"runpod\",reason=\"\"} 1"
+        ) || body.contains(
+            "ollama_router_cloud_events_total{provider=\"runpod\",event=\"create\",reason=\"\"} 1"
+        ),
         "{body}"
     );
     assert!(
-        body.contains("ollama_router_cloud_events_total{event=\"destroy\",provider=\"verda\"} 1")
-            || body.contains(
-                "ollama_router_cloud_events_total{provider=\"verda\",event=\"destroy\"} 1"
-            ),
+        body.contains(
+            "ollama_router_cloud_events_total{event=\"destroy\",provider=\"verda\",reason=\"\"} 1"
+        ) || body.contains(
+            "ollama_router_cloud_events_total{provider=\"verda\",event=\"destroy\",reason=\"\"} 1"
+        ),
         "{body}"
+    );
+    assert!(
+        body.contains("reason=\"insufficient_capacity\"")
+            && body.contains("event=\"demand\"")
+            && body.contains("provider=\"verda\""),
+        "demand must carry route reason label: {body}"
+    );
+    assert!(
+        body.contains("event=\"ensure_failed\"")
+            && body.contains("provider=\"verda\"")
+            && body.contains("reason=\"provision_failed\""),
+        "ensure_failed must carry failure-class reason: {body}"
     );
     assert!(
         body.contains("origin=\"runpod\"") && body.contains("ollama_router_node_info{"),
@@ -353,5 +370,53 @@ fn cloud_metrics_attribute_per_provider() {
     assert!(
         !body.contains("ollama_router_verda_"),
         "legacy verda series must be gone: {body}"
+    );
+}
+
+#[test]
+fn jobs_running_and_upstream_pool_gauges() {
+    use ollama_router_core::jobs::{JobKind, JobObserver, JobStatus};
+
+    let metrics = Metrics::new().expect("metrics");
+    metrics.job_started(JobKind::Pull);
+    metrics.refresh_gauges(
+        &Registry::new(&RouterConfig::default()),
+        &FleetState::new(tempfile::tempdir().expect("tmp").path().join("state.json")),
+        Some(7),
+    );
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_jobs_running{kind=\"pull\"} 1"),
+        "{body}"
+    );
+    assert!(
+        body.contains("ollama_router_upstream_pool_available 7"),
+        "{body}"
+    );
+    metrics.job_terminal(JobKind::Pull, JobStatus::Success);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_jobs_running{kind=\"pull\"} 0"),
+        "{body}"
+    );
+}
+
+#[test]
+fn node_info_reports_adopt_origin_without_cloud_instance_gauge() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let fleet_state = FleetState::new(dir.path().join("state.json"));
+    let registry = Registry::new(&RouterConfig::default());
+    registry.upsert_adopt(node("desk-adopt", 8.0, 1));
+
+    let metrics = Metrics::new().expect("metrics");
+    metrics.refresh_gauges(&registry, &fleet_state, None);
+    let body = metrics.encode_text().expect("encode");
+    assert!(
+        body.contains("ollama_router_node_info{node=\"desk-adopt\",origin=\"adopt\""),
+        "node_info must export adopt origin: {body}"
+    );
+    assert!(
+        !body.contains("ollama_router_cloud_instances{provider=\"verda\"} 1"),
+        "adopt must not count as verda cloud instance: {body}"
     );
 }

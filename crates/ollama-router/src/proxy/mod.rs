@@ -55,10 +55,13 @@ const AUTO_PULL_POLL: Duration = Duration::from_millis(250);
 
 /// Catch-all Ollama-compatible reverse proxy.
 pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
+    let start = Instant::now();
     let method = req.method().clone();
     let path = req.uri().path().to_string();
     let query = req.uri().query().map(str::to_string);
     let clean = path.trim_end_matches('/');
+    let policy = &state.config.policy;
+    let local_class = |model: Option<&str>| classify_with_size_hint(&path, model, policy, None);
 
     if clean == "/api/tags" && method == Method::GET {
         return aggregated_tags(state);
@@ -74,14 +77,57 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     }
     if method == Method::GET {
         if let Some(id) = openai_model_id(clean) {
-            return openai_model_by_id(state, id);
+            return openai_model_by_id(state, id, start);
         }
     }
-    if uses_openai_error_shape(clean) && !is_supported_openai_path(&method, clean) {
-        return openai_unknown_path(clean);
-    }
+    // Precedence: 501 mutate/blobs (any method) → OpenAI 501 mutations →
+    // known-path wrong-method 405 → unknown /api/* or /v1/* 404.
     if is_unsupported_mutate(clean) {
-        return unsupported_fleet_mutate(clean);
+        return observe_local(
+            state,
+            clean,
+            local_class(None),
+            start,
+            unsupported_fleet_mutate(clean),
+            Some("unsupported_fleet_mutate"),
+            None,
+        );
+    }
+    if is_unsupported_openai_mutate(&method, clean) {
+        return observe_local(
+            state,
+            clean,
+            local_class(None),
+            start,
+            unsupported_openai_mutate(clean),
+            Some("unsupported_openai_mutate"),
+            None,
+        );
+    }
+    match path_method_decision(&method, clean) {
+        PathDecision::Proceed => {}
+        PathDecision::MethodNotAllowed => {
+            return observe_local(
+                state,
+                clean,
+                local_class(None),
+                start,
+                method_not_allowed(clean),
+                Some("method_not_allowed"),
+                None,
+            );
+        }
+        PathDecision::NotFound => {
+            return observe_local(
+                state,
+                clean,
+                local_class(None),
+                start,
+                unknown_compat_path(clean),
+                Some("unknown_compat_path"),
+                None,
+            );
+        }
     }
 
     let (parts, incoming_body) = req.into_parts();
@@ -108,40 +154,66 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
                 body = bytes;
             }
             Err(BodyCapError::InvalidContentLength) => {
-                return router_error(
+                return observe_local(
+                    state,
                     &path,
-                    StatusCode::BAD_REQUEST,
-                    "ollama-router: invalid Content-Length",
-                    "invalid_content_length",
-                    None,
+                    local_class(model.as_deref()),
+                    start,
+                    router_error(
+                        &path,
+                        StatusCode::BAD_REQUEST,
+                        "ollama-router: invalid Content-Length",
+                        "invalid_content_length",
+                        None,
+                    ),
+                    Some("invalid_content_length"),
+                    model.as_deref(),
                 );
             }
             Err(BodyCapError::TooLarge) => {
-                if uses_openai_error_shape(&path) {
-                    return router_error(
+                let response = if uses_openai_error_shape(&path) {
+                    router_error(
                         &path,
                         StatusCode::PAYLOAD_TOO_LARGE,
                         "ollama-router: request body exceeds configured limit",
                         "payload_too_large",
                         None,
-                    );
-                }
-                return json_error(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    json!({
-                        "error": "ollama-router: request body exceeds configured limit",
-                        "max_request_body_bytes": state.config.policy.max_request_body_bytes,
-                    }),
-                    None,
+                    )
+                } else {
+                    json_error(
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        json!({
+                            "error": "ollama-router: request body exceeds configured limit",
+                            "max_request_body_bytes": state.config.policy.max_request_body_bytes,
+                        }),
+                        None,
+                    )
+                };
+                return observe_local(
+                    state,
+                    &path,
+                    local_class(model.as_deref()),
+                    start,
+                    response,
+                    Some("payload_too_large"),
+                    model.as_deref(),
                 );
             }
             Err(BodyCapError::Interrupted) => {
-                return router_error(
+                return observe_local(
+                    state,
                     &path,
-                    StatusCode::BAD_REQUEST,
-                    "ollama-router: request body interrupted",
-                    "body_interrupted",
-                    None,
+                    local_class(model.as_deref()),
+                    start,
+                    router_error(
+                        &path,
+                        StatusCode::BAD_REQUEST,
+                        "ollama-router: request body interrupted",
+                        "body_interrupted",
+                        None,
+                    ),
+                    Some("body_interrupted"),
+                    model.as_deref(),
                 );
             }
         }
@@ -152,6 +224,17 @@ pub async fn handle(state: &AppState, req: Request<Body>) -> Response {
     }
     if clean == "/api/delete" && method == Method::DELETE {
         return fleet_delete(state, model.as_deref()).await;
+    }
+    // Literal stop: same fleet-unload fan-out as unload-intent generate/chat.
+    // Upstream Ollama speaks generate unload (`keep_alive: 0`), not `/api/stop`.
+    if clean == "/api/stop" && method == Method::POST {
+        let unload_body = match model.as_deref().filter(|m| !m.is_empty()) {
+            Some(m) => Bytes::from(
+                serde_json::to_vec(&json!({"model": m, "keep_alive": 0})).unwrap_or_default(),
+            ),
+            None => Bytes::new(),
+        };
+        return fleet_unload(state, "/api/generate", model.as_deref(), &unload_body).await;
     }
     if method == Method::POST
         && matches!(clean, "/api/generate" | "/api/chat")
@@ -282,25 +365,19 @@ async fn proxy_ranked(state: &AppState, call: ProxyCall<'_>) -> Response {
     }
     if !outcome.ok() {
         let reason = outcome.reason.unwrap_or(RoutingError::NoHealthy);
-        tracing::warn!(
-            path,
-            request_class = %request_class,
-            model = model.unwrap_or(""),
-            reason = reason.as_reason_code(),
-            "route_rejected"
-        );
         if reason.requests_demand_scale_up() {
             DemandScale::request_scale_up(state.demand.as_ref(), reason);
         }
-        state.metrics.route_reason(reason.as_reason_code());
         let response = no_candidate_response(path, reason, model, request_class, policy);
-        state.metrics.observe_request(
-            request_class.as_str(),
-            response.status().as_u16(),
-            "-",
-            start.elapsed(),
+        return observe_local(
+            state,
+            path,
+            request_class,
+            start,
+            response,
+            Some(reason.as_reason_code()),
+            model,
         );
-        return response;
     }
 
     let mut ranked = outcome.ranked;
@@ -578,6 +655,7 @@ async fn forward_once(
     tracing::debug!(
         path = call.path,
         request_class = %call.request_class,
+        model = call.model.as_deref().unwrap_or(""),
         node = %node.id,
         status = status.as_u16(),
         "route"
@@ -917,10 +995,20 @@ fn parse_go_duration_seconds(raw: &str) -> Option<f64> {
 
 /// Fan-out unload to every healthy loaded holder (cordoned included; inventory draining excluded).
 async fn fleet_unload(state: &AppState, path: &str, model: Option<&str>, body: &Bytes) -> Response {
+    let start = Instant::now();
+    let request_class = RequestClass::Generic;
     let Some(model) = model.filter(|m| !m.is_empty()) else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            json!({"error": "model is required"}),
+        return observe_local(
+            state,
+            path,
+            request_class,
+            start,
+            json_error(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "model is required"}),
+                None,
+            ),
+            Some("model_required"),
             None,
         );
     };
@@ -932,7 +1020,15 @@ async fn fleet_unload(state: &AppState, path: &str, model: Option<&str>, body: &
         .collect();
 
     if targets.is_empty() {
-        return unload_success(model);
+        return observe_local(
+            state,
+            path,
+            request_class,
+            start,
+            unload_success(model),
+            None,
+            Some(model),
+        );
     }
 
     let timeout = class_timeout(&state.config.timeouts, RequestClass::Generic);
@@ -982,15 +1078,31 @@ async fn fleet_unload(state: &AppState, path: &str, model: Option<&str>, body: &
     }
 
     if any_failed {
-        return router_error(
+        return observe_local(
+            state,
             path,
-            StatusCode::BAD_GATEWAY,
-            "ollama-router: fleet unload failed on one or more nodes",
-            "unload_failed",
-            None,
+            request_class,
+            start,
+            router_error(
+                path,
+                StatusCode::BAD_GATEWAY,
+                "ollama-router: fleet unload failed on one or more nodes",
+                "unload_failed",
+                None,
+            ),
+            Some("unload_failed"),
+            Some(model),
         );
     }
-    unload_success(model)
+    observe_local(
+        state,
+        path,
+        request_class,
+        start,
+        unload_success(model),
+        None,
+        Some(model),
+    )
 }
 
 fn unload_success(model: &str) -> Response {
@@ -1196,10 +1308,20 @@ fn aggregated_openai_models(state: &AppState) -> Response {
 }
 
 async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
+    let start = Instant::now();
+    let request_class = RequestClass::Pull;
     let Some(model) = model.filter(|m| !m.is_empty()) else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            json!({"error": "model is required"}),
+        return observe_local(
+            state,
+            "/api/pull",
+            request_class,
+            start,
+            json_error(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "model is required"}),
+                None,
+            ),
+            Some("model_required"),
             None,
         );
     };
@@ -1210,29 +1332,53 @@ async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
     {
         Ok(job) => job,
         Err(OrchestratorError::NoPlacementTargets) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({
-                    "error": format!(
-                        "ollama-router: no placement-eligible target nodes for the requested models (model: {model}) [reason: {}]",
-                        RoutingError::Capacity.as_reason_code()
-                    )
-                }),
-                Some(state.config.policy.provision_retry_after_seconds),
+            return observe_local(
+                state,
+                "/api/pull",
+                request_class,
+                start,
+                json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({
+                        "error": format!(
+                            "ollama-router: no placement-eligible target nodes for the requested models (model: {model}) [reason: {}]",
+                            RoutingError::Capacity.as_reason_code()
+                        )
+                    }),
+                    Some(state.config.policy.provision_retry_after_seconds),
+                ),
+                Some(RoutingError::Capacity.as_reason_code()),
+                Some(model),
             );
         }
         Err(OrchestratorError::NotConfigured) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({"error": "ollama-router: job orchestrator is not configured"}),
-                Some(state.config.policy.provision_retry_after_seconds),
+            return observe_local(
+                state,
+                "/api/pull",
+                request_class,
+                start,
+                json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": "ollama-router: job orchestrator is not configured"}),
+                    Some(state.config.policy.provision_retry_after_seconds),
+                ),
+                Some(RoutingError::NoNodes.as_reason_code()),
+                Some(model),
             );
         }
         Err(other) => {
-            return json_error(
-                StatusCode::BAD_GATEWAY,
-                json!({"error": format!("ollama-router: {other}")}),
-                None,
+            return observe_local(
+                state,
+                "/api/pull",
+                request_class,
+                start,
+                json_error(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"error": format!("ollama-router: {other}")}),
+                    None,
+                ),
+                Some("orchestrator_error"),
+                Some(model),
             );
         }
     };
@@ -1243,7 +1389,15 @@ async fn fleet_pull(state: &AppState, model: Option<&str>) -> Response {
         .get_job(&job.id)
         .unwrap_or_else(|| job.clone());
     let stream = job_ndjson_stream(watch_rx, snapshot, model.to_string(), "pulling", "pull");
-    ndjson_stream_response(stream)
+    observe_local(
+        state,
+        "/api/pull",
+        request_class,
+        start,
+        ndjson_stream_response(stream),
+        None,
+        Some(model),
+    )
 }
 
 fn job_ndjson_stream(
@@ -1354,10 +1508,20 @@ fn job_progress_line(job: &Job, status: &str) -> Value {
 }
 
 async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
+    let start = Instant::now();
+    let request_class = RequestClass::Generic;
     let Some(model) = model.filter(|m| !m.is_empty()) else {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            json!({"error": "model is required"}),
+        return observe_local(
+            state,
+            "/api/delete",
+            request_class,
+            start,
+            json_error(
+                StatusCode::BAD_REQUEST,
+                json!({"error": "model is required"}),
+                None,
+            ),
+            Some("model_required"),
             None,
         );
     };
@@ -1368,20 +1532,44 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
     {
         Ok(job) => job,
         Err(OrchestratorError::NoTargetNodes) => {
-            return ndjson_stream_response(immediate_success_ndjson_stream());
+            return observe_local(
+                state,
+                "/api/delete",
+                request_class,
+                start,
+                ndjson_stream_response(immediate_success_ndjson_stream()),
+                None,
+                Some(model),
+            );
         }
         Err(OrchestratorError::NotConfigured) => {
-            return json_error(
-                StatusCode::SERVICE_UNAVAILABLE,
-                json!({"error": "ollama-router: job orchestrator is not configured"}),
-                Some(state.config.policy.provision_retry_after_seconds),
+            return observe_local(
+                state,
+                "/api/delete",
+                request_class,
+                start,
+                json_error(
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    json!({"error": "ollama-router: job orchestrator is not configured"}),
+                    Some(state.config.policy.provision_retry_after_seconds),
+                ),
+                Some(RoutingError::NoNodes.as_reason_code()),
+                Some(model),
             );
         }
         Err(other) => {
-            return json_error(
-                StatusCode::BAD_GATEWAY,
-                json!({"error": format!("ollama-router: {other}")}),
-                None,
+            return observe_local(
+                state,
+                "/api/delete",
+                request_class,
+                start,
+                json_error(
+                    StatusCode::BAD_GATEWAY,
+                    json!({"error": format!("ollama-router: {other}")}),
+                    None,
+                ),
+                Some("orchestrator_error"),
+                Some(model),
             );
         }
     };
@@ -1392,7 +1580,15 @@ async fn fleet_delete(state: &AppState, model: Option<&str>) -> Response {
         .get_job(&job.id)
         .unwrap_or_else(|| job.clone());
     let stream = job_ndjson_stream(watch_rx, snapshot, model.to_string(), "deleting", "delete");
-    ndjson_stream_response(stream)
+    observe_local(
+        state,
+        "/api/delete",
+        request_class,
+        start,
+        ndjson_stream_response(stream),
+        None,
+        Some(model),
+    )
 }
 
 enum AutoPullResult {
@@ -1418,19 +1614,51 @@ impl Drop for WaitMetricGuard {
     }
 }
 
-fn observe_reject(
+fn observe_local(
     state: &AppState,
+    path: &str,
     request_class: RequestClass,
     start: Instant,
     response: Response,
+    reason: Option<&str>,
+    model: Option<&str>,
 ) -> Response {
-    state.metrics.observe_request(
-        request_class.as_str(),
-        response.status().as_u16(),
-        "-",
-        start.elapsed(),
-    );
+    let status = response.status().as_u16();
+    state
+        .metrics
+        .observe_request(request_class.as_str(), status, "-", start.elapsed());
+    if let Some(reason) = reason {
+        state.metrics.route_reason(reason);
+        tracing::warn!(
+            path,
+            request_class = %request_class,
+            model = model.unwrap_or(""),
+            status,
+            reason,
+            "route_rejected"
+        );
+    }
     response
+}
+
+fn observe_reject(
+    state: &AppState,
+    path: &str,
+    request_class: RequestClass,
+    start: Instant,
+    response: Response,
+    reason: &str,
+    model: Option<&str>,
+) -> Response {
+    observe_local(
+        state,
+        path,
+        request_class,
+        start,
+        response,
+        Some(reason),
+        model,
+    )
 }
 
 fn pull_enqueued_response(
@@ -1486,9 +1714,6 @@ async fn auto_pull_on_miss(
             "auto_pull_no_capacity"
         );
         DemandScale::request_scale_up(state.demand.as_ref(), RoutingError::Capacity);
-        state
-            .metrics
-            .route_reason(RoutingError::Capacity.as_reason_code());
         let response = no_candidate_response(
             path,
             RoutingError::Capacity,
@@ -1496,7 +1721,15 @@ async fn auto_pull_on_miss(
             request_class,
             policy,
         );
-        return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        return AutoPullResult::Done(observe_reject(
+            state,
+            path,
+            request_class,
+            start,
+            response,
+            RoutingError::Capacity.as_reason_code(),
+            Some(model),
+        ));
     }
 
     let job = match state
@@ -1506,16 +1739,6 @@ async fn auto_pull_on_miss(
     {
         Ok(job) => job,
         Err(_) => {
-            tracing::warn!(
-                path,
-                request_class = %request_class,
-                model,
-                reason = RoutingError::ModelMissing.as_reason_code(),
-                "route_rejected"
-            );
-            state
-                .metrics
-                .route_reason(RoutingError::ModelMissing.as_reason_code());
             let response = no_candidate_response(
                 path,
                 RoutingError::ModelMissing,
@@ -1523,7 +1746,15 @@ async fn auto_pull_on_miss(
                 request_class,
                 policy,
             );
-            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+            return AutoPullResult::Done(observe_reject(
+                state,
+                path,
+                request_class,
+                start,
+                response,
+                RoutingError::ModelMissing.as_reason_code(),
+                Some(model),
+            ));
         }
     };
 
@@ -1536,13 +1767,19 @@ async fn auto_pull_on_miss(
         nodes = ?node_ids,
         "pull_enqueued"
     );
-    state.metrics.route_reason("pull_enqueued");
-
     let retry_after = policy.pull_miss_retry_after_seconds;
     let wait = policy.auto_pull_wait_seconds;
     if wait <= 0.0 {
         let response = pull_enqueued_response(path, model, &job.id, &eligible, retry_after);
-        return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+        return AutoPullResult::Done(observe_reject(
+            state,
+            path,
+            request_class,
+            start,
+            response,
+            "pull_enqueued",
+            Some(model),
+        ));
     }
 
     wait_for_pull(
@@ -1592,7 +1829,15 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
         if Instant::now() >= deadline {
             guard.record("timeout");
             let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
-            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+            return AutoPullResult::Done(observe_reject(
+                state,
+                path,
+                request_class,
+                start,
+                response,
+                "pull_enqueued",
+                Some(model),
+            ));
         }
 
         let snap = state.registry.snapshot();
@@ -1617,7 +1862,15 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
             }
             guard.record("pull_finished");
             let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
-            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+            return AutoPullResult::Done(observe_reject(
+                state,
+                path,
+                request_class,
+                start,
+                response,
+                "pull_enqueued",
+                Some(model),
+            ));
         }
 
         if state
@@ -1627,7 +1880,15 @@ async fn wait_for_pull(state: &AppState, wait: PullWait<'_>) -> AutoPullResult {
         {
             guard.record("pull_finished");
             let response = pull_enqueued_response(path, model, &job_id, eligible, retry_after);
-            return AutoPullResult::Done(observe_reject(state, request_class, start, response));
+            return AutoPullResult::Done(observe_reject(
+                state,
+                path,
+                request_class,
+                start,
+                response,
+                "pull_enqueued",
+                Some(model),
+            ));
         }
 
         tokio::time::sleep(AUTO_PULL_POLL).await;
@@ -1684,13 +1945,43 @@ fn uses_openai_error_shape(path: &str) -> bool {
     p == "/v1" || p.starts_with("/v1/")
 }
 
-fn is_supported_openai_path(method: &Method, path: &str) -> bool {
+/// Known-path × allowed-method table for `/api/*` and `/v1/*`.
+/// Mutate/blobs and OpenAI mutation 501s are handled before this is consulted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PathDecision {
+    Proceed,
+    MethodNotAllowed,
+    NotFound,
+}
+
+fn path_method_decision(method: &Method, path: &str) -> PathDecision {
     let p = path.trim_end_matches('/');
-    match (method, p) {
-        (&Method::GET, "/v1/models") => true,
-        (&Method::GET, rest) if openai_model_id(rest).is_some() => true,
-        (&Method::POST, "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings") => true,
-        _ => false,
+    let under_api = p == "/api" || p.starts_with("/api/");
+    let under_v1 = p == "/v1" || p.starts_with("/v1/");
+    if !under_api && !under_v1 {
+        return PathDecision::Proceed;
+    }
+    match known_compat_methods(p) {
+        Some(allowed) if allowed.iter().any(|m| m == method) => PathDecision::Proceed,
+        Some(_) => PathDecision::MethodNotAllowed,
+        None => PathDecision::NotFound,
+    }
+}
+
+fn known_compat_methods(path: &str) -> Option<&'static [Method]> {
+    if openai_model_id(path).is_some() {
+        return Some(&[Method::GET]);
+    }
+    match path {
+        "/api/tags" | "/api/ps" | "/api/version" => Some(&[Method::GET]),
+        "/api/generate" | "/api/chat" | "/api/embed" | "/api/embeddings" | "/api/show"
+        | "/api/pull" | "/api/stop" | "/api/push" | "/api/copy" | "/api/create" => {
+            Some(&[Method::POST])
+        }
+        "/api/delete" => Some(&[Method::DELETE]),
+        "/v1/models" => Some(&[Method::GET]),
+        "/v1/chat/completions" | "/v1/completions" | "/v1/embeddings" => Some(&[Method::POST]),
+        _ => None,
     }
 }
 
@@ -1703,9 +1994,20 @@ fn is_unsupported_mutate(path: &str) -> bool {
     matches!(p, "/api/push" | "/api/copy" | "/api/create") || p.starts_with("/api/blobs")
 }
 
+fn is_unsupported_openai_mutate(method: &Method, path: &str) -> bool {
+    let p = path.trim_end_matches('/');
+    if *method == Method::DELETE && openai_model_id(p).is_some() {
+        return true;
+    }
+    if *method == Method::POST && (p == "/v1/fine_tuning" || p.starts_with("/v1/fine_tuning/")) {
+        return true;
+    }
+    false
+}
+
 fn openai_error_type(status: StatusCode) -> &'static str {
     match status.as_u16() {
-        400 | 404 | 413 => "invalid_request_error",
+        400 | 404 | 405 | 413 => "invalid_request_error",
         _ => "server_error",
     }
 }
@@ -1738,14 +2040,34 @@ fn router_error(
     )
 }
 
-fn openai_unknown_path(path: &str) -> Response {
+fn method_not_allowed(path: &str) -> Response {
     router_error(
         path,
-        StatusCode::NOT_FOUND,
-        "ollama-router: unknown OpenAI-compatible path",
-        "unknown_path",
+        StatusCode::METHOD_NOT_ALLOWED,
+        "ollama-router: method not allowed",
+        "method_not_allowed",
         None,
     )
+}
+
+fn unknown_compat_path(path: &str) -> Response {
+    if uses_openai_error_shape(path) {
+        router_error(
+            path,
+            StatusCode::NOT_FOUND,
+            "ollama-router: unknown OpenAI-compatible path",
+            "unknown_path",
+            None,
+        )
+    } else {
+        router_error(
+            path,
+            StatusCode::NOT_FOUND,
+            "ollama-router: unknown path",
+            "unknown_path",
+            None,
+        )
+    }
 }
 
 fn unsupported_fleet_mutate(path: &str) -> Response {
@@ -1760,10 +2082,21 @@ fn unsupported_fleet_mutate(path: &str) -> Response {
     )
 }
 
+fn unsupported_openai_mutate(path: &str) -> Response {
+    router_error(
+        path,
+        StatusCode::NOT_IMPLEMENTED,
+        "ollama-router: operation is not a fleet operation",
+        "not_a_fleet_operation",
+        None,
+    )
+}
+
 /// Aggregated retrieve for `GET /v1/models/{id}`. Soft-fail/partial like the list.
-pub(crate) fn openai_model_by_id(state: &AppState, id: &str) -> Response {
+pub(crate) fn openai_model_by_id(state: &AppState, id: &str, start: Instant) -> Response {
     let decoded = percent_decode_path(id);
     let target = normalize_model(&decoded);
+    let request_class = RequestClass::Generic;
     let found = state
         .registry
         .aggregated_tags()
@@ -1772,14 +2105,30 @@ pub(crate) fn openai_model_by_id(state: &AppState, id: &str) -> Response {
     match found {
         Some(row) => {
             state.metrics.observe_discovery("openai_models");
-            json_error(StatusCode::OK, openai_model_json(&row), None)
+            observe_local(
+                state,
+                "/v1/models",
+                request_class,
+                start,
+                json_error(StatusCode::OK, openai_model_json(&row), None),
+                None,
+                Some(&decoded),
+            )
         }
-        None => router_error(
+        None => observe_local(
+            state,
             "/v1/models",
-            StatusCode::NOT_FOUND,
-            &format!("The model '{decoded}' does not exist"),
-            "model_not_found",
-            None,
+            request_class,
+            start,
+            router_error(
+                "/v1/models",
+                StatusCode::NOT_FOUND,
+                &format!("The model '{decoded}' does not exist"),
+                "model_not_found",
+                None,
+            ),
+            Some("model_not_found"),
+            Some(&decoded),
         ),
     }
 }
@@ -1824,6 +2173,74 @@ fn json_error(status: StatusCode, body: Value, retry_after: Option<u32>) -> Resp
 
 fn truncate(s: &str, max: usize) -> String {
     s.chars().take(max).collect()
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    use ollama_router_core::config::RouterConfig;
+    use tracing::Subscriber;
+    use tracing_subscriber::layer::{Context, Layer};
+    use tracing_subscriber::prelude::*;
+    use tracing_subscriber::Registry;
+
+    struct Capture(Arc<Mutex<Vec<String>>>);
+
+    impl<S> Layer<S> for Capture
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            let mut msg = String::new();
+            let mut visitor = FieldVisitor(&mut msg);
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap()
+                .push(format!("{} {}", event.metadata().name(), msg));
+        }
+    }
+
+    struct FieldVisitor<'a>(&'a mut String);
+
+    impl tracing::field::Visit for FieldVisitor<'_> {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            self.0.push_str(&format!("{}=\"{}\"", field.name(), value));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if !self.0.is_empty() {
+                self.0.push(' ');
+            }
+            self.0.push_str(&format!("{}={:?}", field.name(), value));
+        }
+    }
+
+    #[test]
+    fn route_rejected_log_includes_model_and_reason() {
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Registry::default().with(Capture(logs.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            observe_local(
+                &crate::http::AppState::from_config(RouterConfig::default()).expect("state"),
+                "/api/generate",
+                RequestClass::Small,
+                Instant::now(),
+                json_error(StatusCode::SERVICE_UNAVAILABLE, json!({"error": "x"}), None),
+                Some("model_missing"),
+                Some("llama3.2:3b"),
+            );
+        });
+        let joined = logs.lock().unwrap().join(" ");
+        assert!(joined.contains("route_rejected"), "{joined}");
+        assert!(joined.contains("model=\"llama3.2:3b\""), "{joined}");
+        assert!(joined.contains("reason=\"model_missing\""), "{joined}");
+    }
 }
 
 #[cfg(test)]
@@ -1876,6 +2293,50 @@ mod unload_tests {
         assert!(!is_unload_intent(
             "/api/generate",
             br#"{"model":"m","keep_alive":"bogus"}"#
+        ));
+    }
+
+    #[test]
+    fn path_method_table_405_and_404() {
+        assert_eq!(
+            path_method_decision(&Method::POST, "/api/tags"),
+            PathDecision::MethodNotAllowed
+        );
+        assert_eq!(
+            path_method_decision(&Method::GET, "/v1/chat/completions"),
+            PathDecision::MethodNotAllowed
+        );
+        assert_eq!(
+            path_method_decision(&Method::GET, "/api/not-a-real-endpoint"),
+            PathDecision::NotFound
+        );
+        assert_eq!(
+            path_method_decision(&Method::POST, "/api/generate"),
+            PathDecision::Proceed
+        );
+        assert_eq!(
+            path_method_decision(&Method::POST, "/api/stop"),
+            PathDecision::Proceed
+        );
+    }
+
+    #[test]
+    fn openai_mutate_paths_are_detected() {
+        assert!(is_unsupported_openai_mutate(
+            &Method::DELETE,
+            "/v1/models/qwen3:8b"
+        ));
+        assert!(is_unsupported_openai_mutate(
+            &Method::POST,
+            "/v1/fine_tuning/jobs"
+        ));
+        assert!(!is_unsupported_openai_mutate(
+            &Method::GET,
+            "/v1/models/qwen3:8b"
+        ));
+        assert!(!is_unsupported_openai_mutate(
+            &Method::POST,
+            "/v1/chat/completions"
         ));
     }
 }

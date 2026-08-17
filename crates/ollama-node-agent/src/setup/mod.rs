@@ -26,9 +26,9 @@ pub fn agent_unit_text() -> &'static str {
     include_str!("../../packaging/linux/ollama-node-agent.service")
 }
 
-/// Official Inno flags from ollama `scripts/install.ps1`.
-pub fn windows_silent_args() -> &'static [&'static str] {
-    &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"]
+/// Agent LaunchDaemon plist. Same bytes `setup` writes and the macOS pkg ships.
+pub fn agent_plist_text() -> &'static str {
+    include_str!("../../packaging/macos/com.ollama.node-agent.plist")
 }
 
 #[derive(Clone, Debug)]
@@ -244,14 +244,6 @@ mod tests {
         assert!(write_bytes_idempotent(&path, b"abc").unwrap());
         assert!(!write_bytes_idempotent(&path, b"abc").unwrap());
         assert!(write_bytes_idempotent(&path, b"abcd").unwrap());
-    }
-
-    #[test]
-    fn windows_silent_flags_documented() {
-        assert_eq!(
-            crate::setup::windows_silent_args(),
-            &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"]
-        );
     }
 
     #[test]

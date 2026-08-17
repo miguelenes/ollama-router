@@ -31,34 +31,9 @@ pub enum CollectError {
     Join(String),
 }
 
-pub use nvidia::{parse_nvidia_csv, parse_nvidia_fallback_csv, GpuInventory};
-pub use pressure::classify_pressure;
-pub use psi::parse_psi_some_avg10;
-pub use ram::ram_available_source;
-pub use rocm::{amd_smi_candidates, parse_rocm_csv, rocm_smi_candidates};
+pub use nvidia::GpuInventory;
 
 const COLLECT_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// GPU subprocess output (injected in tests).
-pub trait GpuProbe: Send + Sync {
-    fn nvidia_rich(&self) -> Option<String>;
-    fn nvidia_basic(&self) -> Option<String>;
-    fn rocm(&self) -> Option<String>;
-}
-
-pub struct LiveGpuProbe;
-
-impl GpuProbe for LiveGpuProbe {
-    fn nvidia_rich(&self) -> Option<String> {
-        None
-    }
-    fn nvidia_basic(&self) -> Option<String> {
-        None
-    }
-    fn rocm(&self) -> Option<String> {
-        None
-    }
-}
 
 /// Async live probe using `tokio::process::Command` + timeout.
 pub async fn probe_nvidia_rich() -> Option<String> {
@@ -370,8 +345,8 @@ pub fn collect_from_parts(cfg: &AgentConfig, parts: CollectParts) -> Snapshot {
     if parts.cpu_usage_pct.is_some() {
         pressure.cpu_usage_pct = parts.cpu_usage_pct;
     }
-    let level = classify_pressure(&pressure);
-    let now = rfc3339_now();
+    let level = pressure::classify_pressure(&pressure);
+    let now = crate::time_util::now_rfc3339();
     let os = std::env::consts::OS.to_string();
     let arch = std::env::consts::ARCH.to_string();
     let unified = (parts.backend == GpuBackend::Metal && ram_gb > 0.0).then_some(ram_gb);
@@ -482,12 +457,6 @@ fn read_cgroup_memory_limit_gb() -> Option<f64> {
     None
 }
 
-fn rfc3339_now() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
-}
-
 pub fn select_backend(policy: GpuPolicy, nvidia: bool, rocm: bool) -> GpuBackend {
     match policy {
         GpuPolicy::Cpu => GpuBackend::Cpu,
@@ -519,11 +488,11 @@ pub fn gpu_from_probes(
         GpuPolicy::Metal => (GpuInventory::default(), GpuBackend::Metal),
         GpuPolicy::Cuda | GpuPolicy::Auto | GpuPolicy::Rocm => {
             let nvidia_inv = nvidia_rich
-                .and_then(parse_nvidia_csv)
-                .or_else(|| nvidia_basic.and_then(parse_nvidia_fallback_csv))
+                .and_then(nvidia::parse_nvidia_csv)
+                .or_else(|| nvidia_basic.and_then(nvidia::parse_nvidia_fallback_csv))
                 .unwrap_or_default();
             let has_nvidia = nvidia_inv.gpus > 0;
-            let rocm_inv = rocm.and_then(parse_rocm_csv);
+            let rocm_inv = rocm.and_then(rocm::parse_rocm_csv);
             let has_rocm = rocm_inv.as_ref().is_some_and(|inv| inv.gpus > 0);
             let backend = select_backend(policy, has_nvidia, has_rocm);
             if backend == GpuBackend::Cuda {
@@ -678,21 +647,9 @@ mod tests {
     }
 
     #[test]
-    fn gpu_probe_trait_feeds_parser() {
-        struct MockNvidia(&'static str);
-        impl GpuProbe for MockNvidia {
-            fn nvidia_rich(&self) -> Option<String> {
-                Some(self.0.into())
-            }
-            fn nvidia_basic(&self) -> Option<String> {
-                None
-            }
-            fn rocm(&self) -> Option<String> {
-                None
-            }
-        }
-        let probe = MockNvidia("NVIDIA GeForce RTX 3070, 8192, 2304, 5888, 14, 28\n");
-        let inv = parse_nvidia_csv(&probe.nvidia_rich().unwrap()).unwrap();
+    fn nvidia_csv_parser_fixture() {
+        let csv = "NVIDIA GeForce RTX 3070, 8192, 2304, 5888, 14, 28\n";
+        let inv = nvidia::parse_nvidia_csv(csv).unwrap();
         assert!((inv.vram_gb - 8.0).abs() < 1e-9);
         assert_eq!(inv.gpus, 1);
     }

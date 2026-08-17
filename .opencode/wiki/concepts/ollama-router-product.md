@@ -8,7 +8,7 @@ sourceRefs:
   - crates/ollama-router-verda
   - crates/ollama-router-runpod
   - crates/ollama-router-core/src/jobs
-lastReviewed: 2026-08-16
+lastReviewed: 2026-08-17
 ---
 
 # ollama-router product surface
@@ -89,7 +89,7 @@ This product is an **honest fleet proxy**, not a fake single daemon:
 | Show (`POST /api/show`) | Forward only to a healthy holder; miss → 503 `model_missing` (GENERIC; not LARGE-gated) |
 | Version (`GET /api/version`) | Router-owned `{"version": "<router>"}` (same as `/healthz`), not a ranked Ollama build |
 | Infer (generate/chat/embed + OpenAI) | Rank among nodes that **already have** the model (holders-only WLC); sort key includes known CPU util after free VRAM |
-| Stop / unload | Unload-intent generate/chat (`keep_alive <= 0`, empty prompt/messages) fans out to every healthy loaded holder (incl. cordoned; excl. inventory `draining`); `done_reason: unload`; no `inflight_inc` |
+| Stop / unload | Literal `POST /api/stop` and unload-intent generate/chat (`keep_alive <= 0`, empty prompt/messages) fan out to every healthy loaded holder (incl. cordoned; excl. inventory `draining`); `done_reason: unload`; no `inflight_inc` |
 | Pull | Fleet **placement job** that streams NDJSON progress (`total`/`completed` from targets) — not a native Hub-pull through one node |
 | Miss | **503** `model_missing` (not native Hub 404/pull); `auto_pull_on_miss` default **false** |
 | create/copy/push/blobs | **501** `not_a_fleet_operation` |
@@ -131,8 +131,16 @@ passthrough to the ranked node's Ollama shim (same idle / reservation / class
 ranking as native inference). Size class may use catalog `details.parameter_size`
 when the name has no `:Nb` tag. `GET /v1/models` and `GET /v1/models/{id}` use the
 same union; `created` is Unix seconds from the winning `modified_at` when
-parseable, else `0`. Unknown `/v1/*` is 404. `POST /api/push`, `/api/copy`,
-`/api/create`, and `/api/blobs*` are rejected (`not_a_fleet_operation`).
+parseable, else `0`. Wrong method on a known `/api/*` or `/v1/*` path is **405**;
+unknown paths under those prefixes are **404** (Ollama vs OpenAI envelope).
+`DELETE /v1/models/{id}` and `POST /v1/fine_tuning/*` are **501** like native
+mutate. `POST /api/push`, `/api/copy`, `/api/create`, and `/api/blobs*` are
+rejected (`not_a_fleet_operation`) for every method.
+
+`GET /healthz` is process liveness (Docker HEALTHCHECK). `GET /readyz` is 503
+when there are no healthy non-draining nodes **or** every healthy node is
+saturated (unknown capacity errs toward can-serve); optional embedding-model
+gate is unchanged.
 
 Cloud instance tag `managed_by=ollama-router` (Verda). FleetState
 `managed_by=verda` / `managed_by=runpod` is the ownership discriminator.

@@ -33,6 +33,12 @@ pub enum Commands {
         /// Print the systemd unit (`agent_unit_text`) and exit. No filesystem writes.
         #[arg(long)]
         print_unit: bool,
+        /// Print the agent LaunchDaemon plist (`agent_plist_text`) and exit.
+        #[arg(long, hide = true)]
+        print_plist: bool,
+        /// Print the tunnel LaunchDaemon plist (`tunnel_plist`) and exit.
+        #[arg(long, hide = true)]
+        print_tunnel_plist: bool,
     },
     /// Unprivileged HTTP on :11436.
     Serve {
@@ -77,6 +83,30 @@ mod tests {
         let cli = Cli::try_parse_from(["ollama-node-agent", "setup", "--print-unit"]).unwrap();
         match cli.command {
             Commands::Setup { print_unit, .. } => assert!(print_unit),
+            other => panic!("expected setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_print_plist_parses() {
+        let cli = Cli::try_parse_from(["ollama-node-agent", "setup", "--print-plist"]).unwrap();
+        match cli.command {
+            Commands::Setup {
+                print_plist: true, ..
+            } => {}
+            other => panic!("expected setup, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn setup_print_tunnel_plist_parses() {
+        let cli =
+            Cli::try_parse_from(["ollama-node-agent", "setup", "--print-tunnel-plist"]).unwrap();
+        match cli.command {
+            Commands::Setup {
+                print_tunnel_plist: true,
+                ..
+            } => {}
             other => panic!("expected setup, got {other:?}"),
         }
     }

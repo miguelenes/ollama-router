@@ -16,6 +16,7 @@ use crate::service_identity::{
     service_bin_path, tunnel_service_bin_path, FIREWALL_RULE_11434, FIREWALL_RULE_11436,
     SERVICE_DISPLAY_NAME, SERVICE_NAME, TUNNEL_SERVICE_DISPLAY_NAME, TUNNEL_SERVICE_NAME,
 };
+use crate::time_util::now_rfc3339;
 
 /// Inno Setup flags from ollama/ollama `scripts/install.ps1`.
 pub const SETUP_SILENT_ARGS: &[&str] = &["/VERYSILENT", "/NORESTART", "/SUPPRESSMSGBOXES"];
@@ -42,8 +43,9 @@ pub async fn converge(
         tracing::info!("dry-run: skip OllamaSetup.exe / zip");
     } else {
         install_ollama_windows().await?;
-        state.ollama_installed = ollama_version().await.is_some();
-        state.ollama_version = ollama_version().await;
+        let version = ollama_version().await;
+        state.ollama_installed = version.is_some();
+        state.ollama_version = version;
     }
 
     write_token_file(&ctx.paths.token_file, ctx.config.bearer_token())?;
@@ -259,12 +261,6 @@ async fn set_firewall() -> anyhow::Result<()> {
             .await;
     }
     Ok(())
-}
-
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
 #[cfg(test)]

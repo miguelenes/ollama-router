@@ -1091,4 +1091,25 @@ mod tests {
             .contains_key("runpod-pod-1"));
         assert!(state.list_verda_nodes().unwrap().contains_key("verda-1"));
     }
+
+    #[test]
+    fn loads_pre_adopt_fixture_without_managed_by_adopt_rows() {
+        let fixture = include_str!("../../tests/fixtures/fleet-state-pre-adopt.json");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fleet-state.json");
+        fs::write(&path, fixture).unwrap();
+        let state = FleetState::new(&path);
+        let loaded = state.load().unwrap();
+        assert_eq!(loaded.len(), 4);
+        let desk = state.get_entry("desk").unwrap().unwrap();
+        assert!(desk.managed_by.is_none());
+        assert_eq!(desk.url.as_deref(), Some("http://127.0.0.1:42000"));
+        assert_eq!(desk.tunnel_backend.as_deref(), Some("zrok"));
+        let verda = state.get_entry("verda-inst-abc").unwrap().unwrap();
+        assert_eq!(verda.managed_by.as_deref(), Some("verda"));
+        let runpod = state.get_entry("runpod-pod1").unwrap().unwrap();
+        assert_eq!(runpod.managed_by.as_deref(), Some("runpod"));
+        assert!(!state.list_verda_nodes().unwrap().contains_key("desk"));
+        assert!(!state.list_runpod_nodes().unwrap().contains_key("desk"));
+    }
 }

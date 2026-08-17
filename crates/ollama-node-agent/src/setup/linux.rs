@@ -10,6 +10,7 @@ use super::{
     SetupContext, SUPERVISOR_MANUAL, SUPERVISOR_SYSTEMD,
 };
 use crate::collect::ollama_version;
+use crate::time_util::now_rfc3339;
 
 const INSTALL_SH: &str = "https://ollama.com/install.sh";
 
@@ -235,12 +236,6 @@ async fn wait_ollama_tags(bind: &str) -> anyhow::Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     anyhow::bail!("ollama /api/tags did not become ready on {bind}");
-}
-
-fn now_rfc3339() -> String {
-    time::OffsetDateTime::now_utc()
-        .format(&time::format_description::well_known::Rfc3339)
-        .unwrap_or_else(|_| "1970-01-01T00:00:00Z".into())
 }
 
 #[cfg(test)]

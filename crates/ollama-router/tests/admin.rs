@@ -11,7 +11,7 @@ use ollama_router::http::{make_app, AppState};
 use ollama_router::tunnel::TunnelFrontends;
 use ollama_router_core::config::{Capacity, HealthConfig, NodeConfig, RouterConfig};
 use ollama_router_core::fleet::{
-    routing_url_blocked_reason, CloudInstanceId, FleetState, NodeId, RunpodNodePersist,
+    routing_url_blocked_reason, CloudInstanceId, FleetState, NodeId, NodeOrigin, RunpodNodePersist,
     VerdaNodePersist,
 };
 use serde_json::{json, Value};
@@ -117,7 +117,49 @@ async fn readiness_console_is_served_without_admin_token() {
         .expect("request");
     let (status, body) = send(state, request).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(String::from_utf8_lossy(&body).contains("/router/ui/assets/app.js"));
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("/router/ui/assets/app.js"), "{html}");
+    assert!(html.contains("<div id=\"root\"></div>"), "{html}");
+}
+
+#[tokio::test]
+async fn console_client_side_route_falls_back_to_index() {
+    let state = state_with_token(RouterConfig::default(), None);
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("/router/ui/jobs")
+        .body(Body::empty())
+        .expect("request");
+    let (status, body) = send(state, request).await;
+    assert_eq!(status, StatusCode::OK);
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("<div id=\"root\"></div>"), "{html}");
+}
+
+#[tokio::test]
+async fn console_admin_data_requests_fail_closed_without_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    for path in [
+        "/router/v1/nodes",
+        "/router/v1/models",
+        "/router/v1/jobs",
+        "/router/v1/readiness",
+    ] {
+        let (status, body) = send(state.clone(), get_req(path, None)).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+        let parsed: Value = serde_json::from_slice(&body).expect("json");
+        assert!(
+            parsed["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("OLLAMA_ROUTER_ADMIN_TOKEN"),
+            "{path}: {parsed}"
+        );
+        assert!(parsed.get("nodes").is_none(), "{path}: {parsed}");
+        assert!(parsed.get("jobs").is_none(), "{path}: {parsed}");
+        assert!(parsed.get("models").is_none(), "{path}: {parsed}");
+        assert!(parsed.get("ready").is_none(), "{path}: {parsed}");
+    }
 }
 
 #[tokio::test]
@@ -525,6 +567,8 @@ async fn enroll_adopt_persists_loopback_and_leaves_fleet_yaml() {
         routing_url_blocked_reason(url, &[]).is_none(),
         "enrolled loopback must be a routing URL: {url}"
     );
+    let snap = state.registry.get(&nid("desk")).expect("registry row");
+    assert_eq!(snap.origin, NodeOrigin::Adopt);
 }
 
 #[tokio::test]
@@ -1161,4 +1205,155 @@ async fn cancel_forbidden_without_token() {
         .as_str()
         .unwrap()
         .contains("OLLAMA_ROUTER_ADMIN_TOKEN"));
+}
+
+#[tokio::test]
+async fn put_node_new_id_records_adopt_origin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let fleet = dir.path().join("fleet.yaml");
+    let yaml = "version: 1\nnodes:\n  - id: local\n    url: http://127.0.0.1:11434\n";
+    std::fs::write(&fleet, yaml).expect("write fleet");
+    let original = std::fs::read(&fleet).expect("read");
+    let config = RouterConfig {
+        nodes: vec![node("local", "http://127.0.0.1:11434", 8.0)],
+        fleet_path: fleet.clone(),
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = state_with_token(config, Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::PUT,
+            "/router/v1/nodes",
+            json!({"id": "desk", "url": "http://127.0.0.1:42000"}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["node"]["origin"], "adopt");
+    assert_eq!(std::fs::read(&fleet).expect("reread"), original);
+    let snap = state.registry.get(&nid("desk")).expect("registry row");
+    assert_eq!(snap.origin, NodeOrigin::Adopt);
+    assert_eq!(
+        state
+            .registry
+            .snapshot()
+            .iter()
+            .filter(|n| n.origin == NodeOrigin::Verda)
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn enroll_adopt_verda_like_id_does_not_claim_verda_ownership() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = enroll_state(config, Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/nodes/enroll",
+            json!({
+                "id": "verda-desk-adopt",
+                "origin": "adopt",
+                "ollama_share_id": "share-ollama",
+                "agent_share_id": "share-agent"
+            }),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let snap = state.registry.get(&nid("verda-desk-adopt")).expect("row");
+    assert_eq!(snap.origin, NodeOrigin::Adopt);
+    let stored = FleetState::new(dir.path().join("fleet-state.json"));
+    let entry = stored.get_entry("verda-desk-adopt").unwrap().unwrap();
+    assert_ne!(entry.managed_by.as_deref(), Some("verda"));
+    assert!(!stored
+        .list_verda_nodes()
+        .unwrap()
+        .contains_key("verda-desk-adopt"));
+}
+
+#[tokio::test]
+async fn readiness_counts_each_origin_separately() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = RouterConfig {
+        nodes: vec![node("local", "http://127.0.0.1:11434", 8.0)],
+        state_path: dir.path().join("fleet-state.json"),
+        ..RouterConfig::default()
+    };
+    let state = state_with_token(config, Some("secret"));
+    state
+        .registry
+        .upsert_adopt(node("desk", "http://127.0.0.1:42000", 8.0));
+    state.registry.upsert_verda(NodeConfig {
+        id: nid("verda-spot"),
+        url: Some("http://127.0.0.1:42001".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    state.registry.upsert_runpod(NodeConfig {
+        id: nid("runpod-pod"),
+        url: Some("http://127.0.0.1:42002".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    let (status, body) = send(
+        state,
+        Request::builder()
+            .method(Method::GET)
+            .uri("/router/v1/readiness")
+            .header(header::AUTHORIZATION, "Bearer secret")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let value: Value = serde_json::from_slice(&body).expect("json");
+    assert_eq!(value["counts"]["total"], 4);
+    assert_eq!(value["counts"]["permanent"], 1);
+    assert_eq!(value["counts"]["adopt"], 1);
+    assert_eq!(value["counts"]["verda"], 1);
+    assert_eq!(value["counts"]["runpod"], 1);
+}
+
+#[test]
+fn adopt_registry_rows_excluded_from_verda_instance_id_set() {
+    let registry = ollama_router_core::fleet::Registry::new(&RouterConfig::default());
+    registry.upsert_adopt(NodeConfig {
+        id: nid("verda-adopt-only"),
+        url: Some("http://127.0.0.1:42000".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    registry.upsert_verda(NodeConfig {
+        id: nid("verda-real"),
+        url: Some("http://127.0.0.1:42001".into()),
+        capacity_url: None,
+        labels: Vec::new(),
+        static_capacity: Capacity::default(),
+        max_inflight: None,
+    });
+    let verda_ids: Vec<_> = registry
+        .snapshot()
+        .into_iter()
+        .filter(|node| node.origin == NodeOrigin::Verda)
+        .map(|node| node.id.as_str().to_string())
+        .collect();
+    assert_eq!(verda_ids, vec!["verda-real".to_string()]);
 }

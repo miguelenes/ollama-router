@@ -3493,3 +3493,400 @@ async fn delete_missing_model_is_400() {
         .unwrap()
         .contains("model is required"));
 }
+
+#[tokio::test]
+async fn wrong_method_on_known_ollama_path_is_405_without_upstream() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/tags");
+        then.status(200).body(r#"{"models":[]}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let gpu = nid("gpu");
+    let (status, _, body) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/tags", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("method not allowed"));
+    assert!(state.registry.last_client_request_at(&gpu).is_none());
+    assert_eq!(state.registry.inflight(&gpu), 0);
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn wrong_method_on_known_openai_path_is_405_without_upstream() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(GET).path("/v1/chat/completions");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["error"]["code"], "method_not_allowed");
+    assert_eq!(parsed["error"]["type"], "invalid_request_error");
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn unknown_ollama_path_is_404_without_upstream() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(GET).path("/api/not-a-real-endpoint");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["llama3.2:3b"]);
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/api/not-a-real-endpoint")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"].as_str().unwrap().contains("unknown path"));
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn openai_model_delete_and_fine_tuning_are_501_without_upstream() {
+    let server = MockServer::start();
+    let delete_hit = server.mock(|when, then| {
+        when.method(DELETE).path("/v1/models/qwen3:8b");
+        then.status(200).body("{}");
+    });
+    let ft_hit = server.mock(|when, then| {
+        when.method(POST).path("/v1/fine_tuning/jobs");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3:8b"]);
+
+    let (del_status, _, del_body) = send(
+        state.clone(),
+        Request::builder()
+            .method(Method::DELETE)
+            .uri("/v1/models/qwen3:8b")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(del_status, StatusCode::NOT_IMPLEMENTED);
+    let parsed: Value = serde_json::from_slice(&del_body).unwrap();
+    assert_eq!(parsed["error"]["code"], "not_a_fleet_operation");
+
+    let (ft_status, _, ft_body) = send(
+        state,
+        json_req(
+            Method::POST,
+            "/v1/fine_tuning/jobs",
+            json!({"model": "qwen3:8b"}),
+        ),
+    )
+    .await;
+    assert_eq!(ft_status, StatusCode::NOT_IMPLEMENTED);
+    let parsed: Value = serde_json::from_slice(&ft_body).unwrap();
+    assert_eq!(parsed["error"]["code"], "not_a_fleet_operation");
+    assert_eq!(delete_hit.calls(), 0);
+    assert_eq!(ft_hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_stop_fans_out_to_every_loaded_holder() {
+    let a = MockServer::start();
+    let b = MockServer::start();
+    let a_unload = a.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"done":true,"done_reason":"unload"}"#);
+    });
+    let b_unload = b.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200)
+            .header("content-type", "application/json")
+            .body(r#"{"done":true,"done_reason":"unload"}"#);
+    });
+    let state = state_from(fleet_config(vec![
+        node("a", &a.base_url(), 24.0, 1, None),
+        node("b", &b.base_url(), 24.0, 1, None),
+    ]));
+    mark_ready(&state, "a", &["qwen3:8b"]);
+    mark_ready(&state, "b", &["qwen3:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("a"), ["qwen3:8b"], Some(4.0));
+    state
+        .registry
+        .update_ps_state(&nid("b"), ["qwen3:8b"], Some(4.0));
+
+    let (status, _, body) = send(
+        state,
+        json_req(Method::POST, "/api/stop", json!({"model": "qwen3:8b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["done"], true);
+    assert_eq!(parsed["done_reason"], "unload");
+    a_unload.assert();
+    b_unload.assert();
+}
+
+#[tokio::test]
+async fn api_stop_of_unloaded_model_is_success() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["other:1b"]);
+    let (status, _, body) = send(
+        state,
+        json_req(Method::POST, "/api/stop", json!({"model": "gone:1b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["done_reason"], "unload");
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_stop_missing_model_is_400_without_upstream() {
+    let server = MockServer::start();
+    let hit = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body("{}");
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3:8b"]);
+    let (status, _, body) = send(state, json_req(Method::POST, "/api/stop", json!({}))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("model is required"));
+    assert_eq!(hit.calls(), 0);
+}
+
+#[tokio::test]
+async fn api_stop_does_not_set_last_client_request_at() {
+    let server = MockServer::start();
+    let _unload = server.mock(|when, then| {
+        when.method(POST).path("/api/generate");
+        then.status(200).body(r#"{"done":true}"#);
+    });
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        24.0,
+        1,
+        None,
+    )]));
+    mark_ready(&state, "gpu", &["qwen3:8b"]);
+    state
+        .registry
+        .update_ps_state(&nid("gpu"), ["qwen3:8b"], Some(4.0));
+    assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/stop", json!({"model": "qwen3:8b"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(state.registry.last_client_request_at(&nid("gpu")).is_none());
+}
+
+async fn metrics_text(state: AppState) -> String {
+    let (_, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/metrics")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    String::from_utf8_lossy(&body).into_owned()
+}
+
+#[tokio::test]
+async fn local_rejections_increment_requests_and_route_reason() {
+    let state = state_from(RouterConfig::default());
+    let (status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/api/not-real")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let text = metrics_text(state).await;
+    assert!(
+        text.contains("code=\"404\"") && text.contains("node=\"-\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("ollama_router_route_reason_total{reason=\"unknown_compat_path\"}"),
+        "{text}"
+    );
+
+    let state = state_from(RouterConfig::default());
+    let (status, _, _) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/v1/chat/completions")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+    let text = metrics_text(state).await;
+    assert!(
+        text.contains("ollama_router_route_reason_total{reason=\"method_not_allowed\"}"),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn pull_missing_model_records_metrics() {
+    let state = state_from(RouterConfig::default());
+    let (status, _, _) = send(
+        state.clone(),
+        json_req(Method::POST, "/api/pull", json!({})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let text = metrics_text(state).await;
+    assert!(
+        text.contains("ollama_router_route_reason_total{reason=\"model_required\"}"),
+        "{text}"
+    );
+    assert!(
+        text.contains("code=\"400\"") && text.contains("class=\"pull\""),
+        "{text}"
+    );
+}
+
+#[tokio::test]
+async fn readyz_503_when_all_healthy_nodes_saturated() {
+    let server = MockServer::start();
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        Some(1),
+    )]));
+    mark_ready(&state, "gpu", &["qwen3-embedding:8b"]);
+    state.registry.inflight_inc(&nid("gpu"));
+
+    let (ready, _, body) = send(
+        state.clone(),
+        Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(ready, StatusCode::SERVICE_UNAVAILABLE);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["ready"], false);
+    assert!(parsed["reason"].as_str().unwrap().contains("saturated"));
+
+    let (health, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/healthz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(health, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["status"], "ok");
+}
+
+#[tokio::test]
+async fn readyz_200_when_healthy_node_has_headroom() {
+    let server = MockServer::start();
+    let state = state_from(fleet_config(vec![node(
+        "gpu",
+        &server.base_url(),
+        8.0,
+        1,
+        Some(2),
+    )]));
+    mark_ready(&state, "gpu", &["qwen3-embedding:8b"]);
+    state.registry.inflight_inc(&nid("gpu"));
+
+    let (status, _, body) = send(
+        state,
+        Request::builder()
+            .uri("/readyz")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["ready"], true);
+}

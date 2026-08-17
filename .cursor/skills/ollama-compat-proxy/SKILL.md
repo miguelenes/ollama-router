@@ -19,6 +19,7 @@ auto Hub-pull); create/copy/push/blobs = 501.
 | Path | Behavior |
 |------|----------|
 | `POST /api/generate`, `/api/chat` | Stream NDJSON. `inflight_inc` (idle activity). Size class may use catalog `details.parameter_size` when `:Nb` is absent. **Unload-intent** (`keep_alive <= 0`, empty/absent prompt/messages): fan out to every healthy loaded holder (incl. cordoned; excl. inventory `draining`); router-owned `done_reason: "unload"`; no `inflight_inc`. |
+| `POST /api/stop` | Same fleet-unload fan-out as unload-intent generate (`keep_alive: 0` on each holder). Missing `model` → 400. Not idle. |
 | `POST /api/embed` | Stream/JSON. `inflight_inc`. |
 | `POST /api/embeddings` | Rewrite path to `/api/embed` (Ollama ≤0.32). Then same as embed. |
 | `POST /v1/chat/completions`, `/v1/completions`, `/v1/embeddings` | Passthrough to Ollama's OpenAI shim on the ranked node. Same `inflight_inc` / reservation / class ranking as native chat/embed. Do **not** rewrite `/v1/embeddings` to `/api/embed`. |
@@ -28,13 +29,15 @@ auto Hub-pull); create/copy/push/blobs = 501.
 | `POST /api/show` | Holder-only (`model` or `name`). GENERIC class (not LARGE-gated). Miss → 503 `model_missing`. Stream upstream body. Not idle. |
 | `GET /api/ps` | Process-list **union** of healthy loaded models (one row per node × model, `details.router_node`, digest ≥ 12). Not a passthrough. Not idle. |
 | `GET /api/version` | Router-owned `{"version": "<router>"}` (same as `/healthz`). Not a ranked Ollama. Not idle. |
-| `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation`. Use admin ensure / `POST /api/pull`. |
-| Other `/v1/*` | **404** OpenAI-shaped. Allowlist only. |
+| `POST /api/push`, `/api/copy`, `/api/create`, `/api/blobs*` | **501** `not_a_fleet_operation` for **every method**. Use admin ensure / `POST /api/pull`. |
+| `DELETE /v1/models/{id}`, `POST /v1/fine_tuning/*` | **501** OpenAI-shaped `not_a_fleet_operation`. |
+| Wrong method on a known `/api/*` or `/v1/*` path | **405** (Ollama `{"error"}` vs OpenAI envelope). No upstream. |
+| Unknown `/api/*` or `/v1/*` | **404** with the matching envelope. No upstream. |
 | `POST /api/pull` | Fleet placement job; streams NDJSON (`application/x-ndjson`) with `total`/`completed` from targets and final `success`. Not a one-node Hub-pull. Not idle. |
 | `DELETE /api/delete` | Fleet delete job on healthy non-draining holders; streams NDJSON like pull (`total`/`completed`, final `success`). Already-absent is success. Not idle. Prefer admin for JSON. |
-| `GET /healthz` | Process up. |
-| `GET /readyz` | Healthy capacity (optional embedding-model gate). |
-| `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Grafana Models row joins agent `ollama_up` / `ollama_models`. |
+| `GET /healthz` | Process liveness. |
+| `GET /readyz` | 503 if no healthy non-draining nodes **or** every healthy node is saturated (unknown capacity errs toward can-serve). Optional embedding-model gate unchanged. |
+| `GET /metrics` | Prometheus. Count-only model gauges (`aggregated_models`, `node_models`) plus `discovery_total`. Never a model-name label. Nodes dashboard uses `ollama_router_node_ollama_up` / `ollama_router_node_models`. |
 | `/router/v1/*` | Admin bearer. Unset token → 403. |
 
 ## Capacity miss

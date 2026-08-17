@@ -34,6 +34,8 @@ pub struct Metrics {
     cloud_price: GaugeVec,
     cloud_events: IntCounterVec,
     job_operations: IntCounterVec,
+    jobs_running: IntGaugeVec,
+    upstream_pool_available: IntGauge,
     auto_pull_wait: IntCounterVec,
     aggregated_models: IntGauge,
     node_models: IntGaugeVec,
@@ -140,7 +142,7 @@ impl Metrics {
         let node_info = GaugeVec::new(
             Opts::new(
                 "ollama_router_node_info",
-                "Fleet node identity (1). origin=permanent|verda|runpod; role=cpu|gpu|verda|runpod|origin",
+                "Fleet node identity (1). origin=permanent|adopt|verda|runpod; role=cpu|gpu|verda|runpod|origin",
             ),
             &["node", "origin", "role"],
         )?;
@@ -174,7 +176,7 @@ impl Metrics {
                 "ollama_router_cloud_events_total",
                 "Cloud fleet lifecycle events by provider",
             ),
-            &["provider", "event"],
+            &["provider", "event", "reason"],
         )?;
         let job_operations = IntCounterVec::new(
             Opts::new(
@@ -182,6 +184,17 @@ impl Metrics {
                 "Terminal model-operation jobs",
             ),
             &["kind", "status"],
+        )?;
+        let jobs_running = IntGaugeVec::new(
+            Opts::new(
+                "ollama_router_jobs_running",
+                "In-flight model-operation jobs by kind",
+            ),
+            &["kind"],
+        )?;
+        let upstream_pool_available = IntGauge::new(
+            "ollama_router_upstream_pool_available",
+            "Available upstream connection-pool permits",
         )?;
         let auto_pull_wait = IntCounterVec::new(
             Opts::new(
@@ -384,6 +397,8 @@ impl Metrics {
         registry.register(Box::new(cloud_price.clone()))?;
         registry.register(Box::new(cloud_events.clone()))?;
         registry.register(Box::new(job_operations.clone()))?;
+        registry.register(Box::new(jobs_running.clone()))?;
+        registry.register(Box::new(upstream_pool_available.clone()))?;
         registry.register(Box::new(auto_pull_wait.clone()))?;
         registry.register(Box::new(aggregated_models.clone()))?;
         registry.register(Box::new(node_models.clone()))?;
@@ -431,6 +446,8 @@ impl Metrics {
             cloud_price,
             cloud_events,
             job_operations,
+            jobs_running,
+            upstream_pool_available,
             auto_pull_wait,
             aggregated_models,
             node_models,
@@ -462,7 +479,12 @@ impl Metrics {
     }
 
     /// Drop gone-node gauge labels, then set live snapshot values.
-    pub fn refresh_gauges(&self, fleet: &Registry, fleet_state: &FleetState) {
+    pub fn refresh_gauges(
+        &self,
+        fleet: &Registry,
+        fleet_state: &FleetState,
+        upstream_pool_available: Option<usize>,
+    ) {
         self.inflight.reset();
         self.healthy.reset();
         self.vram_free.reset();
@@ -601,7 +623,7 @@ impl Metrics {
             match node.origin {
                 NodeOrigin::Verda => verda_n += 1,
                 NodeOrigin::Runpod => runpod_n += 1,
-                NodeOrigin::Permanent => {}
+                NodeOrigin::Permanent | NodeOrigin::Adopt => {}
             }
         }
         set_i(&self.cloud_instances, &["verda"], verda_n);
@@ -621,6 +643,9 @@ impl Metrics {
             .sum::<f64>();
         set_g(&self.cloud_price, &["verda"], verda_price);
         set_g(&self.cloud_price, &["runpod"], runpod_price);
+        if let Some(available) = upstream_pool_available {
+            self.upstream_pool_available.set(available as i64);
+        }
     }
 
     /// Prometheus 0.0.4 text. Caller must [`Self::refresh_gauges`] first.
@@ -663,8 +688,13 @@ impl Metrics {
         }
     }
 
-    pub fn stats_json(&self, fleet: &Registry, fleet_state: &FleetState) -> Value {
-        self.refresh_gauges(fleet, fleet_state);
+    pub fn stats_json(
+        &self,
+        fleet: &Registry,
+        fleet_state: &FleetState,
+        upstream_pool_available: Option<usize>,
+    ) -> Value {
+        self.refresh_gauges(fleet, fleet_state, upstream_pool_available);
         let snap = fleet.snapshot();
         let inflight: Value = snap
             .iter()
@@ -688,7 +718,22 @@ impl Metrics {
 }
 
 impl JobObserver for Metrics {
+    fn job_started(&self, kind: JobKind) {
+        if let Ok(g) = self
+            .jobs_running
+            .get_metric_with_label_values(&[kind.as_str()])
+        {
+            g.inc();
+        }
+    }
+
     fn job_terminal(&self, kind: JobKind, status: JobStatus) {
+        if let Ok(g) = self
+            .jobs_running
+            .get_metric_with_label_values(&[kind.as_str()])
+        {
+            g.dec();
+        }
         if let Ok(c) = self
             .job_operations
             .get_metric_with_label_values(&[kind.as_str(), status.as_str()])
@@ -699,10 +744,11 @@ impl JobObserver for Metrics {
 }
 
 impl FleetEvents for Metrics {
-    fn cloud_event(&self, provider: &'static str, event: &'static str) {
-        if let Ok(c) = self
-            .cloud_events
-            .get_metric_with_label_values(&[provider, event])
+    fn cloud_event(&self, provider: &'static str, event: &'static str, reason: Option<&str>) {
+        let reason_label = reason.unwrap_or("");
+        if let Ok(c) =
+            self.cloud_events
+                .get_metric_with_label_values(&[provider, event, reason_label])
         {
             c.inc();
         }
@@ -734,7 +780,7 @@ fn gauge_i(vec: &IntGaugeVec, labels: &[&str]) -> i64 {
 }
 
 fn node_role(labels: &[String], origin: NodeOrigin) -> String {
-    for wanted in ["cpu", "gpu", "verda", "runpod"] {
+    for wanted in ["cpu", "gpu", "verda", "runpod", "adopt"] {
         if labels
             .iter()
             .any(|label| label.eq_ignore_ascii_case(wanted))

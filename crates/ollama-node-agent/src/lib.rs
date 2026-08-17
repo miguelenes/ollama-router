@@ -11,6 +11,7 @@ pub mod redact;
 pub mod register;
 pub mod service_identity;
 pub mod setup;
+pub mod time_util;
 pub mod uninstall;
 #[cfg(windows)]
 pub mod windows_scm;
