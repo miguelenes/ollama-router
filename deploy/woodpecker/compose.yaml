@@ -17,11 +17,17 @@ services:
     image: woodpeckerci/woodpecker-server:v3
     restart: unless-stopped
     ports:
-      - "8000:8000"
+      # Loopback only — GitHub OAuth redirect works from this host; do not
+      # publish :8000 on the LAN/public interface (Docker-socket CI).
+      - "127.0.0.1:8000:8000"
     volumes:
       - woodpecker-server-data:/var/lib/woodpecker/
     environment:
-      WOODPECKER_OPEN: "true"
+      WOODPECKER_OPEN: ${WOODPECKER_OPEN:-true}
+      WOODPECKER_ADMIN: ${WOODPECKER_ADMIN:-}
+      # Defense in depth: even if a workflow listens to pull_request, fork
+      # pipelines stay blocked until approval (v3 default; pin it).
+      WOODPECKER_DEFAULT_APPROVAL_MODE: forks
       WOODPECKER_HOST: ${WOODPECKER_HOST}
       WOODPECKER_GITHUB: "true"
       WOODPECKER_GITHUB_CLIENT: ${WOODPECKER_GITHUB_CLIENT}

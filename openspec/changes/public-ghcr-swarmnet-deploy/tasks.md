@@ -8,7 +8,7 @@
 
 - [x] 2.1 Add `.woodpecker/verify.yml`: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --locked`, `cargo deny check advisories bans`, `cargo llvm-cov --fail-under-lines 80` (ignore `**/main.rs`); runs on the fleet agent (spec: Fleet-local jobs run on a fleet-hosted Woodpecker agent; Verify runs on the fleet agent)
 - [x] 2.2 Add `.woodpecker/image.yml`: bake target `router`, run the container, probe `/healthz` on a non-conflicting published port (no port collision with a running router on the agent)
-- [ ] 2.3 Skip fork pull requests on the fleet agent so untrusted code never runs on the Docker-socket host (spec: Fork pull requests are not executed)
+- [x] 2.3 Skip fork pull requests on the fleet agent so untrusted code never runs on the Docker-socket host (spec: Fork pull requests are not executed)
 
 ## 3. Publish pipelines
 

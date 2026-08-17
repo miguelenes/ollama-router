@@ -4,9 +4,11 @@
 # The container is published to a random high port on loopback
 # (127.0.0.1:0 -> 11434) so the probe never collides with a router already
 # running on the agent's :11434.
+#
+# `push` only: fork PRs are not executed on the Docker-socket host.
 
 when:
-  event: [push, pull_request]
+  event: push
 
 steps:
   - name: bake

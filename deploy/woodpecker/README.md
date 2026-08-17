@@ -34,15 +34,18 @@ unblocks CI regardless of GitHub account billing state.
    ```
 
 4. **Activate the repository** (admin rights required): open
-   `http://<WOODPECKER_HOST>:8000/`, log in via GitHub, add a new repository
-   and activate `miguelenes/ollama-router`. Woodpecker registers the webhook
-   (push / pull_request events) automatically.
+   `http://127.0.0.1:8000/` (compose binds loopback only), log in via GitHub, add a new repository
+   and activate `miguelenes/ollama-router`. GitHub webhooks cannot reach loopback;
+   trigger `verify.yml` from the UI (`manual`) after activate until a public
+   `WOODPECKER_HOST` exists. Woodpecker still registers the forge webhook.
 
 5. **Mark the repository as trusted** (Repo Settings → trusted). The agent
    pipelines mount `/var/run/docker.sock` and run `docker stack deploy`;
    volume mounts require a trusted repository. The agent is dedicated to
    this fleet — keep fork pull requests disabled so untrusted code never
-   runs on a Docker-socket host.
+   runs on a Docker-socket host. Pipelines listen to `push` (and `manual` for
+   verify) so fork PRs — `pull_request` on this repo — never schedule. Do not
+   approve blocked fork pipelines in the UI.
 
 6. **Confirm the agent is online** (server UI → Agents shows
    `woodpecker-agent`).
@@ -96,8 +99,8 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
 
 | File | Runs on | Purpose |
 | --- | --- | --- |
-| `.woodpecker/verify.yml` | push (main/master), pull_request | fmt, clippy, test, deny, coverage ≥80%, no-`ghcr.io` stack-refs grep |
-| `.woodpecker/image.yml` | push (main), pull_request | bake `router`, run container, probe `/healthz` |
+| `.woodpecker/verify.yml` | push (same-repo branches), manual | fmt, clippy, test, deny, coverage ≥80%, no-`ghcr.io` stack-refs grep |
+| `.woodpecker/image.yml` | push (same-repo branches) | bake `router`, run container, probe `/healthz` |
 | `.woodpecker/publish-ghcr.yml` | push (main), tag `v*`, manual | push `router` to `ghcr.io/<owner>/<repo>` (edge/sha/semver/latest) + provenance attestation when public |
 | `.woodpecker/fleet-push.yml` | push (main), gate | push `router` to the fleet local registry only |
 | `.woodpecker/swarm-deploy.yml` | push (main), both gates | `docker stack deploy` the new SHA tag (depends on fleet push) |
@@ -124,6 +127,7 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
 - No live tokens in this directory or in git: everything is a Woodpecker
   secret or `.env` (git-ignored). Never commit `.env`.
 - The agent is root-equivalent via the Docker socket — do not run untrusted
-  fork PRs on it.
+  fork PRs on it. Workflows omit `pull_request` so fork events never start;
+  the server also pins `WOODPECKER_DEFAULT_APPROVAL_MODE=forks`.
 - Logs: never echo `REGISTRY_TOKEN` / `PAGES_TOKEN` / gate values;
   Woodpecker masks secret values in pipeline logs.

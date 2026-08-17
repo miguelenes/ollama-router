@@ -1,11 +1,11 @@
 # Rust verify + fleet-safety checks. Runs on the fleet Woodpecker agent
-# (Docker backend) for every default-branch push and pull request.
-# Mirrors the old .github/workflows/ci.yml jobs, adapted to Woodpecker:
-# one container runs the whole sequential gate (components and installed
-# tools live in that container), then the stack-refs grep runs separately.
+# (Docker backend) for every push (including same-repo PR source branches).
+# Fork pull requests only emit `pull_request` on this repo, so they never
+# schedule here — untrusted code must not run on a Docker-socket host
+# (ci-local-runner: Fork pull requests are not executed).
 
 when:
-  event: [push, pull_request]
+  event: [push, manual]
 
 steps:
   - name: verify
