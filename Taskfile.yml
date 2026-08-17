@@ -206,11 +206,11 @@ tasks:
         sh: [bash, -euo, pipefail, -c]
 
   agent:release:macos:
-    desc: .pkg plus unsigned zip for this host (macOS; GHA macos-14 is canonical)
+    desc: .pkg plus unsigned zip for this host (macOS)
     cmds:
       - cmd: |
           if [[ "$(uname -s)" != Darwin ]]; then
-            echo "skipping Darwin pkg: requires macos-14 host (GHA is canonical)" >&2
+            echo "skipping Darwin pkg: run task agent:release:macos on a macOS host" >&2
             exit 0
           fi
           case "$(uname -m)" in
@@ -231,7 +231,7 @@ tasks:
       - cmd: |
           HOST=$(rustc -vV | awk '/^host:/{print $2}')
           if [[ "$HOST" != x86_64-pc-windows-msvc ]]; then
-            echo "skipping Windows MSI: requires windows-latest / MSVC host (GHA is canonical)" >&2
+            echo "skipping Windows MSI: run task agent:release:windows on an x86_64 Windows MSVC host" >&2
             exit 0
           fi
           VER=$(awk '/^\[workspace.package\]/{p=1;next} p&&/^version =/{gsub(/"/,"",$3); print $3; exit}' Cargo.toml)
@@ -239,20 +239,11 @@ tasks:
           mkdir -p dist/agent
           cp target/release/ollama-node-agent.exe dist/agent/ollama-node-agent-windows-amd64.exe
           if ! command -v wix >/dev/null 2>&1; then
-            echo "skipping Windows MSI: wix not on PATH (install WiX v5; GHA is canonical)" >&2
+            echo "skipping Windows MSI: wix not on PATH (install WiX v5)" >&2
             exit 0
           fi
           bash crates/ollama-node-agent/packaging/windows/pack-msi.sh \
             target/release/ollama-node-agent.exe "$VER" dist/agent
-        sh: [bash, -euo, pipefail, -c]
-
-  agent:release:github:
-    desc: Removed — GitHub Actions is gone; use local agent:release recipes
-    cmds:
-      - cmd: |
-          echo "GitHub Actions was removed; there is no Release node agent workflow." >&2
-          echo "Use: task agent:release (Linux Docker) or agent:release:macos / agent:release:windows on those hosts." >&2
-          exit 1
         sh: [bash, -euo, pipefail, -c]
 
   zrok:fetch:

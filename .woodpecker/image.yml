@@ -19,8 +19,6 @@ steps:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
-      # type=gha cache (docker-bake.hcl) needs GitHub Actions credentials;
-      # override with a workspace-local cache on this substrate.
       - docker buildx bake router --load --set "router.tags=ollama-router:ci" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
 
   - name: healthz

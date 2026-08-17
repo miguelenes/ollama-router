@@ -92,7 +92,7 @@ rules:
   tasks:
     - "Checkbox items mapped to spec scenarios; include unit/proxy tests for unknown ≠ 0, miss/capacity 503, and placement skips when those specs change."
     - "End with wiki/skills listed in the proposal and sequential task check (fmt, clippy -D warnings, test --locked, deny)."
-    - "Do not add a Makefile, justfile, or npm scripts; do not install task in GitHub Actions."
+    - "Do not add a Makefile, justfile, or npm scripts; do not install task in Woodpecker CI."
     - "fleet.local.yaml capacity comments: 0/0 = known CPU; omit = unknown. Mock GPU rows need gpus: 1 when the change touches inventory."
     - "Keep tasks implementable in one apply pass; spike/investigate items belong in design risks, not as unchecked forever-tasks."
 

@@ -144,8 +144,6 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
   server at `WOODPECKER_GRPC_LAN_BIND:9000` (default `192.168.100.135`)
   using the same `WOODPECKER_AGENT_SECRET`. Overlay (`agent-nas.stack.yml`)
   cannot resolve MagicDNS and the NAS host netns has no `tailscale0`.
-- The agent replaces the old GitHub Actions self-hosted runner
-  (`deploy/swarm/runner.compose.yml` is superseded and pending removal).
 
 ## Security notes
 

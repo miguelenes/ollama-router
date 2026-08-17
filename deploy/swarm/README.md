@@ -96,11 +96,9 @@ A docker-container builder such as `swarmos` isolates `127.0.0.1` inside
 BuildKit and push fails with connection refused. Remote push hostnames
 (Tailscale/LAN DNS) may work with either builder.
 
-**Why no GitHub-hosted runners?** The registry is on the fleet LAN
-(loopback), so the push must originate on a host that can reach it; and
-GitHub-hosted minutes are no longer part of the CI path at all. The old
-`runner.compose.yml` (GitHub Actions self-hosted runner) is superseded by
-`deploy/woodpecker/` and is pending removal.
+**Fleet-agent reachability.** The registry is on the fleet LAN
+(loopback), so the push must originate on a host that can reach it — the
+Woodpecker agent that runs `.woodpecker/fleet-push.yml`.
 
 ## Enablement gates
 

@@ -17,6 +17,6 @@ task --list
 
 `check` must stay sequential (`cmds` + `task:`). Do not use Task `deps:` for cargo steps — they run in parallel and contend on `target/`.
 
-CI in `.github/workflows/ci.yml` runs `cargo` / `docker` directly. Do not install `task` in GitHub Actions.
+CI in `.woodpecker/verify.yml` runs `cargo` / `docker` directly. Do not install `task` in Woodpecker CI.
 
 Ignore `.task/` (checksum cache).
