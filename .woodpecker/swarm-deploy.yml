@@ -31,8 +31,6 @@ steps:
         from_secret: FLEET_REGISTRY
       DEPLOY_REGISTRY:
         from_secret: DEPLOY_REGISTRY
-    when:
-      evaluate: 'FLEET_REGISTRY_PUSH_ENABLED == "true" && SWARM_DEPLOY_ENABLED == "true"'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:

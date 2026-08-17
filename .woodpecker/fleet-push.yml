@@ -21,8 +21,6 @@ steps:
         from_secret: FLEET_REGISTRY_PUSH_ENABLED
       FLEET_REGISTRY:
         from_secret: FLEET_REGISTRY
-    when:
-      evaluate: 'FLEET_REGISTRY_PUSH_ENABLED == "true"'
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
