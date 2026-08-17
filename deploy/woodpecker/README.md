@@ -84,7 +84,9 @@ woodpecker-cli secret add --repository miguelenes/ollama-router \
 woodpecker-cli secret add --repository miguelenes/ollama-router \
   --name FLEET_REGISTRY --value 127.0.0.1:5005 --event push
 woodpecker-cli secret add --repository miguelenes/ollama-router \
-  --name DEPLOY_REGISTRY --value 192.168.1.50:5005 --event push
+  --name FLEET_REGISTRY_REPLICA --value 192.168.100.5:5005 --event push
+woodpecker-cli secret add --repository miguelenes/ollama-router \
+  --name DEPLOY_REGISTRY --value 127.0.0.1:5005 --event push
 ```
 
 **Enablement gates** (all default OFF — leave these secrets absent):
@@ -123,12 +125,19 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
 - **Docker socket**: the agent mounts `/var/run/docker.sock`; the pipeline
   steps it starts run containers on this daemon.
 - **Fleet registry trust**: the daemon must trust the local registry as an
-  insecure registry (the push host reaches `:5005`):
+  insecure registry (the push host reaches `:5005`, and the replica LAN host
+  when `FLEET_REGISTRY_REPLICA` is set):
   ```json
-  { "insecure-registries": ["127.0.0.1:5005", "192.168.1.50:5005"] }
+  {
+    "insecure-registries": [
+      "127.0.0.1:5005",
+      "192.168.100.135:5005",
+      "192.168.100.5:5005"
+    ]
+  }
   ```
-  then restart Docker. Loopback vs LAN (`DEPLOY_REGISTRY`) guidance lives in
-  `deploy/swarm/README.md`.
+  then restart Docker. Loopback vs LAN (`DEPLOY_REGISTRY`, `FLEET_REGISTRY_REPLICA`)
+  guidance lives in `deploy/swarm/README.md`.
 - **Swarm manager access**: for `SWARM_DEPLOY_ENABLED`, run
   `agent-nas.compose.yaml` on the manager (host network; this compose agent
   is a worker and cannot `docker stack deploy`). The NAS agent reaches the

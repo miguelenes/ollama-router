@@ -17,16 +17,17 @@ to or pulls from `ghcr.io` (enforced by the `swarm-stack-refs` step of
   (or an `edge` / `sha-*` / semver tag). Because the repository is public,
   builds carry provenance attestations.
 - **Fleet deploy:** the stack in this directory references
-  `${DEPLOY_REGISTRY:-127.0.0.1:5005}/ollama-router`. There is **no
-  dual-push**: the fleet push pipeline pushes only to the fleet local
-  registry and the stack is never configured to pull `ghcr.io/...`.
+  `${DEPLOY_REGISTRY:-127.0.0.1:5005}/ollama-router`. CI pushes to the fleet
+  local registry (and optionally replicates to the manager registry); the stack
+  never pulls `ghcr.io/...`.
 
 ## Architecture
 
 ```text
 push on main (gates on)                 deploy (gate on)
 Woodpecker agent  ── publish ──►  ghcr.io/miguelenes/ollama-router   (public)
-Woodpecker agent  ── push ──►  :5005 fleet registry
+Woodpecker agent  ── push ──►  :5005 fleet registry (primary)
+              └── replicate ──►  manager LAN :5005 (optional FLEET_REGISTRY_REPLICA)
 Woodpecker agent  ── stack ──►  docker stack deploy ollama-router (local only)
 ```
 
@@ -40,12 +41,26 @@ secrets. The agent host must:
 - trust it as an insecure registry — add to the Docker daemon:
 
   ```json
-  { "insecure-registries": ["127.0.0.1:5005", "192.168.1.50:5005"] }
+  {
+    "insecure-registries": [
+      "127.0.0.1:5005",
+      "192.168.100.135:5005",
+      "192.168.100.5:5005"
+    ]
+  }
   ```
 
-  then `sudo systemctl restart docker` (or equivalent),
+  Include the Swarm manager registry LAN (`FLEET_REGISTRY_REPLICA`) when the
+  CI agent replicates to a remote manager registry. Then restart Docker.
 - for `SWARM_DEPLOY_ENABLED`: the docker socket it mounts must be the Swarm
   manager's (or `DOCKER_HOST` must point at it).
+
+**Fleet-push buildx (loopback `FLEET_REGISTRY`).** When `FLEET_REGISTRY` is
+loopback (`127.0.0.1:5005`), `.woodpecker/fleet-push.yml` uses
+`docker buildx build --builder default` so the push reaches the host registry.
+A docker-container builder such as `swarmos` isolates `127.0.0.1` inside
+BuildKit and push fails with connection refused. Remote push hostnames
+(Tailscale/LAN DNS) may work with either builder.
 
 **Why no GitHub-hosted runners?** The registry is on the fleet LAN
 (loopback), so the push must originate on a host that can reach it; and
@@ -61,7 +76,8 @@ missing gate never fails a default-branch push):
 | Secret | Default | Effect |
 | --- | --- | --- |
 | `FLEET_REGISTRY_PUSH_ENABLED` | off | `true` runs the fleet-registry push pipeline |
-| `FLEET_REGISTRY` | `127.0.0.1:5005` | Push target host |
+| `FLEET_REGISTRY` | `127.0.0.1:5005` | Primary push target on the CI agent |
+| `FLEET_REGISTRY_REPLICA` | off | Optional manager registry LAN (e.g. `192.168.100.5:5005`) |
 | `DEPLOY_REGISTRY` | = `FLEET_REGISTRY` | Pull host the swarm nodes use |
 | `SWARM_DEPLOY_ENABLED` | off | `true` (with push enabled) updates the stack |
 
@@ -85,7 +101,34 @@ woodpecker-cli secret add --repository miguelenes/ollama-router \
 - The stack pins the router to the manager (`node.role == manager`) because
   `fleet.yaml` is bind-mounted there.
 
+### Push host vs pull host (split agents)
+
+When the Woodpecker CI agent (`role=ci`, usually the desktop/registry host)
+pushes but the Swarm manager agent (`role=swarm-manager`, usually the NAS)
+runs `docker stack deploy`, set **three** registry secrets:
+
+| Secret | Role | Example (this fleet) |
+| --- | --- | --- |
+| `FLEET_REGISTRY` | Where `fleet-push` publishes on the CI agent | `127.0.0.1:5005` (desktop loopback registry) |
+| `FLEET_REGISTRY_REPLICA` | Optional second publish target (manager registry LAN) | `192.168.100.5:5005` (NAS registry from the LAN) |
+| `DEPLOY_REGISTRY` | Where swarm nodes pull | `127.0.0.1:5005` on the NAS manager |
+
+Validated split on this fleet: desktop `fleet-push` publishes to desktop
+loopback **and** replicates to `192.168.100.5:5005`; the NAS manager deploys
+with `DEPLOY_REGISTRY=127.0.0.1:5005`. Do not point desktop `FLEET_REGISTRY`
+at the NAS loopback — that is the manager's `127.0.0.1`, not the desktop host.
+The CI agent daemon must trust `FLEET_REGISTRY_REPLICA` in
+`insecure-registries` when it uses HTTP.
+
 ## Bootstrap (first deploy)
+
+0. **Start the fleet local registry** (once per agent host):
+   ```bash
+   docker compose -f deploy/swarm/fleet-registry.compose.yaml up -d
+   curl -sf http://127.0.0.1:5005/v2/
+   ```
+   Add `127.0.0.1:5005` and the LAN bind (e.g. `192.168.100.135:5005`) to the
+   Docker daemon `insecure-registries`, then restart Docker.
 
 1. **Create secrets** (never commit):
    ```bash
@@ -135,8 +178,8 @@ woodpecker-cli secret add --repository miguelenes/ollama-router \
 
 ```bash
 # every main push with gates on
-push:   fleet-push pipeline bakes router -> :5005/ollama-router:{latest, sha-<7>}
-deploy: swarm-deploy pipeline runs docker stack deploy with ROUTER_TAG=sha-<7>
+push:   fleet-push -> primary :5005 + optional replica (FLEET_REGISTRY_REPLICA)
+deploy: swarm-deploy runs docker stack deploy with ROUTER_TAG=sha-<7>
 ```
 
 `docker stack deploy` updates only changed services; the update config uses

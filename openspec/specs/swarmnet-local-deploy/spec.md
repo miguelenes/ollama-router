@@ -47,3 +47,17 @@ The deployed stack SHALL run a single router replica. CI deploy SHALL NOT write 
 
 - **WHEN** stack compose, bake tags, and deploy runbooks in git are scanned
 - **THEN** they contain only placeholders for secrets and registry hosts, never live tokens
+
+### Requirement: Fleet local registry bootstrap is defined in-repo
+
+The swarm deploy runbook SHALL reference a committed compose file under `deploy/swarm/` that starts the fleet local registry (`registry:2` or equivalent) on the CI agent host (where Woodpecker `fleet-push` runs) with loopback and documented LAN bind ports. Operators SHALL be able to bootstrap the registry without copying ad-hoc compose from chat or an uncommitted local file.
+
+#### Scenario: Runbook points at committed registry compose
+
+- **WHEN** an operator follows `deploy/swarm/README.md` bootstrap step zero
+- **THEN** the documented `docker compose -f deploy/swarm/fleet-registry.compose.yaml up -d` command uses a file that exists in the repository
+
+#### Scenario: Registry exposes loopback and LAN bind
+
+- **WHEN** `deploy/swarm/fleet-registry.compose.yaml` is applied on the CI agent host
+- **THEN** the registry listens on loopback `:5005` and on a configurable LAN bind documented in the compose header comments for swarm nodes that pull by LAN IP

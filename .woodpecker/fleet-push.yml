@@ -4,9 +4,16 @@
 #
 # Gate: repository secret FLEET_REGISTRY_PUSH_ENABLED == "true"
 # (absent or anything else -> steps skipped, pipeline stays green).
-# Secrets: FLEET_REGISTRY (push target host, default 127.0.0.1:5005).
-# The agent daemon must trust the registry as insecure (see
-# deploy/swarm/README.md).
+#
+# Secrets:
+#   FLEET_REGISTRY          primary push host (default 127.0.0.1:5005 on the CI agent)
+#   FLEET_REGISTRY_REPLICA  optional second push host (Swarm manager registry LAN,
+#                           e.g. 192.168.100.5:5005 when CI agent != manager)
+#   DEPLOY_REGISTRY         swarm pull host (swarm-deploy only; usually manager loopback)
+#
+# Loopback FLEET_REGISTRY requires --builder default (not docker-container swarmos):
+# BuildKit's 127.0.0.1 is inside the builder container, not the agent host.
+# The agent daemon must trust HTTP registries (see deploy/swarm/README.md).
 
 when:
   - event: push
@@ -24,6 +31,8 @@ steps:
         from_secret: FLEET_REGISTRY_PUSH_ENABLED
       FLEET_REGISTRY:
         from_secret: FLEET_REGISTRY
+      FLEET_REGISTRY_REPLICA:
+        from_secret: FLEET_REGISTRY_REPLICA
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
@@ -31,7 +40,9 @@ steps:
       # Quote: YAML treats `if [` as a flow sequence, not a shell command.
       - 'if [ "$${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ]; then echo "gate off: skipping fleet registry push"; exit 0; fi'
       - REG="$${FLEET_REGISTRY:-127.0.0.1:5005}"
+      - REPLICA="$${FLEET_REGISTRY_REPLICA:-}"
       - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - REF="$${REG}/ollama-router"
-      # bake --set "*.tags=a,b" is one invalid tag on docker:27; use build -t twice.
-      - docker buildx build --target router --push -t "$${REF}:latest" -t "$${REF}:$${SHA}" --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .
+      - TAG_ARGS="-t $${REF}:latest -t $${REF}:$${SHA}"
+      - 'if [ -n "$${REPLICA}" ]; then TAG_ARGS="$${TAG_ARGS} -t $${REPLICA}/ollama-router:latest -t $${REPLICA}/ollama-router:$${SHA}"; echo "replicating to $${REPLICA}"; fi'
+      - docker buildx build --builder default --target router --push $${TAG_ARGS} --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .

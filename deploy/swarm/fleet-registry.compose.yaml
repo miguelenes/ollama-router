@@ -1,0 +1,21 @@
+# Fleet local registry for swarm deploy (HTTP on host :5005).
+# The Woodpecker agent and swarm nodes pull from this host — not GHCR.
+#
+#   docker compose -f deploy/swarm/fleet-registry.compose.yaml up -d
+#   curl -sf http://127.0.0.1:5005/v2/
+#
+# Docker daemon must trust the registry (see deploy/swarm/README.md):
+#   "insecure-registries": ["127.0.0.1:5005", "192.168.100.135:5005"]
+
+services:
+  registry:
+    image: registry:2
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5005:5000"
+      - "192.168.100.135:5005:5000"
+    volumes:
+      - fleet-registry-data:/var/lib/registry
+
+volumes:
+  fleet-registry-data:

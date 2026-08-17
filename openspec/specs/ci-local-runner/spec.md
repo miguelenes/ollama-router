@@ -48,3 +48,17 @@ Fleet-registry push and swarm deploy SHALL NOT run until an explicit Woodpecker 
 
 - **WHEN** the fleet push enablement secret is `true` and a push to the default branch occurs
 - **THEN** the pipeline is queued on the fleet Woodpecker agent matching the required execution environment
+
+### Requirement: Fleet registry push reaches the configured host registry
+
+When the fleet-registry push gate is enabled, the Woodpecker fleet-push pipeline SHALL push the router image to the configured `FLEET_REGISTRY` host as seen from the agent host network namespace (for example loopback `127.0.0.1:5005` or a LAN registry IP). The push path SHALL NOT rely on a build environment where `127.0.0.1` refers to an isolated builder container instead of the agent host.
+
+#### Scenario: Loopback registry push succeeds on the agent
+
+- **WHEN** the fleet push gate is `true`, `FLEET_REGISTRY` is `127.0.0.1:5005`, the fleet local registry is listening on the agent host, and a default-branch push runs the fleet-push pipeline
+- **THEN** the pipeline pushes `ollama-router:latest` and `ollama-router:sha-<git>` to the host registry and the tags are visible via the registry API on `:5005`
+
+#### Scenario: Isolated builder localhost does not satisfy push
+
+- **WHEN** a build step uses a container-isolated builder whose `127.0.0.1` is not the agent host
+- **THEN** the fleet-push pipeline MUST NOT use that builder as the sole push path for a loopback `FLEET_REGISTRY` without additional host networking configuration
