@@ -99,7 +99,7 @@ task dev            # host Ollama :11434 → router :11435 + agent :11436
 task compose:up     # Grafana :3000 / Prometheus :9090 (scrapes host :11435)
 task compose:mock   # optional canned CPU+GPU mock fleet on host :11435
 task agent:doctor   # read-only node-agent report for this machine
-task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97.1-slim-bookworm; GHA never installs task)
+task agent:release  # host-OS agent packages into dist/agent (Linux: Docker rust:1.97.1-slim-bookworm)
 ```
 
 The agent serve image is a target of the root `Dockerfile` (`docker build
@@ -119,7 +119,7 @@ bootstrap is a startup script; RunPod bootstrap is container `dockerStartCmd`
 (no SSH). The router may still upload an SSH public key to satisfy Verda's API
 but must never SSH. See `.opencode/wiki/concepts/ollama-router-node-tunnel.md`.
 
-CI runs the same cargo commands directly (no `task` binary on GitHub):
+CI (Woodpecker `.woodpecker/verify.yml`) runs the same cargo commands (no `task` binary in the job):
 
 ```bash
 cargo fmt --all -- --check
@@ -134,7 +134,7 @@ Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, 
 ## Learned User Preferences
 
 - Keep Context7 global; project `.cursor/mcp.json` / `.opencode/opencode.json` may pin docsrs, grafana, and prometheus for local compose (`GRAFANA_URL`/`PROMETHEUS_URL` only — never commit API keys or tokens). OpenCodeRAG is OpenCode-only — do not register it in Cursor MCP or call its tools from Cursor.
-- Pin GitHub Actions to version tags (`actions/checkout@v7`, `Swatinem/rust-cache@v2`, `github/codeql-action@v4`), never commit SHAs.
+- CI/CD is Woodpecker (`.woodpecker/`) on the fleet agent. Do not add GitHub Actions workflows.
 - Prefer Grafana Alloy over a pile of promtails for local compose log shipping; do not add Elasticsearch, Jaeger, or Zipkin unless OTLP/Tempo is explicitly required.
 - Keep the fleet overview Grafana dashboard (`ollama-router.json`) as the compose home dashboard; additive dashboards (nodes, jobs, etc.) must not replace it or change `GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH`.
 - Treat `fleet.yaml` as GitOps source of truth for permanent hosts; admin `PUT /router/v1/nodes` and enroll are debug/adopt only and must not write `fleet.yaml`.
@@ -144,7 +144,7 @@ Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, 
 ## Learned Workspace Facts
 
 - cargo-deny `[bans].allow` is an exclusive allowlist; omit it and only `[bans].deny` openssl, openssl-sys, and native-tls.
-- On this private repo without GitHub code scanning enabled, gate artifact attestations with `if: ${{ !github.event.repository.private }}` and gate CodeQL SARIF/`upload-database` (e.g. `CODEQL_SHOULD_UPLOAD`) so analysis can still run as workflow artifacts.
+- GHCR publish attests in-registry (`buildx --attest=type=provenance,mode=max`) when the GitHub repository is public; skip attestation when it is private.
 - Trust the node-agent `pressure_level`; do not port Python `classify_pressure` or RAM classify knobs into the router. Classification lives in `ollama-node-agent`. Keep VRAM/RAM headroom and the reservation ledger.
 - Agent JSON must ignore unknown fields (the agent may add columns). `deny_unknown_fields` is for our YAML only (tunables + fleet.yaml + agent config), not Verda/RunPod or capacity payloads.
 - Verda `ssh_public_key_file` / `ssh_private_key_file` exist only to satisfy a possible Verda `ssh_key_ids` API constraint — never add an SSH key env var, and the router must never SSH.
@@ -153,7 +153,7 @@ Dockerfile: multi-stage `rust:1.97.1-slim-bookworm` → `debian:bookworm-slim`, 
 - Model jobs: `auto_pull_on_miss` exists (default **false**, placement-gated via `static_capacity_fits`); still no `unsafe_single_node_mutate`. SQLite stores operation metadata only (no bodies or provider error text).
 - Local-dev is native `task dev` (host Ollama `:11434`, router `:11435`, agent `:11436`). `task compose:up` is Grafana `:3000` / Prometheus `:9090` only. `task compose:mock` is the canned fleet.
 - Node-agent GPU discovery: NVIDIA (`nvidia-smi`) and AMD ROCm (`rocm-smi`/`amd-smi`) are first-class; Auto order is NVIDIA inventory → macOS Metal → ROCm → CPU; never encode unmeasured VRAM as `0`.
-- Node-agent packaging: portable Linux tar.gz + `.deb` (nfpm), Windows MSI+SCM (not schtasks), macOS `.pkg`+LaunchDaemon; Linux `setup` must succeed without systemd (manual `serve`); ship via `task agent:release` / `release-agent.yml` (no Tauri).
+- Node-agent packaging: portable Linux tar.gz + `.deb` (nfpm), Windows MSI+SCM (not schtasks), macOS `.pkg`+LaunchDaemon; Linux `setup` must succeed without systemd (manual `serve`); ship via `task agent:release` (no Tauri, no GitHub Actions).
 
 <!-- BEGIN opencode-rag -->
 ## OpenCodeRAG (OpenCode only)

@@ -87,7 +87,7 @@ patterns:
     - "Dockerfile"
     - "Taskfile.yml"
     - "deploy/compose.yaml"
-    - ".github/workflows/ci.yml"
+    - ".woodpecker/verify.yml"
 
   "mock|ollama-mock":
     - "crates/ollama-mock/src/main.rs"

@@ -103,19 +103,13 @@ startup script on the instance.
 
 ## Packages
 
-Release workflow [`.github/workflows/release-agent.yml`](../../../.github/workflows/release-agent.yml)
-(not `ci.yml`) builds OS-native daemon artifacts. Local: `task agent:release`
-(plus `agent:release:linux` / `:deb` / `:macos` / `:windows`). From Linux,
-`task agent:release:github` dispatches that workflow and downloads artifacts
-into `dist/agent/` (`gh auth login` with repo + workflow scopes, or `GH_TOKEN`;
-push the branch/tag first; Darwin/Windows packages). Linux local
-recipes run in Docker `rust:1.97.1-slim-bookworm` (musl static-pie tarball via
+Local: `task agent:release` (plus `agent:release:linux` / `:deb` / `:macos` /
+`:windows`). There is no GitHub Actions release workflow. Linux recipes run in
+Docker `rust:1.97.1-slim-bookworm` (musl static-pie tarball via
 `RUSTFLAGS=-C target-feature=+crt-static -C link-self-contained=yes`; gnu `.deb`
-is bookworm glibc). GHA compiles on native
-`ubuntu-latest` / `ubuntu-24.04-arm` and packages in the same job; the `.deb`
-job uses a `rust:1.97.1-slim-bookworm` container. GHA never installs Task.
-`SHA256SUMS.txt` is an Actions artifact on every run, including
-`workflow_dispatch`; GitHub Release assets are `v*` tags only.
+is bookworm glibc). Darwin/Windows packages need the matching host
+(`task agent:release:macos` / `task agent:release:windows`). GitHub Release
+assets are `v*` tags only.
 
 | Artifact | Role |
 | --- | --- |
@@ -138,11 +132,11 @@ scheduled task `ollama-node-agent`. After MSI, run elevated `setup` for Ollama
 and firewall; do not also run the Ollama tray on `:11434` (LocalSystem GPU vs
 user tray). Unsigned Windows artifacts may hit SmartScreen. Local
 `task agent:release:windows` is a no-op unless the rustc host is
-`x86_64-pc-windows-msvc` (do not ship mingw labeled as the GHA exe).
+`x86_64-pc-windows-msvc` (do not ship mingw labeled as the Windows exe).
 macOS `.pkg` is agent+LaunchDaemon only (`setup` brew-or-fails Ollama). After
 `uninstall`, `sudo pkgutil --forget com.ollama.node-agent`. Unsigned pkgs are
 OK on a private LAN or private share; Gatekeeper blocks Safari quarantine. Local
-`task agent:release:macos` skips unless Darwin (GHA `macos-14` builds both
+`task agent:release:macos` skips unless Darwin (builds both
 `aarch64-apple-darwin` and `x86_64-apple-darwin`). pkg upgrades replace the
 packaged `config.yaml`.
 
