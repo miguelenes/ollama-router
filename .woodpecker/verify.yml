@@ -11,6 +11,9 @@ steps:
   - name: verify
     image: rust:1.97-slim-bookworm
     commands:
+      # slim image has no git; cargo-deny clones RustSec/advisory-db.
+      - apt-get update
+      - apt-get install -y --no-install-recommends git ca-certificates
       # llvm-tools is not in the default rustup profile; clippy/rustfmt are.
       - rustup component add llvm-tools-preview
       - cargo fmt --all -- --check
