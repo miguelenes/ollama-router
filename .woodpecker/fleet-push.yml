@@ -9,8 +9,9 @@
 # deploy/swarm/README.md).
 
 when:
-  event: push
-  branch: main
+  - event: push
+    branch: main
+  - event: manual
 
 steps:
   - name: fleet-push

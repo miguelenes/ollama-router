@@ -11,8 +11,9 @@
 # treats secrets as host env / Swarm secrets.
 
 when:
-  event: push
-  branch: main
+  - event: push
+    branch: main
+  - event: manual
 
 depends_on:
   - name: fleet-push
