@@ -9,7 +9,7 @@
 when:
   - event: push
     branch: main
-  - event: tag
+  - event: [tag, manual]
 
 steps:
   - name: resolve-visibility
