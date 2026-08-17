@@ -33,7 +33,7 @@ steps:
       - set -e
       # visibility from the previous step (shared workspace)
       - . ./vis.env
-      - docker login ghcr.io -u "$$CI_REPO_OWNER" --password-stdin <<< "$$REGISTRY_TOKEN"
+      - echo "$$REGISTRY_TOKEN" | docker login ghcr.io -u "$$CI_REPO_OWNER" --password-stdin
       - REF="ghcr.io/$$(echo "$$CI_REPO" | tr '[:upper:]' '[:lower:]')"
       - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - TAGS="$SHA"
