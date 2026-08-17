@@ -27,4 +27,4 @@ steps:
   - name: swarm-stack-refs
     image: alpine:3.20
     commands:
-      - if grep -rInE "^[[:space:]]*image:[[:space:]]*.*ghcr\.io" --include="*.yml" --include="*.yaml" deploy/swarm/; then echo "deploy/swarm image refs must use the fleet local registry only (no ghcr.io)" >&2; exit 1; fi
+      - 'if grep -rInE "^[[:space:]]*image:[[:space:]]*.*ghcr\.io" --include="*.yml" --include="*.yaml" deploy/swarm/; then echo "deploy/swarm image refs must use the fleet local registry only (no ghcr.io)" >&2; exit 1; fi'

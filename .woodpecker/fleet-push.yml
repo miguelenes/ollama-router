@@ -26,7 +26,8 @@ steps:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - set -e
-      - if [ "${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ]; then echo "gate off: skipping fleet registry push"; exit 0; fi
+      # Quote: YAML treats `if [` as a flow sequence, not a shell command.
+      - 'if [ "${FLEET_REGISTRY_PUSH_ENABLED:-}" != "true" ]; then echo "gate off: skipping fleet registry push"; exit 0; fi'
       - REG="${FLEET_REGISTRY:-127.0.0.1:5005}"
       - SHA="sha-$(echo "$CI_COMMIT_SHA" | cut -c1-7)"
       - REF="${REG}/ollama-router"

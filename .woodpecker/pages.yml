@@ -27,7 +27,8 @@ steps:
         from_secret: PAGES_TOKEN
     commands:
       - set -e
-      - if [ -z "${PAGES_TOKEN:-}" ]; then echo "PAGES_TOKEN secret not set: skipping Pages publish"; exit 0; fi
+      # Quote: YAML treats `if [` as a flow sequence, not a shell command.
+      - 'if [ -z "${PAGES_TOKEN:-}" ]; then echo "PAGES_TOKEN secret not set: skipping Pages publish"; exit 0; fi'
       - apk add --no-cache git
       - git checkout --orphan gh-pages
       - git rm -rf --quiet .

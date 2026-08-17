@@ -2,7 +2,7 @@
 
 - [x] 1.1 Add `deploy/woodpecker/` compose: `woodpeckerci/woodpecker-server:v3` + `woodpeckerci/woodpecker-agent:v3` (Docker socket mount, `WOODPECKER_AGENT_SECRET`), GitHub OAuth App env (`WOODPECKER_GITHUB_CLIENT`/`SECRET`, `WOODPECKER_HOST`, `WOODPECKER_OPEN`), persistent volumes, `.env.example`
 - [x] 1.2 Write `deploy/woodpecker/README.md`: create GitHub OAuth App, set `WOODPECKER_HOST`, generate agent secret, start the stack, activate the repo (admin rights), confirm the agent is online
-- [ ] 1.3 Create Woodpecker repository secrets: `REGISTRY_TOKEN` (GHCR fine-grained PAT, `read/write:packages`), `PAGES_TOKEN` (`contents:write` for `gh-pages`); leave gates `FLEET_REGISTRY_PUSH_ENABLED` / `SWARM_DEPLOY_ENABLED` unset (off)
+- [x] 1.3 Create Woodpecker repository secrets: `REGISTRY_TOKEN` (GHCR fine-grained PAT, `read/write:packages`), `PAGES_TOKEN` (`contents:write` for `gh-pages`); leave gates `FLEET_REGISTRY_PUSH_ENABLED` / `SWARM_DEPLOY_ENABLED` unset (off)
 
 ## 2. Verify + image pipelines
 

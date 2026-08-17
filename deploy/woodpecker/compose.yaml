@@ -29,10 +29,14 @@ services:
       # pipelines stay blocked until approval (v3 default; pin it).
       WOODPECKER_DEFAULT_APPROVAL_MODE: forks
       WOODPECKER_HOST: ${WOODPECKER_HOST}
+      # Public URL GitHub posts webhooks to (loopback WOODPECKER_HOST cannot
+      # be a GitHub hook target). Empty = same as WOODPECKER_HOST.
+      WOODPECKER_EXPERT_WEBHOOK_HOST: ${WOODPECKER_EXPERT_WEBHOOK_HOST:-}
       WOODPECKER_GITHUB: "true"
       WOODPECKER_GITHUB_CLIENT: ${WOODPECKER_GITHUB_CLIENT}
       WOODPECKER_GITHUB_SECRET: ${WOODPECKER_GITHUB_SECRET}
       WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_GRPC_SECRET: ${WOODPECKER_GRPC_SECRET}
       WOODPECKER_LOG_LEVEL: info
 
   woodpecker-agent:
@@ -47,6 +51,7 @@ services:
     environment:
       WOODPECKER_SERVER: woodpecker-server:9000
       WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_GRPC_SECRET: ${WOODPECKER_GRPC_SECRET}
       WOODPECKER_MAX_WORKFLOWS: "2"
 
 volumes:
