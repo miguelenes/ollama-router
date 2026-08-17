@@ -16,6 +16,7 @@ services:
     image: woodpeckerci/woodpecker-agent:v3
     command: agent
     volumes:
+      - woodpecker_agent_nas_config:/etc/woodpecker
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WOODPECKER_SERVER: ${WOODPECKER_SERVER:-100.83.91.36:9000}
@@ -32,3 +33,6 @@ services:
       restart_policy:
         condition: any
         delay: 5s
+
+volumes:
+  woodpecker_agent_nas_config:

@@ -21,6 +21,7 @@ services:
     restart: unless-stopped
     network_mode: host
     volumes:
+      - woodpecker-agent-nas-config:/etc/woodpecker
       - /var/run/docker.sock:/var/run/docker.sock
     environment:
       WOODPECKER_SERVER: ${WOODPECKER_SERVER:-192.168.100.135:9000}
@@ -30,3 +31,6 @@ services:
       WOODPECKER_HOSTNAME: nas
       WOODPECKER_MAX_WORKFLOWS: "1"
       WOODPECKER_HEALTHCHECK: "false"
+
+volumes:
+  woodpecker-agent-nas-config:
