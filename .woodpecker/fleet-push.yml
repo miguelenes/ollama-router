@@ -43,6 +43,4 @@ steps:
       - REPLICA="$${FLEET_REGISTRY_REPLICA:-}"
       - SHA="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - REF="$${REG}/ollama-router"
-      - TAG_ARGS="-t $${REF}:latest -t $${REF}:$${SHA}"
-      - 'if [ -n "$${REPLICA}" ]; then TAG_ARGS="$${TAG_ARGS} -t $${REPLICA}/ollama-router:latest -t $${REPLICA}/ollama-router:$${SHA}"; echo "replicating to $${REPLICA}"; fi'
-      - docker buildx build --builder default --target router --push $${TAG_ARGS} --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .
+      - 'if [ -n "$${REPLICA}" ]; then echo "replicating to $${REPLICA}"; docker buildx build --builder default --target router --push -t "$${REF}:latest" -t "$${REF}:$${SHA}" -t "$${REPLICA}/ollama-router:latest" -t "$${REPLICA}/ollama-router:$${SHA}" --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .; else docker buildx build --builder default --target router --push -t "$${REF}:latest" -t "$${REF}:$${SHA}" --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .; fi'

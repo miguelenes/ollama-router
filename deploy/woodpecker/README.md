@@ -116,7 +116,7 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
 | `.woodpecker/verify.yml` | push (same-repo branches), manual | fmt, clippy, test, deny, coverage ≥80%, no-`ghcr.io` stack-refs grep |
 | `.woodpecker/image.yml` | push (same-repo branches) | bake `router`, run container, probe `/healthz` |
 | `.woodpecker/publish-ghcr.yml` | push (main), tag `v*` | push `router` to `ghcr.io/<owner>/<repo>` (edge/sha/semver/latest) + provenance attestation when public |
-| `.woodpecker/fleet-push.yml` | push (main), gate | push `router` to the fleet local registry only |
+| `.woodpecker/fleet-push.yml` | push (main), gate | push `router` to fleet registry (+ optional `FLEET_REGISTRY_REPLICA`) |
 | `.woodpecker/swarm-deploy.yml` | push (main), both gates | `docker stack deploy` the new SHA tag (depends on fleet push) |
 | `.woodpecker/pages.yml` | push (main), manual | build the Starlight site, push `site/dist` to `gh-pages` |
 
