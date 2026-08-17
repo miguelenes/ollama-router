@@ -1,0 +1,107 @@
+name: Deploy Swarm (fleet local registry)
+
+# Fleet-local build + deploy path. Nothing here touches ghcr.io: the router
+# image is baked and pushed to the fleet local registry, and the ollama-router
+# Swarm stack is updated from that registry only.
+#
+# Enablement gates (repository Actions variables, all default off):
+#   FLEET_REGISTRY_PUSH_ENABLED  - push `router` to the fleet local registry
+#   SWARM_DEPLOY_ENABLED         - update the live Swarm stack after a push
+#
+# Both jobs run on the self-hosted fleet runner (labels `self-hosted`,
+# `linux`, `ollama-router`) so the push and deploy stay on the host that can
+# reach the local registry and the Swarm control plane.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fleet-registry-push:
+    name: Fleet registry push
+    if: ${{ vars.FLEET_REGISTRY_PUSH_ENABLED == 'true' }}
+    runs-on: [self-hosted, linux, ollama-router]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Fleet registry (loopback default; push host)
+        run: echo "FLEET_REGISTRY=${FLEET_REGISTRY:-127.0.0.1:5005}" >> "$GITHUB_ENV"
+        env:
+          FLEET_REGISTRY: ${{ vars.FLEET_REGISTRY }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Extract local-registry metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.FLEET_REGISTRY }}/ollama-router
+          tags: |
+            type=sha
+            type=raw,value=latest,enable=true
+
+      # Push only to the fleet local registry. This job never logs in to or
+      # pushes ghcr.io; the swarm path is local-registry only (see spec
+      # swarmnet-local-deploy). The daemon must trust the registry as an
+      # insecure registry (see deploy/swarm/README.md).
+      - name: Bake and push router to fleet registry
+        id: build
+        uses: docker/bake-action@v7
+        with:
+          source: .
+          targets: router
+          push: true
+          set: |
+            *.tags=${{ join(fromJSON(steps.meta.outputs.json).tags, ',') }}
+            *.labels=${{ join(fromJSON(steps.meta.outputs.json).labels, ',') }}
+
+  swarm-deploy:
+    name: Swarm deploy
+    needs: fleet-registry-push
+    # Deploy is separately gated from registry push: images can be published
+    # to the local registry before live traffic is moved.
+    if: ${{ vars.FLEET_REGISTRY_PUSH_ENABLED == 'true' && vars.SWARM_DEPLOY_ENABLED == 'true' }}
+    runs-on: [self-hosted, linux, ollama-router]
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # DEPLOY_REGISTRY may differ from FLEET_REGISTRY when the push host is
+      # loopback but swarm nodes must pull via the LAN IP (see README).
+      - name: Resolve registries and tag
+        run: |
+          FLEET_REGISTRY="${FLEET_REGISTRY:-127.0.0.1:5005}"
+          DEPLOY_REGISTRY="${DEPLOY_REGISTRY:-$FLEET_REGISTRY}"
+          echo "DEPLOY_REGISTRY=${DEPLOY_REGISTRY}" >> "$GITHUB_ENV"
+          echo "ROUTER_TAG=sha-${GITHUB_SHA::7}" >> "$GITHUB_ENV"
+        env:
+          FLEET_REGISTRY: ${{ vars.FLEET_REGISTRY }}
+          DEPLOY_REGISTRY: ${{ vars.DEPLOY_REGISTRY }}
+
+      # Runs on the swarm manager (or a host with DOCKER_HOST pointing at it).
+      # The stack file interpolates ${DEPLOY_REGISTRY} / ${ROUTER_TAG} from
+      # this step's environment. CI never writes fleet.yaml; the stack mounts
+      # inventory read-only and treats secrets as host env / Swarm secrets.
+      - name: Update ollama-router stack
+        run: |
+          docker stack deploy \
+            --prune \
+            --with-registry-auth \
+            -c deploy/swarm/ollama-router.stack.yml \
+            ollama-router
+          docker service ls --filter name=ollama-router_router

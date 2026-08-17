@@ -128,6 +128,12 @@ curl -fsS http://127.0.0.1:11434/healthz
 targets of the same file: `docker build --target mock` / `docker build --target
 agent` (there is no separate `Dockerfile.agent`).
 
+Public builds are published to GHCR:
+`docker pull ghcr.io/miguelenes/ollama-router:latest` (or `edge` / `sha-*` /
+semver tags). The fleet Swarm deploy path uses the **local registry only** —
+see [`deploy/swarm/README.md`](deploy/swarm/README.md); the stack never pulls
+`ghcr.io`.
+
 ```bash
 # Host Ollama already on :11434 — router :11435, agent :11436 (does not run setup)
 task dev

@@ -1,0 +1,81 @@
+# ollama-router Swarm stack — fleet local registry only.
+#
+# Deployed with:
+#   docker stack deploy -c deploy/swarm/ollama-router.stack.yml ollama-router
+#
+# Image refs here must stay on the fleet local registry; CI greps this
+# directory and fails if a `ghcr.io` reference sneaks in (spec:
+# swarmnet-local-deploy "Stack image refs are local-registry only").
+#
+# Interpolation (from the deploy step's environment, never committed):
+#   DEPLOY_REGISTRY  pull host for swarm nodes (default 127.0.0.1:5005; set to
+#                    the registry LAN IP when nodes pull over the network)
+#   ROUTER_TAG       image tag (default latest; the CI deploy job pins the
+#                    git SHA tag, e.g. sha-8cbc365)
+#   OLLAMA_ROUTER_ADMIN_TOKEN, VERDA_*, RUNPOD_API_KEY, zrok env
+#                    host environment / Swarm secrets (see README.md)
+#
+# One router replica only: FleetState file lock is same-host only, two
+# replicas can double-create cloud GPUs. Do not scale this service.
+
+services:
+  router:
+    image: ${DEPLOY_REGISTRY:-127.0.0.1:5005}/ollama-router:${ROUTER_TAG:-latest}
+    ports:
+      - "11434:11434" # Ollama-compatible listen (override with OLLAMA_ROUTER_HOST/PORT env)
+    environment:
+      # Admin API is fail-closed: unset token -> /router/v1/* returns 403.
+      OLLAMA_ROUTER_ADMIN_TOKEN: ${OLLAMA_ROUTER_ADMIN_TOKEN:-}
+      OLLAMA_ROUTER_FLEET: /etc/ollama-router/fleet.yaml
+      # Optional cloud providers (host env / Swarm secrets; never commit):
+      # VERDA_CLIENT_ID, VERDA_CLIENT_SECRET, VERDA_API_ENDPOINT
+      # RUNPOD_API_KEY, RUNPOD_API_ENDPOINT
+      # ZROK_API_ENDPOINT, ZROK_ENABLE_TOKEN_ENV
+    volumes:
+      # Inventory is GitOps / operator-owned: mounted read-only, CI never
+      # writes fleet.yaml.
+      - /etc/ollama-router/fleet.yaml:/etc/ollama-router/fleet.yaml:ro
+      # Durable FleetState + model-operations SQLite live under /var/lib/ollama-router.
+      - ollama-router-state:/var/lib/ollama-router
+    configs:
+      # Optional tunables overlay (defaults in router.defaults.yaml apply when absent).
+      - source: ollama-router-config
+        target: /etc/ollama-router/config.yaml
+        mode: 0440
+    secrets:
+      # Placeholder names only. Create with `docker secret create` and enable
+      # with `--secret` on the service, or pass env from the host. Example:
+      #   printf '%s' "$ADMIN_TOKEN" | docker secret create ollama-router-admin-token -
+      #   docker service update --secret-add ollama-router-admin-token ollama-router_router
+      - ollama-router-admin-token
+    deploy:
+      replicas: 1
+      # Bind-mounted fleet.yaml lives on the manager; keep the router there.
+      placement:
+        constraints:
+          - node.role == manager
+      restart_policy:
+        condition: any
+        delay: 5s
+        window: 120s
+      update_config:
+        # Never run two replicas sharing FleetState: stop the old one first.
+        order: stop-first
+        failure_action: rollback
+        delay: 10s
+
+volumes:
+  ollama-router-state:
+
+configs:
+  ollama-router-config:
+    file: router.config.example.yaml
+    # Do not commit live tunables here; ship a placeholder template instead
+    # (see deploy/swarm/README.md). If no overlay is wanted, remove this
+    # config and the router's `configs:` entry.
+
+secrets:
+  ollama-router-admin-token:
+    # Placeholder; replaced by the operator's `docker secret create` at
+    # bootstrap. Never commit a live token.
+    external: true
