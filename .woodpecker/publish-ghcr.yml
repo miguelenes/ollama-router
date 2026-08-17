@@ -40,6 +40,4 @@ steps:
       - 'if [ "$$CI_COMMIT_EVENT" = "push" ] && [ "$$CI_COMMIT_BRANCH" = "main" ]; then TAGS="edge,$$TAGS"; fi'
       - 'if [ -n "$${CI_COMMIT_TAG:-}" ]; then ver="$${CI_COMMIT_TAG#v}"; major="$${ver%%.*}"; rest="$${ver#*.}"; minor="$${rest%%.*}"; TAGS="$$CI_COMMIT_TAG,$$major,$$major.$$minor,latest,$$TAGS"; fi'
       - IMAGES=""; for t in $$(echo "$$TAGS" | tr ',' ' '); do IMAGES="$$IMAGES,$${REF}:$$t"; done; IMAGES="$${IMAGES#,}"
-      - ATTR=""
-      - 'if [ "$${REPO_PRIVATE}" = "false" ]; then ATTR="--attest type=provenance,mode=max"; fi'
-      - docker buildx bake router --push $$ATTR --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - docker buildx bake router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
