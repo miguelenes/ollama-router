@@ -1,5 +1,13 @@
 # Fleet local registry for swarm deploy (HTTP on host :5005).
-# The Woodpecker agent and swarm nodes pull from this host — not GHCR.
+# Push-only filesystem registry for the CI agent host — not GHCR.
+#
+# Do NOT add REGISTRY_PROXY_REMOTEURL / Distribution pull-through proxy mode:
+# proxy registries do not accept push, and fleet-push requires docker push.
+# Hub caching is a separate registry role — see deploy/swarm/README.md
+# "Registry roles (push vs Hub cache)" (cache.bicorn-beta.ts.net / NAS :9999).
+#
+# On the NAS Swarm manager, fleet :5005 may be the Portainer `registry`
+# service instead of this compose file; same push-capable role.
 #
 #   docker compose -f deploy/swarm/fleet-registry.compose.yaml up -d
 #   curl -sf http://127.0.0.1:5005/v2/

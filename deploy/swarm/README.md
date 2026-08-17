@@ -31,6 +31,40 @@ Woodpecker agent  ── push ──►  :5005 fleet registry (primary)
 Woodpecker agent  ── stack ──►  docker stack deploy ollama-router (local only)
 ```
 
+## Registry roles (push vs Hub cache)
+
+This is **not** the same as **Two registries, two jobs** above (GHCR vs fleet
+deploy). Within the fleet LAN you still run **two Distribution registry
+roles** — do not merge them into one container:
+
+| Role | Typical host / port | Push? | Purpose |
+| --- | --- | --- | --- |
+| Fleet push registry | `127.0.0.1:5005` (CI agent), NAS LAN `192.168.100.5:5005`, optional Tailscale `registry.bicorn-beta.ts.net` | **Yes** | Woodpecker `fleet-push` publishes `ollama-router:*`; Swarm pulls via `DEPLOY_REGISTRY` |
+| Hub pull-through cache | NAS `:9999`, Tailscale `cache.bicorn-beta.ts.net` | **No** | Docker daemon `registry-mirrors` for Docker Hub pulls |
+
+**Why not one container?** Distribution [pull-through cache
+mode](https://distribution.github.io/distribution/recipes/mirror/) does **not
+support push**. Fleet-push requires `docker push` to `:5005/ollama-router`.
+Enabling `REGISTRY_PROXY_REMOTEURL` on the fleet registry would break or
+undefined-push behavior. Hub caching stays a **separate** registry process.
+
+**`FLEET_REGISTRY_REPLICA`** (see [Push host vs pull host](#push-host-vs-pull-host-split-agents))
+replicates fleet tags to a **second push-capable** registry (for example NAS
+LAN `:5005`). It is **not** the Hub cache — never set it to
+`cache.bicorn-beta.ts.net` or NAS `:9999`.
+
+Example daemon mirror (Hub only — not fleet deploy):
+
+```json
+{
+  "registry-mirrors": ["https://cache.bicorn-beta.ts.net"]
+}
+```
+
+On the NAS manager, fleet `:5005` and Hub cache `:9999` are often the
+Portainer `registry` stack (`registry` + Tailscale sidecar + `cache` +
+sidecar) — out-of-repo fleet infra, same two-role split.
+
 ## Fleet CI agent (Woodpecker)
 
 All pipelines run on the fleet-hosted Woodpecker agent (Docker backend) —
