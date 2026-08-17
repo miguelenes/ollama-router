@@ -33,6 +33,6 @@
 
 - [x] 6.1 Remove `.github/workflows/` (ci, docker, pages, deploy-swarm, codeql, dependency-review, release-agent) once the Woodpecker pipelines are green
 - [x] 6.2 With gates unset, confirm default-branch verify still passes on the fleet agent (no GitHub-hosted runner)
-- [ ] 6.3 With push gate on (deploy off), confirm the local-registry image appears and the stack is unchanged
+- [x] 6.3 With push gate on (deploy off), confirm the local-registry image appears and the stack is unchanged
 - [ ] 6.4 With both gates on, confirm the stack updates to the new SHA and `/healthz` responds on the published route
 - [x] 6.5 Confirm the Pages URL serves the site and GHCR pull works anonymously (or per package visibility settings)
