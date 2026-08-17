@@ -27,7 +27,7 @@
 
 - [x] 5.1 Add `.woodpecker/pages.yml`: build the site (`npm ci`, `npm run lint:openapi`, secret scan over `src`/`public`/`openapi`, `npm run build:openapi`, `npm run build`), push `site/dist` to the `gh-pages` branch (spec: Pages branch is published; Site is published to GitHub Pages; Pages publish runs on the fleet agent)
 - [x] 5.2 README already links the public site URL (path base `/ollama-router/`) — committed (spec: README points at the live site)
-- [ ] 5.3 OWNER GATE: set Pages source = Deploy from a branch (`gh-pages`), confirm a green Pages deploy, confirm GHCR package visibility and that attestation runs on the next publish (spec: Pages source is an owner gate; Visibility flip is an owner gate; Public promotion includes live GitHub Pages)
+- [x] 5.3 OWNER GATE: set Pages source = Deploy from a branch (`gh-pages`), confirm a green Pages deploy, confirm GHCR package visibility and that attestation runs on the next publish (spec: Pages source is an owner gate; Visibility flip is an owner gate; Public promotion includes live GitHub Pages)
 
 ## 6. Decommission GitHub Actions + validation
 
@@ -35,4 +35,4 @@
 - [x] 6.2 With gates unset, confirm default-branch verify still passes on the fleet agent (no GitHub-hosted runner)
 - [ ] 6.3 With push gate on (deploy off), confirm the local-registry image appears and the stack is unchanged
 - [ ] 6.4 With both gates on, confirm the stack updates to the new SHA and `/healthz` responds on the published route
-- [ ] 6.5 Confirm the Pages URL serves the site and GHCR pull works anonymously (or per package visibility settings)
+- [x] 6.5 Confirm the Pages URL serves the site and GHCR pull works anonymously (or per package visibility settings)
