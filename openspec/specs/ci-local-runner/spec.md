@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Runs Docker image build, registry publish, and swarm deploy pipelines on a fleet-hosted Woodpecker CI agent so heavy work stays on the home fleet instead of GitHub-hosted VMs.
+Runs all CI/CD pipelines (Rust verify, image bake, GHCR publish, fleet-registry push, swarm deploy, and Pages) on a fleet-hosted Woodpecker CI agent so work stays on the home fleet instead of GitHub-hosted VMs.
 
 ## Requirements
 
