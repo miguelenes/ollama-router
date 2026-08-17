@@ -23,9 +23,6 @@ id_rsa*
 # Native `task dev` job store + fleet state
 .local/
 
-# AICode index transaction scratch (durable segments stay tracked)
-.aicode/index/tmp/
-
 .idea/
 .vscode/
 *.swp

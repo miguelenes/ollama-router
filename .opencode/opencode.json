@@ -90,28 +90,12 @@
         },
         "clangd": {
             "disabled": true
-        },
-        "gopls": {
-            "command": [
-                "gopls"
-            ],
-            "extensions": [
-                ".go"
-            ]
         }
     },
     "instructions": [
         "AGENTS.md",
         ".cursor/rules/*.mdc",
-        "apps/*/AGENTS.md",
-        "packages/*/AGENTS.md",
-        "projects/*/AGENTS.md",
-        "services/*/AGENTS.md",
-        "web/AGENTS.md",
-        "console/AGENTS.md",
-        "console/*/AGENTS.md",
-        "nas-agent/AGENTS.md",
-        "stacks/*/AGENTS.md"
+        "deploy/AGENTS.md"
     ],
     "mcp": {
         "docsrs": {
@@ -144,9 +128,6 @@
             "enabled": true
         }
     },
-    "plugin": [
-        "./.opencode/plugins/skills-analytics.js"
-    ],
     "watcher": {
         "ignore": [
             ".git/**",

@@ -107,7 +107,6 @@ exclude:
   - "**/*.lock"
   - "**/*.bin"
   - "**/prompt_drafts.md"
-  - "**/.aicode/**"
   - "**/target/**"
   - "**/.task/**"
   - "**/*.map"

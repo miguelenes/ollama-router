@@ -1,157 +1,160 @@
 {
-    "embedding": {
-        "provider": "ollama",
-        "baseUrl": "http://100.106.14.5:11434/api",
-        "model": "qwen3-embedding:4b",
-        "timeoutMs": 180000,
-        "keepAlive": "10m",
-        "queryPrefix": "Instruct: Given a code search query, retrieve relevant Rust source, config, or design notes that match the query\nQuery:"
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/api",
+    "model": "qwen3-embedding:4b",
+    "timeoutMs": 180000,
+    "keepAlive": "10m",
+    "queryPrefix": "Instruct: Given a code search query, retrieve relevant Rust source, config, or design notes that match the query\nQuery:"
+  },
+  "indexing": {
+    "includeExtensions": [
+      ".rs",
+      ".toml",
+      ".yaml",
+      ".yml",
+      ".md",
+      ".mdc",
+      ".json",
+      ".sh",
+      ".bash",
+      ".plist",
+      ".wxs",
+      "dockerfile",
+      "containerfile",
+      ".dockerfile",
+      ".containerfile"
+    ],
+    "excludeDirs": [
+      "target",
+      "vendor",
+      "node_modules",
+      ".git",
+      "dist",
+      "build",
+      ".local",
+      "__pycache__",
+      ".venv",
+      ".agents",
+      ".ai-code-review",
+      ".claude",
+      "wasm",
+      ".commandcode",
+      "graphify-out",
+      ".vscode",
+      ".vs",
+      ".idea",
+      ".cache",
+      ".opencode/rag_db",
+      ".opencode/node_modules",
+      ".opencode/plugins",
+      ".cursor/skills",
+      "deploy/observability/grafana/dashboards/stack",
+      "site/node_modules",
+      "site/dist"
+    ],
+    "excludeFiles": [
+      "Cargo.lock",
+      "package-lock.json",
+      "bun.lock",
+      "bun.lockb",
+      "opencode-rag.log",
+      "skills-lock.json"
+    ],
+    "chunkOverlap": 8,
+    "minFileSizeBytes": 32,
+    "concurrency": 4,
+    "embedBatchSize": 24,
+    "embedConcurrency": 1,
+    "ollamaMaxBatchSize": 24,
+    "descriptionConcurrency": 1,
+    "optimizeIntervalWindows": 8
+  },
+  "vectorStore": {
+    "path": "./.opencode/rag_db"
+  },
+  "retrieval": {
+    "topK": 16,
+    "minScore": 0.28,
+    "hybridSearch": {
+      "enabled": true,
+      "keywordWeight": 0.45
     },
-    "indexing": {
-        "includeExtensions": [
-            ".rs",
-            ".toml",
-            ".yaml",
-            ".yml",
-            ".md",
-            ".mdc",
-            ".json",
-            ".sh",
-            ".bash",
-            ".plist",
-            ".wxs",
-            "dockerfile",
-            "containerfile",
-            ".dockerfile",
-            ".containerfile"
-        ],
-        "excludeDirs": [
-            "target",
-            "vendor",
-            "node_modules",
-            ".git",
-            "dist",
-            "build",
-            ".local",
-            "__pycache__",
-            ".venv",
-            ".agents",
-            "wasm",
-            ".commandcode",
-            "graphify-out",
-            ".vscode",
-            ".vs",
-            ".idea",
-            ".cache",
-            ".opencode/rag_db",
-            ".opencode/node_modules",
-            ".opencode/plugins",
-            ".cursor/skills",
-            "deploy/observability/grafana/dashboards/stack",
-            "site/node_modules",
-            "site/dist"
-        ],
-        "excludeFiles": [
-            "Cargo.lock",
-            "package-lock.json",
-            "bun.lock",
-            "bun.lockb",
-            "opencode-rag.log"
-        ],
-        "chunkOverlap": 8,
-        "minFileSizeBytes": 32,
-        "concurrency": 4,
-        "embedBatchSize": 24,
-        "embedConcurrency": 1,
-        "ollamaMaxBatchSize": 24,
-        "descriptionConcurrency": 1,
-        "optimizeIntervalWindows": 8
-    },
-    "vectorStore": {
-        "path": "./.opencode/rag_db"
-    },
-    "retrieval": {
-        "topK": 16,
-        "minScore": 0.28,
-        "hybridSearch": {
-            "enabled": true,
-            "keywordWeight": 0.45
-        },
-        "contextOptimization": {
-            "enabled": true,
-            "maxPerFile": 4,
-            "mergeAdjacent": true,
-            "adjacentGapThreshold": 8,
-            "similarityThreshold": 0.82
-        }
-    },
-    "openCode": {
-        "enabled": true,
-        "maxContextChunks": 12,
-        "readOverride": true,
-        "readRelatedFilesMax": 6,
-        "autoIndex": {
-            "enabled": true,
-            "debounceMs": 2000,
-            "intervalMs": 300000,
-            "watcher": "chokidar"
-        }
-    },
-    "imageDescription": {
-        "enabled": false,
-        "provider": "ollama",
-        "model": "moondream:latest",
-        "baseUrl": "http://100.106.14.5:11434/api",
-        "timeoutMs": 60000,
-        "think": false,
-        "numCtx": 2048
-    },
-    "description": {
-        "enabled": true,
-        "provider": "ollama",
-        "baseUrl": "http://100.106.14.5:11434/api",
-        "model": "qwen2.5-coder:7b",
-        "think": false,
-        "numCtx": 4096,
-        "timeoutMs": 90000,
-        "keepAlive": "5m",
-        "maxContentChars": 6000,
-        "batchEnabled": false,
-        "retryMax": 3,
-        "retryBaseDelayMs": 1000,
-        "systemPrompt": "Describe this Rust/config/docs chunk in ONE sentence (max 24 words): crate role, types/traits/impls, and notable side effects. No code dump."
-    },
-    "wikiMode": {
-        "enabled": true
-    },
-    "memory": {
-        "enabled": true,
-        "autoInject": false,
-        "minConfidence": 0.5,
-        "recallMinScore": 0.72,
-        "promptEnforcement": true,
-        "sessionEndExtraction": true
-    },
-    "mcp": {
-        "enabled": false
-    },
-    "logging": {
-        "level": "info",
-        "logFilePath": "./.opencode/opencode-rag.log"
-    },
-    "chunking": {
-        "nodeTypes": {
-            "rust": [
-                "function_item",
-                "struct_item",
-                "enum_item",
-                "trait_item",
-                "impl_item",
-                "type_item",
-                "const_item",
-                "static_item",
-                "macro_definition"
-            ]
-        }
+    "contextOptimization": {
+      "enabled": true,
+      "maxPerFile": 4,
+      "mergeAdjacent": true,
+      "adjacentGapThreshold": 8,
+      "similarityThreshold": 0.82
     }
+  },
+  "openCode": {
+    "enabled": true,
+    "maxContextChunks": 12,
+    "readOverride": true,
+    "readRelatedFilesMax": 6,
+    "autoIndex": {
+      "enabled": true,
+      "debounceMs": 2000,
+      "intervalMs": 300000,
+      "watcher": "chokidar"
+    }
+  },
+  "imageDescription": {
+    "enabled": false,
+    "provider": "ollama",
+    "model": "moondream:latest",
+    "baseUrl": "http://127.0.0.1:11434/api",
+    "timeoutMs": 60000,
+    "think": false,
+    "numCtx": 2048
+  },
+  "description": {
+    "enabled": true,
+    "provider": "ollama",
+    "baseUrl": "http://127.0.0.1:11434/api",
+    "model": "qwen3:4b",
+    "think": false,
+    "numCtx": 4096,
+    "timeoutMs": 90000,
+    "keepAlive": "5m",
+    "maxContentChars": 6000,
+    "batchEnabled": false,
+    "retryMax": 3,
+    "retryBaseDelayMs": 1000,
+    "systemPrompt": "Describe this Rust/config/docs chunk in ONE sentence (max 24 words): crate role, types/traits/impls, and notable side effects. No code dump."
+  },
+  "wikiMode": {
+    "enabled": true
+  },
+  "memory": {
+    "enabled": true,
+    "autoInject": false,
+    "minConfidence": 0.5,
+    "recallMinScore": 0.72,
+    "promptEnforcement": true,
+    "sessionEndExtraction": true
+  },
+  "mcp": {
+    "enabled": false
+  },
+  "logging": {
+    "level": "info",
+    "logFilePath": "./.opencode/opencode-rag.log"
+  },
+  "chunking": {
+    "nodeTypes": {
+      "rust": [
+        "function_item",
+        "struct_item",
+        "enum_item",
+        "trait_item",
+        "impl_item",
+        "type_item",
+        "const_item",
+        "static_item",
+        "macro_definition"
+      ]
+    }
+  }
 }
