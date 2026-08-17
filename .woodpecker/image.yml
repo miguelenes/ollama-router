@@ -1,11 +1,10 @@
 # Bake the router image and probe /healthz. Runs on the fleet agent
 # (Docker socket), mirroring the old ci.yml "Docker" job.
 #
-# The container is published to a random high port on loopback
-# (127.0.0.1:0 -> 11434) so the probe never collides with a router already
-# running on the agent's :11434.
+# The probe uses `docker exec` against the container's loopback — not the
+# step container's 127.0.0.1 (Woodpecker steps do not share the host netns).
 #
-# `push` only: fork PRs are not executed on the Docker-socket host.
+# `push` and `manual`: fork PRs are not executed on the Docker-socket host.
 
 when:
   - event: push
@@ -27,10 +26,9 @@ steps:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:
       - docker rm -f ollama-router-ci >/dev/null 2>&1 || true
-      - docker run -d --name ollama-router-ci -p 127.0.0.1:0:11434 ollama-router:ci
+      - docker run -d --name ollama-router-ci ollama-router:ci
       - trap "docker rm -f ollama-router-ci >/dev/null 2>&1 || true" EXIT
-      - PORT=$$(docker port ollama-router-ci 11434 | head -n1 | sed "s/.*://")
-      - 'i=0; while [ "$$i" -lt 60 ]; do if wget -qO- "http://127.0.0.1:$${PORT}/healthz"; then exit 0; fi; i=$$((i+1)); sleep 1; done'
+      - 'i=0; while [ "$$i" -lt 60 ]; do if docker exec ollama-router-ci curl -fsS http://127.0.0.1:11434/healthz; then exit 0; fi; i=$$((i+1)); sleep 1; done'
       - docker logs ollama-router-ci || true
       - echo "healthz did not become ready" >&2
       - exit 1
