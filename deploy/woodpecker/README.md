@@ -57,9 +57,10 @@ Secrets). `woodpecker-cli` needs a token from the server UI (profile →
 token); set `WOODPECKER_SERVER` and `WOODPECKER_TOKEN` env vars.
 
 ```bash
-# GHCR publish + visibility check (fine-grained PAT, read/write:packages)
+# GHCR publish + visibility check (classic PAT — fine-grained tokens do not
+# support Packages; scope write:packages, optionally read:packages)
 woodpecker-cli secret add --repository miguelenes/ollama-router \
-  --name REGISTRY_TOKEN --value <token> \
+  --name REGISTRY_TOKEN --value <classic-pat> \
   --event push --event tag --event manual
 
 # Pages: push site/dist to the gh-pages branch (fine-grained PAT,

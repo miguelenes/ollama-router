@@ -8,7 +8,8 @@
 # `push` only: fork PRs are not executed on the Docker-socket host.
 
 when:
-  event: push
+  - event: push
+  - event: manual
 
 steps:
   - name: bake

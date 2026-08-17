@@ -2,7 +2,8 @@
 # latest tags) and attach build provenance attestation when the repository
 # is public. Replaces .github/workflows/docker.yml.
 #
-# Secrets: REGISTRY_TOKEN (fine-grained PAT, read/write:packages).
+# Secrets: REGISTRY_TOKEN (classic PAT with write:packages; fine-grained PATs
+# cannot auth to GHCR — see GitHub Packages docs).
 # Attestation: buildx provenance manifests, gated on the repository's live
 # visibility (queried via the GitHub API with REGISTRY_TOKEN).
 
@@ -40,4 +41,5 @@ steps:
       - 'if [ "$$CI_COMMIT_EVENT" = "push" ] && [ "$$CI_COMMIT_BRANCH" = "main" ]; then TAGS="edge,$$TAGS"; fi'
       - 'if [ -n "$${CI_COMMIT_TAG:-}" ]; then ver="$${CI_COMMIT_TAG#v}"; major="$${ver%%.*}"; rest="$${ver#*.}"; minor="$${rest%%.*}"; TAGS="$$CI_COMMIT_TAG,$$major,$$major.$$minor,latest,$$TAGS"; fi'
       - IMAGES=""; for t in $$(echo "$$TAGS" | tr ',' ' '); do IMAGES="$$IMAGES,$${REF}:$$t"; done; IMAGES="$${IMAGES#,}"
-      - docker buildx bake router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - TAG_ARGS=""; for t in $$(echo "$$IMAGES" | tr ',' ' '); do TAG_ARGS="$$TAG_ARGS -t $$t"; done
+      - 'if [ "$$REPO_PRIVATE" = "true" ]; then docker buildx bake router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"; else docker buildx build --target router --attest type=provenance,mode=max --push $$TAG_ARGS --cache-from type=local,src=.buildx-cache --cache-to type=local,dest=.buildx-cache,mode=max .; fi'
