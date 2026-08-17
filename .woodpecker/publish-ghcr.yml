@@ -42,4 +42,4 @@ steps:
       - IMAGES=""; for t in $$(echo "$$TAGS" | tr ',' ' '); do IMAGES="$$IMAGES,$${REF}:$$t"; done; IMAGES="$${IMAGES#,}"
       - ATTR=""
       - 'if [ "$${REPO_PRIVATE}" = "false" ]; then ATTR="--attest type=provenance,mode=max"; fi'
-      - docker buildx bake --target router --push $$ATTR --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - docker buildx bake router --push $$ATTR --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"

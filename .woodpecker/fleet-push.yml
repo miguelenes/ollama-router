@@ -35,4 +35,4 @@ steps:
       # Push only to the fleet local registry. This pipeline never logs in
       # to or pushes ghcr.io; the swarm path is local-registry only (spec
       # swarmnet-local-deploy).
-      - docker buildx bake --target router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
+      - docker buildx bake router --push --set "*.tags=$${IMAGES}" --set "*.cache-from=type=local,src=.buildx-cache" --set "*.cache-to=type=local,dest=.buildx-cache,mode=max"
