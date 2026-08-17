@@ -213,8 +213,10 @@ The CI agent daemon must trust `FLEET_REGISTRY_REPLICA` in
 ```bash
 # every main push with gates on
 push:   fleet-push -> primary :5005 + optional replica (FLEET_REGISTRY_REPLICA)
-deploy: swarm-deploy runs docker stack deploy with ROUTER_TAG=sha-<7>
+deploy: swarm-deploy runs docker stack deploy with ROUTER_TAG=sha-<7>,
+        verifies the service image tag, then polls /healthz in the task
 ```
+
 
 `docker stack deploy` updates only changed services; the update config uses
 `order: stop-first` (never two replicas sharing FleetState) and

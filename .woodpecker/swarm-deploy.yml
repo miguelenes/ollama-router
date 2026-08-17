@@ -9,6 +9,9 @@
 #
 # CI never writes fleet.yaml; the stack mounts inventory read-only and
 # treats secrets as host env / Swarm secrets.
+#
+# Post-deploy: poll the running Swarm task with `docker exec` + in-container
+# curl (same as image.yml). The step container cannot reach host :11434.
 
 when:
   - event: push
@@ -48,3 +51,9 @@ steps:
       - export ROUTER_TAG="sha-$$(echo "$$CI_COMMIT_SHA" | cut -c1-7)"
       - docker stack deploy --prune --with-registry-auth -c deploy/swarm/ollama-router.stack.yml ollama-router
       - docker service ls --filter name=ollama-router_router
+      - 'IMG=$$(docker service inspect ollama-router_router --format "{{.Spec.TaskTemplate.ContainerSpec.Image}}"); echo "router image: $$IMG"; case "$$IMG" in *":$${ROUTER_TAG}") ;; *) echo "expected tag $${ROUTER_TAG} in service image" >&2; exit 1;; esac'
+      - 'i=0; while [ "$$i" -lt 120 ]; do CID=$$(docker ps -q --filter label=com.docker.swarm.service.name=ollama-router_router --filter status=running | head -1); if [ -n "$$CID" ] && docker exec "$$CID" curl -fsS http://127.0.0.1:11434/healthz; then echo "healthz ok"; exit 0; fi; i=$$((i+1)); sleep 2; done'
+      - docker service ps ollama-router_router --no-trunc || true
+      - 'CID=$$(docker ps -aq --filter label=com.docker.swarm.service.name=ollama-router_router | head -1); if [ -n "$$CID" ]; then docker logs "$$CID" 2>&1 | tail -80 || true; fi'
+      - echo "healthz did not become ready after stack deploy" >&2
+      - exit 1
