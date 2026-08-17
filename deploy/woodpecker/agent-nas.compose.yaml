@@ -1,0 +1,32 @@
+# Woodpecker agent on the swarm manager (NAS) — standalone Compose.
+#
+# Swarm overlay cannot reach the server: MagicDNS has no overlay records,
+# and the NAS host netns has no tailscale0 (Tailscale runs in a container).
+# `docker stack deploy` also cannot use `network_mode: host`.
+#
+# Run this on the manager with host networking so the agent uses the NAS
+# LAN route to WOODPECKER_GRPC_LAN_BIND:9000 and mounts the manager socket.
+#
+#   WOODPECKER_SERVER=192.168.100.135:9000 \
+#   docker compose -f deploy/woodpecker/agent-nas.compose.yaml up -d
+#
+# Do not commit live secrets. Interpolate WOODPECKER_* from the deploy env.
+# Disable the agent healthcheck: host netns already binds :3000 on the NAS.
+
+services:
+  agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    container_name: woodpecker-agent-nas
+    command: agent
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WOODPECKER_SERVER: ${WOODPECKER_SERVER:-192.168.100.135:9000}
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_GRPC_SECRET: ${WOODPECKER_GRPC_SECRET:-}
+      WOODPECKER_AGENT_LABELS: role=swarm-manager
+      WOODPECKER_HOSTNAME: nas
+      WOODPECKER_MAX_WORKFLOWS: "1"
+      WOODPECKER_HEALTHCHECK: "false"

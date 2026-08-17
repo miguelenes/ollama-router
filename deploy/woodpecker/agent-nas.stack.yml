@@ -1,0 +1,34 @@
+# Woodpecker agent on the swarm manager (NAS) — Swarm stack form.
+#
+# Prefer `agent-nas.compose.yaml` (host network). Overlay DNS cannot resolve
+# Tailscale MagicDNS, and NAS host netns has no tailscale0, so this stack's
+# overlay service cannot reach WOODPECKER_SERVER on 100.x.
+#
+# The desktop compose agent (`role=ci`) runs verify / image / GHCR / Pages /
+# fleet-push. The manager agent (`role=swarm-manager`) is the only one that
+# may run `.woodpecker/swarm-deploy.yml` because `docker stack deploy` needs
+# the manager Docker socket.
+#
+# Do not commit live secrets. Interpolate WOODPECKER_* from the deploy env.
+
+services:
+  agent:
+    image: woodpeckerci/woodpecker-agent:v3
+    command: agent
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      WOODPECKER_SERVER: ${WOODPECKER_SERVER:-100.83.91.36:9000}
+      WOODPECKER_AGENT_SECRET: ${WOODPECKER_AGENT_SECRET}
+      WOODPECKER_GRPC_SECRET: ${WOODPECKER_GRPC_SECRET:-}
+      WOODPECKER_AGENT_LABELS: role=swarm-manager
+      WOODPECKER_HOSTNAME: nas
+      WOODPECKER_MAX_WORKFLOWS: "1"
+    deploy:
+      replicas: 1
+      placement:
+        constraints:
+          - node.hostname == nas
+      restart_policy:
+        condition: any
+        delay: 5s

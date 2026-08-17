@@ -13,6 +13,9 @@ when:
     branch: main
   - event: manual
 
+labels:
+  role: ci
+
 steps:
   - name: fleet-push
     image: docker:27

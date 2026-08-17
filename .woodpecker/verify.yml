@@ -7,6 +7,9 @@
 when:
   event: [push, manual]
 
+labels:
+  role: ci
+
 steps:
   - name: verify
     image: rust:1.97-slim-bookworm

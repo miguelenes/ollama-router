@@ -10,8 +10,14 @@ unblocks CI regardless of GitHub account billing state.
 ## Components
 
 - `compose.yaml` — `woodpeckerci/woodpecker-server:v3` (web UI + GitHub
-  forge integration on `:8000`) and `woodpeckerci/woodpecker-agent:v3`
-  (runs pipelines as containers; mounts `/var/run/docker.sock`).
+  forge integration on loopback `:8000`, gRPC `:9000` on the Tailscale
+  address) and a **CI** agent (`role=ci`, Docker socket on this host).
+- `agent-nas.compose.yaml` — second agent on the swarm **manager**
+  (`role=swarm-manager`, host network) so `docker stack deploy` can run.
+  Pin `swarm-deploy.yml` to that label. Swarm overlay cannot reach the
+  server gRPC (no MagicDNS on overlay; NAS Tailscale is containerized).
+- `agent-nas.stack.yml` — overlay form; kept for a manager that has
+  Tailscale in the host netns. Prefer the compose file.
 - `.env.example` — copy to `.env` and fill in (never commit).
 
 ## Provisioning (first run)
@@ -48,7 +54,12 @@ unblocks CI regardless of GitHub account billing state.
    approve blocked fork pipelines in the UI.
 
 6. **Confirm the agent is online** (server UI → Agents shows
-   `woodpecker-agent`).
+   `woodpecker-agent`). For swarm deploy, also run
+   `agent-nas.compose.yaml` on the manager (host network, manager Docker
+   socket) after publishing gRPC `:9000` on the LAN address the NAS can
+   reach (`WOODPECKER_GRPC_LAN_BIND`, default `192.168.100.135`).
+   `swarm-deploy.yml` is labeled `role=swarm-manager`; all other pipelines
+   are `role=ci`.
 
 ## Repository secrets
 
@@ -118,8 +129,12 @@ Each file in `.woodpecker/` is an independent workflow (see repo root):
   ```
   then restart Docker. Loopback vs LAN (`DEPLOY_REGISTRY`) guidance lives in
   `deploy/swarm/README.md`.
-- **Swarm manager access**: for `SWARM_DEPLOY_ENABLED`, the mounted socket
-  must be the Swarm manager's (or `DOCKER_HOST` must point at it).
+- **Swarm manager access**: for `SWARM_DEPLOY_ENABLED`, run
+  `agent-nas.compose.yaml` on the manager (host network; this compose agent
+  is a worker and cannot `docker stack deploy`). The NAS agent reaches the
+  server at `WOODPECKER_GRPC_LAN_BIND:9000` (default `192.168.100.135`)
+  using the same `WOODPECKER_AGENT_SECRET`. Overlay (`agent-nas.stack.yml`)
+  cannot resolve MagicDNS and the NAS host netns has no `tailscale0`.
 - The agent replaces the old GitHub Actions self-hosted runner
   (`deploy/swarm/runner.compose.yml` is superseded and pending removal).
 

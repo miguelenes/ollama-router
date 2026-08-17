@@ -41,7 +41,7 @@ Honest-fleet proxy behavior is out of scope for this design.
    **Rejected:** checking in literal values (never — secrets and hostnames stay out of git).
 
 5. **GHCR auth + provenance attestation from the agent**  
-   The GitHub OAuth App token does not carry `packages:write`; a fine-grained PAT with `read/write:packages` is stored as the Woodpecker repo secret `REGISTRY_TOKEN` and used for `docker login ghcr.io`. Attestation uses `docker buildx build --attest=type=provenance,mode=max --push` (in-registry provenance manifests). Because Woodpecker has no `github.event.repository.private`, the pipeline resolves repo visibility via the GitHub API using the forge token (or an owner-set `REPO_IS_PUBLIC` secret) and runs the attestation only when the repository is public.  
+   The GitHub OAuth App token does not carry `packages:write`; a classic PAT with `write:packages` (optionally `read:packages`) is stored as the Woodpecker repo secret `REGISTRY_TOKEN` and used for `docker login ghcr.io`. Attestation uses `docker buildx build --attest=type=provenance,mode=max --push` (in-registry provenance manifests). Because Woodpecker has no `github.event.repository.private`, the pipeline resolves repo visibility via the GitHub API using the forge token (or an owner-set `REPO_IS_PUBLIC` secret) and runs the attestation only when the repository is public.  
    **Rejected:** `actions/attest-build-provenance` (GitHub-Actions-only).
 
 6. **Pages deploys from a branch, not Actions**  
@@ -63,7 +63,7 @@ Honest-fleet proxy behavior is out of scope for this design.
 
 - **[Risk]** Fleet agent offline → all pipelines stuck (verify too) → **Mitigation:** gates default off for deploy; runbook documents agent health; `docker stack deploy` rollback uses the previous SHA tag from the local registry.
 - **[Risk]** Docker socket exposure on the agent is root-equivalent → **Mitigation:** dedicated agent host; fork PRs not executed; `WOODPECKER_AGENT_SECRET`; registry tokens and deploy gates are repo secrets, never in git.
-- **[Risk]** GHCR PAT scope creep / rotation → **Mitigation:** fine-grained PAT scoped to this repo (`read/write:packages`, `contents:write` for Pages if the App token is reused); rotation documented in `deploy/woodpecker/README.md`.
+- **[Risk]** GHCR PAT scope creep / rotation → **Mitigation:** classic PAT scoped to `write:packages` (optionally `read:packages`); Pages uses its own dedicated fine-grained `PAGES_TOKEN` (`contents:write`, this repo only); rotation documented in `deploy/woodpecker/README.md`.
 - **[Risk]** GitHub OAuth App token limits (webhook push coverage, rate limits) → **Mitigation:** App token used only for forge hooks; GHCR/Pages use scoped tokens.
 - **[Risk]** Attestation gated on visibility mis-detected → **Mitigation:** pipeline reads visibility from the GitHub API; owner-set `REPO_IS_PUBLIC` override documented; attestation failure does not fail the publish when the repo is private.
 - **[Risk]** Transition double-CI drift (Actions + Woodpecker both pushing) → **Mitigation:** gates absent during transition so fleet push/deploy are inert; Actions removed in one commit after Woodpecker is green.
@@ -83,5 +83,9 @@ Honest-fleet proxy behavior is out of scope for this design.
 ## Open Questions
 
 - Which host runs the Woodpecker agent (a swarmnet node vs a dedicated host) — affects only the runbook and `DEPLOY_REGISTRY` value, not the pipelines.
-- Whether the GitHub OAuth App token or a separate PAT drives Pages (`PAGES_TOKEN`) — resolved at secret setup, no pipeline-structure impact.
-- Pages branch name (`gh-pages` default) and whether `latest` tag semantics on GHCR should change — deferrable.
+
+### Resolved during planning
+
+- Pages is driven by a dedicated fine-grained `PAGES_TOKEN` (`contents:write`, this repo only), not the GitHub OAuth App token (see `deploy/woodpecker/README.md`).
+- Pages branch is `gh-pages` (Deploy from a branch), per the `public-docs-site` spec and task 5.3.
+- GHCR `latest` tag semantics are unchanged: edge/sha on default-branch pushes, semver + `latest` on `v*` tags, per the `ghcr-package-publish` spec and Decision 3.

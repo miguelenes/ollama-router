@@ -12,6 +12,9 @@ when:
     branch: main
   - event: [tag, manual]
 
+labels:
+  role: ci
+
 steps:
   - name: resolve-visibility
     image: alpine:3.20

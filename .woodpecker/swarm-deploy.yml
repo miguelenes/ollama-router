@@ -15,6 +15,9 @@ when:
     branch: main
   - event: manual
 
+labels:
+  role: swarm-manager
+
 depends_on:
   - name: fleet-push
     optional: true

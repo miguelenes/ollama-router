@@ -10,6 +10,9 @@ when:
   - event: push
   - event: manual
 
+labels:
+  role: ci
+
 steps:
   - name: bake
     image: docker:27

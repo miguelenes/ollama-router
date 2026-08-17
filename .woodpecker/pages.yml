@@ -9,6 +9,9 @@ when:
   event: [push, manual]
   branch: main
 
+labels:
+  role: ci
+
 steps:
   - name: build
     image: node:22-bookworm-slim
