@@ -20,6 +20,9 @@ id_rsa*
 # Local `task agent:release` output
 /dist
 
+# Docker buildx local cache (Woodpecker CI / local bake)
+.buildx-cache/
+
 # Native `task dev` job store + fleet state
 .local/
 
