@@ -1,4 +1,4 @@
-//! Node-local Ollama installer, supervisor, and `:11436` capacity agent.
+//! Node-local Ollama installer, supervisor, and `:11436` node agent.
 
 pub mod cli;
 pub mod collect;

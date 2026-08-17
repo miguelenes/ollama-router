@@ -49,6 +49,7 @@ pub fn load_config_from(
         }
     }
 
+    reject_deprecated_env(env)?;
     apply_env_knobs(&mut merged, env)?;
     let tunables = tunables_from_value(merged)?;
     tunables.require_cloud_credentials(env)?;
@@ -80,6 +81,18 @@ pub fn load_config_from(
     config.state_path = PathBuf::from(&state_path);
     config.validate_nodes()?;
     Ok(config)
+}
+
+/// Reject retired compatibility environment variables at startup.
+fn reject_deprecated_env(env: &impl EnvSource) -> Result<(), ConfigError> {
+    for (key, _) in env.vars() {
+        if key.starts_with("THUNDER_") {
+            return Err(ConfigError::invalid(format!(
+                "deprecated environment variable {key} is not supported; use Verda or RunPod cloud providers instead"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Apply FleetState routing URLs onto permanent nodes (public IPs replaced).
@@ -409,6 +422,15 @@ ready_requires_embedding_model: true
     #[test]
     fn thunder_overlay_is_unknown_field() {
         assert!(parse_yaml("thunder:\n  enabled: true\n").is_err());
+    }
+
+    #[test]
+    fn thunder_env_alias_fails_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("THUNDER_ENABLED".into(), "true".into());
+        let err = load_config_from(None, &env).unwrap_err();
+        assert!(err.to_string().contains("THUNDER_ENABLED"), "err={err}");
     }
 
     #[test]

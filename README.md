@@ -37,6 +37,14 @@
 > [!NOTE]
 > **0.1.0 preview.** `serve` and `/healthz` ship. The sections below are the product contract this rewrite is landing.
 
+> [!WARNING]
+> **Breaking (legacy removal).** This preview drops backward-compatibility shims:
+> - `THUNDER_*` environment variables and YAML `thunder:` blocks fail startup.
+> - FleetState retired keys (`thunder_instance_id`, `tailscale_ip`) are stripped on load/persist.
+> - Unknown job target status strings no longer map to `failed`.
+> - Retired HTTP routes return `404` with `[reason: unknown_path]` and a migration hint.
+> - Use documented Ollama-native and OpenAI-compatible endpoints only.
+
 ## What it is
 
 Clients speak ordinary Ollama to **one** listen URL (`:11434`). The router load-balances generate, chat, and embed across a mixed CPU+GPU fleet you already run (the router process itself needs **no GPU**), then optionally bursts onto Verda NVIDIA **spot** GPUs over a self-hosted zrok **private** share.

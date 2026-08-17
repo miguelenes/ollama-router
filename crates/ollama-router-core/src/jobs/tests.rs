@@ -92,7 +92,7 @@ fn store_strips_detail_and_secret_text() {
 }
 
 #[test]
-fn store_round_trips_cancelled_and_unknown_as_failed() {
+fn store_round_trips_cancelled_and_skips_unknown_target_status() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("ops.sqlite3");
     let store = JobStore::open(&path).expect("open");
@@ -137,8 +137,7 @@ fn store_round_trips_cancelled_and_unknown_as_failed() {
     )
     .expect("update");
     let restored = JobStore::open(&path).expect("reopen").load().expect("load");
-    let job = restored.get(&id).expect("job");
-    assert_eq!(job.targets["node-a:m:latest"].status, TargetStatus::Failed);
+    assert!(!restored.contains_key(&id));
 }
 
 #[test]

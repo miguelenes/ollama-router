@@ -2055,7 +2055,7 @@ fn unknown_compat_path(path: &str) -> Response {
         router_error(
             path,
             StatusCode::NOT_FOUND,
-            "ollama-router: unknown OpenAI-compatible path",
+            "ollama-router: unknown OpenAI-compatible path; use documented /v1 chat, completions, embeddings, or models routes [reason: unknown_path]",
             "unknown_path",
             None,
         )
@@ -2063,7 +2063,7 @@ fn unknown_compat_path(path: &str) -> Response {
         router_error(
             path,
             StatusCode::NOT_FOUND,
-            "ollama-router: unknown path",
+            "ollama-router: unknown path; use documented Ollama-native or OpenAI-compatible endpoints [reason: unknown_path]",
             "unknown_path",
             None,
         )

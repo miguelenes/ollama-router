@@ -135,7 +135,7 @@ impl Metrics {
         let pressure = IntGaugeVec::new(
             Opts::new(
                 "ollama_router_node_pressure",
-                "Capacity-agent pressure: 0 unknown, 1 ok, 2 elevated, 3 critical",
+                "Node-agent pressure: 0 unknown, 1 ok, 2 elevated, 3 critical",
             ),
             &["node"],
         )?;

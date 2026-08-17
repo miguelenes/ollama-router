@@ -12,13 +12,13 @@ use crate::http_util::{read_reqwest_capped, ProbeBodyError};
 /// Allowlisted probe failure. Never includes bodies, tokens, or URLs.
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub enum CapacityError {
-    #[error("capacity agent http {status}")]
+    #[error("node agent http {status}")]
     Http { status: u16 },
-    #[error("capacity agent timeout")]
+    #[error("node agent timeout")]
     Timeout,
-    #[error("capacity agent unreachable")]
+    #[error("node agent unreachable")]
     Unreachable,
-    #[error("capacity agent parse")]
+    #[error("node agent parse")]
     Parse,
 }
 

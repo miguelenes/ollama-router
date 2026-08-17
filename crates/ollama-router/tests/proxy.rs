@@ -3582,6 +3582,10 @@ async fn unknown_ollama_path_is_404_without_upstream() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let parsed: Value = serde_json::from_slice(&body).unwrap();
     assert!(parsed["error"].as_str().unwrap().contains("unknown path"));
+    assert!(parsed["error"]
+        .as_str()
+        .unwrap()
+        .contains("[reason: unknown_path]"));
     assert_eq!(hit.calls(), 0);
 }
 

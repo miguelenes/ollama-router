@@ -158,15 +158,7 @@ async fn download_and_unzip() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn delete_legacy_scheduled_task() {
-    let _ = Command::new("schtasks")
-        .args(["/Delete", "/TN", SERVICE_NAME, "/F"])
-        .status()
-        .await;
-}
-
 async fn stop_windows_service() {
-    delete_legacy_scheduled_task().await;
     let _ = Command::new("sc.exe")
         .args(["stop", SERVICE_NAME])
         .status()

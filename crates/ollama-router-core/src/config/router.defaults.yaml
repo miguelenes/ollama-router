@@ -21,7 +21,7 @@ policy:
   embed_reserve_vram_gb: 0
   admission_wait_ms: 0
 
-  # RAM pressure routing (trust capacity-agent pressure_level; no classify knobs).
+  # RAM pressure routing (trust node-agent pressure_level; no classify knobs).
   ram_headroom: 0.85
   ram_elevated_score_penalty: 2.0
   ram_critical_score_penalty: 8.0

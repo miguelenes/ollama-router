@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
-description = "Node-local Ollama installer, supervisor, and capacity agent (:11436)"
+description = "Node-local Ollama installer, supervisor, and node agent (:11436)"
 
 [lints.rust]
 unsafe_code = "deny"

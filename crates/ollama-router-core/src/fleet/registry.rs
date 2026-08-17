@@ -80,7 +80,7 @@ impl PressureLevel {
         }
     }
 
-    /// Parse a capacity-agent `pressure_level` string. Unknown tokens stay `None`.
+    /// Parse a node-agent `pressure_level` string. Unknown tokens stay `None`.
     pub fn from_wire(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
             "unknown" => Some(Self::Unknown),
@@ -708,7 +708,7 @@ impl Registry {
         Ok(())
     }
 
-    /// Set the capacity-agent URL (separate zrok frontend). Same public-URL rules.
+    /// Set the node-agent URL (separate zrok frontend). Same public-URL rules.
     pub fn set_capacity_url(&self, id: &NodeId, url: &str) -> Result<(), String> {
         let trimmed = url.trim().trim_end_matches('/');
         if trimmed.is_empty() {
@@ -1170,7 +1170,7 @@ impl Registry {
         }
     }
 
-    /// Merge a successful capacity-agent report. Never flips health.
+    /// Merge a successful node-agent report. Never flips health.
     pub fn apply_capacity_report(
         &self,
         id: &NodeId,

@@ -17,6 +17,9 @@ use crate::fleet::url_policy::{url_host_is_loopback, url_is_safe_overlay};
 /// Default on-disk location (override with `OLLAMA_ROUTER_STATE_FILE`).
 pub const DEFAULT_STATE_PATH: &str = "/var/lib/ollama-router/fleet-state.json";
 
+/// Retired FleetState `extra` keys from pre-release compatibility metadata.
+const LEGACY_EXTRA_KEYS: &[&str] = &["thunder_instance_id", "tailscale_ip"];
+
 /// Raised when neither durable copy can be read safely.
 #[derive(Debug, thiserror::Error)]
 pub enum FleetStateError {
@@ -103,7 +106,7 @@ pub struct RunpodNodePersist<'a> {
 pub struct FleetStateEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Private share unique-name (Ollama). Unknown legacy keys land in [`Self::extra`].
+    /// Private share unique-name (Ollama). Residual unknown keys land in [`Self::extra`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub share_token_id: Option<String>,
     /// Loopback zrok access URL (`http://127.0.0.1:PORT`).
@@ -401,7 +404,7 @@ impl FleetState {
         Ok(data.get(node_id.as_str()).and_then(hydrate_entry_url))
     }
 
-    /// Return a persisted capacity-agent URL (zrok loopback enroll).
+    /// Return a persisted node-agent URL (zrok loopback enroll).
     pub fn hydrate_capacity_url(
         &self,
         node_id: &NodeId,
@@ -659,13 +662,26 @@ fn read_state_file(path: &Path) -> Result<BTreeMap<String, FleetStateEntry>, Fle
                 path: path.to_path_buf(),
             });
         }
-        let entry: FleetStateEntry =
+        let mut entry: FleetStateEntry =
             serde_json::from_value(val).map_err(|_| FleetStateError::InvalidShape {
                 path: path.to_path_buf(),
             })?;
+        strip_legacy_extra(&mut entry);
         out.insert(key, entry);
     }
     Ok(out)
+}
+
+fn strip_legacy_extra(entry: &mut FleetStateEntry) {
+    for key in LEGACY_EXTRA_KEYS {
+        entry.extra.remove(*key);
+    }
+}
+
+fn sanitize_state(data: &mut BTreeMap<String, FleetStateEntry>) {
+    for entry in data.values_mut() {
+        strip_legacy_extra(entry);
+    }
 }
 
 fn atomic_write(
@@ -675,10 +691,12 @@ fn atomic_write(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let mut data = data.clone();
+    sanitize_state(&mut data);
     let tmp = append_suffix(path, ".tmp");
     let backup = append_suffix(path, ".bak");
     let backup_tmp = append_suffix(&backup, ".tmp");
-    let payload = serde_json::to_vec_pretty(data)
+    let payload = serde_json::to_vec_pretty(&data)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
 
     let write_result = (|| -> Result<(), FleetStateError> {
@@ -869,7 +887,7 @@ mod tests {
     }
 
     #[test]
-    fn old_tailscale_ip_is_ignored_until_re_enroll() {
+    fn legacy_tailscale_ip_is_stripped_on_load() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet-state.json");
         fs::write(
@@ -881,10 +899,7 @@ mod tests {
         let id = NodeId::parse("n").unwrap();
         assert!(state.hydrate_url(&id).unwrap().is_none());
         let entry = state.get_entry("n").unwrap().unwrap();
-        assert_eq!(
-            entry.extra.get("tailscale_ip").and_then(Value::as_str),
-            Some("100.64.0.1")
-        );
+        assert!(!entry.extra.contains_key("tailscale_ip"));
     }
 
     #[test]
@@ -905,32 +920,25 @@ mod tests {
     }
 
     #[test]
-    fn leftover_unknown_keys_round_trip() {
+    fn legacy_extra_keys_are_stripped_on_load_and_persist() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fleet-state.json");
         fs::write(
             &path,
-            r#"{"n":{"url":"http://127.0.0.1:41990","thunder_instance_id":"old"}}"#,
+            r#"{"n":{"url":"http://127.0.0.1:41990","thunder_instance_id":"old","tailscale_ip":"100.64.0.1"}}"#,
         )
         .unwrap();
         let state = FleetState::new(&path);
         let entry = state.get_entry("n").unwrap().unwrap();
-        assert_eq!(
-            entry
-                .extra
-                .get("thunder_instance_id")
-                .and_then(Value::as_str),
-            Some("old")
-        );
+        assert!(!entry.extra.contains_key("thunder_instance_id"));
+        assert!(!entry.extra.contains_key("tailscale_ip"));
         state.persist_url("n", "http://127.0.0.1:41990").unwrap();
         let again = state.get_entry("n").unwrap().unwrap();
-        assert_eq!(
-            again
-                .extra
-                .get("thunder_instance_id")
-                .and_then(Value::as_str),
-            Some("old")
-        );
+        assert!(!again.extra.contains_key("thunder_instance_id"));
+        assert!(!again.extra.contains_key("tailscale_ip"));
+        let on_disk = fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains("thunder_instance_id"));
+        assert!(!on_disk.contains("tailscale_ip"));
     }
 
     #[test]

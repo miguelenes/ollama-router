@@ -212,8 +212,7 @@ impl FromStr for TargetStatus {
             "skipped_ram_pressure" => Self::SkippedRamPressure,
             "skipped_disk" => Self::SkippedDisk,
             "deleted" => Self::Deleted,
-            // Additive forward-compat: old binary reading a newer status string.
-            _ => Self::Failed,
+            _ => return Err(()),
         })
     }
 }
@@ -288,6 +287,23 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unknown_target_status_is_rejected() {
+        assert!("future_status".parse::<TargetStatus>().is_err());
+    }
+
+    #[test]
+    fn current_target_status_values_still_parse() {
+        assert_eq!(
+            "skipped_disk".parse::<TargetStatus>(),
+            Ok(TargetStatus::SkippedDisk)
+        );
+        assert_eq!(
+            "already_present".parse::<TargetStatus>(),
+            Ok(TargetStatus::AlreadyPresent)
+        );
+    }
 
     #[test]
     fn skipped_disk_roundtrip_and_success_like() {
