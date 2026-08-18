@@ -67,7 +67,7 @@ services:
       # Optional tunables overlay (defaults in router.defaults.yaml apply when absent).
       - source: ollama-router-config
         target: /etc/ollama-router/config.yaml
-        mode: 0440
+        mode: 0444
     secrets:
       - ollama-router-admin-token
     deploy:
