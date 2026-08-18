@@ -143,6 +143,7 @@ pub fn agent_bootstrap_script(params: &BootstrapParams<'_>) -> Result<String, St
     body.push_str(BOOTSTRAP_EOF);
     body.push('\n');
     body.push_str("chmod 600 /run/ollama-router/bootstrap.env\n");
+    body.push_str("OLLAMA_HOST=127.0.0.1 ollama serve &\n");
     // Merge container secret env into bootstrap.env without echoing values.
     body.push_str(
         r#"
@@ -171,6 +172,12 @@ pub fn build_create_request(
     params: &BootstrapParams<'_>,
 ) -> Result<CreatePodRequest, String> {
     let script = agent_bootstrap_script(params)?;
+    let template_id = config
+        .template_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
     Ok(CreatePodRequest {
         name: name.to_string(),
         image_name: config.image.clone(),
@@ -178,11 +185,13 @@ pub fn build_create_request(
         cloud_type: config.cloud_type.clone(),
         gpu_type_ids,
         gpu_type_priority: "custom".into(),
-        docker_start_cmd: vec!["bash".into(), "-lc".into(), script],
+        docker_entrypoint: vec!["/bin/bash".into()],
+        docker_start_cmd: vec!["-lc".into(), script],
         env: params.secret_env.clone(),
         container_disk_in_gb: config.container_disk_gb,
         volume_in_gb: 0,
         ports: vec![],
+        template_id,
         data_center_ids,
     })
 }
@@ -221,19 +230,52 @@ mod tests {
             &params,
         )
         .expect("request");
-        assert_eq!(req.docker_start_cmd[0], "bash");
-        assert_eq!(req.docker_start_cmd[1], "-lc");
-        let script = &req.docker_start_cmd[2];
+        assert_eq!(req.docker_entrypoint, vec!["/bin/bash"]);
+        assert_eq!(req.docker_start_cmd[0], "-lc");
+        let script = &req.docker_start_cmd[1];
         assert!(!script.contains("enable-secret"), "{script}");
         assert!(!script.contains("admin-secret"), "{script}");
         assert!(script.contains("origin: runpod"));
+        assert!(script.contains("OLLAMA_HOST=127.0.0.1 ollama serve"));
+        assert_eq!(req.image_name, "ollama/ollama:latest");
         assert_eq!(req.volume_in_gb, 0);
         assert!(req.ports.is_empty());
+        assert!(req.template_id.is_none());
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("enable-secret"), "{dbg}");
         assert!(!dbg.contains("admin-secret"), "{dbg}");
         assert!(dbg.contains("REDACTED"), "{dbg}");
         let params_dbg = format!("{params:?}");
         assert!(!params_dbg.contains("enable-secret"), "{params_dbg}");
+    }
+
+    #[test]
+    fn agent_init_package_failure_sleeps_instead_of_exit() {
+        assert!(INSTALLER.contains("exec sleep infinity"));
+        assert!(INSTALLER.contains("reason_code=agent_package_unavailable"));
+        assert!(!INSTALLER.contains("exit 1"));
+    }
+
+    #[test]
+    fn template_id_is_honored_when_configured() {
+        let params = sample();
+        let config = RunpodConfig {
+            template_id: Some("my-runpod-template".into()),
+            ..RunpodConfig::default()
+        };
+        let req = build_create_request(
+            "or-rp-test",
+            true,
+            vec!["NVIDIA L4".into()],
+            None,
+            &config,
+            &params,
+        )
+        .expect("request");
+        assert_eq!(req.template_id.as_deref(), Some("my-runpod-template"));
+        assert_eq!(
+            req.to_json()["templateId"],
+            serde_json::json!("my-runpod-template")
+        );
     }
 }

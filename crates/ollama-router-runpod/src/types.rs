@@ -181,11 +181,14 @@ pub struct CreatePodRequest {
     pub cloud_type: String,
     pub gpu_type_ids: Vec<String>,
     pub gpu_type_priority: String,
+    pub docker_entrypoint: Vec<String>,
     pub docker_start_cmd: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub container_disk_in_gb: u32,
     pub volume_in_gb: u32,
     pub ports: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_center_ids: Option<Vec<String>>,
 }
@@ -199,6 +202,7 @@ impl std::fmt::Debug for CreatePodRequest {
             .field("cloud_type", &self.cloud_type)
             .field("gpu_type_ids", &self.gpu_type_ids)
             .field("gpu_type_priority", &self.gpu_type_priority)
+            .field("docker_entrypoint", &self.docker_entrypoint)
             .field("docker_start_cmd", &self.docker_start_cmd)
             .field(
                 "env",
@@ -211,6 +215,7 @@ impl std::fmt::Debug for CreatePodRequest {
             .field("container_disk_in_gb", &self.container_disk_in_gb)
             .field("volume_in_gb", &self.volume_in_gb)
             .field("ports", &self.ports)
+            .field("template_id", &self.template_id)
             .field("data_center_ids", &self.data_center_ids)
             .finish()
     }
@@ -225,12 +230,16 @@ impl CreatePodRequest {
             "cloudType": self.cloud_type,
             "gpuTypeIds": self.gpu_type_ids,
             "gpuTypePriority": self.gpu_type_priority,
+            "dockerEntrypoint": self.docker_entrypoint,
             "dockerStartCmd": self.docker_start_cmd,
             "env": self.env,
             "containerDiskInGb": self.container_disk_in_gb,
             "volumeInGb": self.volume_in_gb,
             "ports": self.ports,
         });
+        if let Some(tid) = &self.template_id {
+            body["templateId"] = Value::String(tid.clone());
+        }
         if let Some(dcs) = &self.data_center_ids {
             body["dataCenterIds"] = Value::Array(dcs.iter().cloned().map(Value::String).collect());
             body["dataCenterPriority"] = Value::String("custom".into());
@@ -254,16 +263,43 @@ mod tests {
             cloud_type: "SECURE".into(),
             gpu_type_ids: vec!["NVIDIA L4".into()],
             gpu_type_priority: "custom".into(),
-            docker_start_cmd: vec!["bash".into(), "-lc".into(), "echo hi".into()],
+            docker_entrypoint: vec!["/bin/bash".into()],
+            docker_start_cmd: vec!["-lc".into(), "echo hi".into()],
             env,
             container_disk_in_gb: 40,
             volume_in_gb: 0,
             ports: vec![],
+            template_id: None,
             data_center_ids: None,
         };
         let dbg = format!("{req:?}");
         assert!(!dbg.contains("secret-zrok"), "{dbg}");
         assert!(dbg.contains("REDACTED"), "{dbg}");
+    }
+
+    #[test]
+    fn create_request_to_json_emits_docker_entrypoint_and_template() {
+        let req = CreatePodRequest {
+            name: "or-rp-test".into(),
+            image_name: "ollama/ollama:latest".into(),
+            interruptible: true,
+            cloud_type: "SECURE".into(),
+            gpu_type_ids: vec!["NVIDIA L4".into()],
+            gpu_type_priority: "custom".into(),
+            docker_entrypoint: vec!["/bin/bash".into()],
+            docker_start_cmd: vec!["-lc".into(), "true".into()],
+            env: BTreeMap::new(),
+            container_disk_in_gb: 40,
+            volume_in_gb: 0,
+            ports: vec![],
+            template_id: Some("tpl-abc".into()),
+            data_center_ids: None,
+        };
+        let json = req.to_json();
+        assert_eq!(json["dockerEntrypoint"], serde_json::json!(["/bin/bash"]));
+        assert_eq!(json["templateId"], serde_json::json!("tpl-abc"));
+        assert_eq!(json["ports"], serde_json::json!([]));
+        assert_eq!(json["imageName"], serde_json::json!("ollama/ollama:latest"));
     }
 
     #[test]

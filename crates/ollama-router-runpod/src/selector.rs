@@ -31,7 +31,20 @@ fn matches_any(name: &str, globs: &[String]) -> bool {
 
 fn data_center_ok(gpu: &CatalogGpu, allowed: &[String]) -> Option<Option<String>> {
     if allowed.is_empty() {
-        return Some(None);
+        if gpu.data_centers.is_empty() {
+            return Some(None);
+        }
+        for dc in &gpu.data_centers {
+            let Some(id) = dc.id.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            let avail = dc.availability.as_deref().unwrap_or("HIGH");
+            if avail.eq_ignore_ascii_case("NONE") {
+                continue;
+            }
+            return Some(Some(id.to_string()));
+        }
+        return None;
     }
     if gpu.data_centers.is_empty() {
         // No per-DC expansion; accept if overall availability already passed.
@@ -53,8 +66,11 @@ fn data_center_ok(gpu: &CatalogGpu, allowed: &[String]) -> Option<Option<String>
     None
 }
 
-/// Filter catalog rows and rank ascending by on-demand price per VRAM GiB.
-pub fn rank_gpu_types(gpus: &[CatalogGpu], config: &RunpodConfig) -> Vec<GpuChoice> {
+fn rank_with_dc_filter(
+    gpus: &[CatalogGpu],
+    config: &RunpodConfig,
+    dc_filter: &[String],
+) -> Vec<GpuChoice> {
     let mut candidates = Vec::new();
     for gpu in gpus {
         if !gpu.is_available() {
@@ -84,7 +100,7 @@ pub fn rank_gpu_types(gpus: &[CatalogGpu], config: &RunpodConfig) -> Vec<GpuChoi
         if config.max_price_per_hour.is_some_and(|max| price > max) {
             continue;
         }
-        let Some(dc) = data_center_ok(gpu, &config.allowed_data_centers) else {
+        let Some(dc) = data_center_ok(gpu, dc_filter) else {
             continue;
         };
         candidates.push(GpuChoice {
@@ -114,10 +130,24 @@ pub fn rank_gpu_types(gpus: &[CatalogGpu], config: &RunpodConfig) -> Vec<GpuChoi
     candidates
 }
 
+/// Filter catalog rows and rank ascending by on-demand price per VRAM GiB.
+pub fn rank_gpu_types(gpus: &[CatalogGpu], config: &RunpodConfig) -> Vec<GpuChoice> {
+    if !config.allowed_data_centers.is_empty() {
+        return rank_with_dc_filter(gpus, config, &config.allowed_data_centers);
+    }
+    if !config.preferred_data_centers.is_empty() {
+        let preferred = rank_with_dc_filter(gpus, config, &config.preferred_data_centers);
+        if !preferred.is_empty() {
+            return preferred;
+        }
+    }
+    rank_with_dc_filter(gpus, config, &[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::CatalogPrice;
+    use crate::types::{CatalogDataCenter, CatalogPrice};
 
     fn gpu(id: &str, vram: f64, price: f64, avail: &str) -> CatalogGpu {
         CatalogGpu {
@@ -130,6 +160,20 @@ mod tests {
             }),
             availability: Some(avail.into()),
             ..CatalogGpu::default()
+        }
+    }
+
+    fn gpu_with_dcs(id: &str, vram: f64, price: f64, dcs: Vec<(&str, &str)>) -> CatalogGpu {
+        CatalogGpu {
+            data_centers: dcs
+                .into_iter()
+                .map(|(dc_id, avail)| CatalogDataCenter {
+                    id: Some(dc_id.into()),
+                    availability: Some(avail.into()),
+                    ..CatalogDataCenter::default()
+                })
+                .collect(),
+            ..gpu(id, vram, price, "HIGH")
         }
     }
 
@@ -174,6 +218,72 @@ mod tests {
             gpu("pricey", 24.0, 0.50, "HIGH"),
             gpu("gone", 24.0, 0.05, "NONE"),
         ];
+        assert!(rank_gpu_types(&gpus, &config).is_empty());
+    }
+
+    #[test]
+    fn eu_offer_wins_when_in_stock() {
+        let config = RunpodConfig {
+            preferred_data_centers: vec!["EU-NL-1".into()],
+            ..RunpodConfig::default()
+        };
+        let gpus = [gpu_with_dcs(
+            "L4",
+            24.0,
+            0.30,
+            vec![("EU-NL-1", "HIGH"), ("US-CA-2", "HIGH")],
+        )];
+        let ranked = rank_gpu_types(&gpus, &config);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].data_center.as_deref(), Some("EU-NL-1"));
+    }
+
+    #[test]
+    fn eu_stockout_falls_back_to_non_eu() {
+        let config = RunpodConfig {
+            preferred_data_centers: vec!["EU-NL-1".into()],
+            ..RunpodConfig::default()
+        };
+        let gpus = [gpu_with_dcs(
+            "L4",
+            24.0,
+            0.30,
+            vec![("EU-NL-1", "NONE"), ("US-CA-2", "HIGH")],
+        )];
+        let ranked = rank_gpu_types(&gpus, &config);
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].data_center.as_deref(), Some("US-CA-2"));
+    }
+
+    #[test]
+    fn hard_allow_list_is_not_bypassed_by_preferred() {
+        let config = RunpodConfig {
+            allowed_data_centers: vec!["EU-NL-1".into()],
+            preferred_data_centers: vec!["US-CA-2".into()],
+            ..RunpodConfig::default()
+        };
+        let gpus = [gpu_with_dcs(
+            "L4",
+            24.0,
+            0.30,
+            vec![("EU-NL-1", "NONE"), ("US-CA-2", "HIGH")],
+        )];
+        assert!(rank_gpu_types(&gpus, &config).is_empty());
+    }
+
+    #[test]
+    fn unknown_vram_is_not_treated_as_zero() {
+        let config = RunpodConfig::default();
+        let gpus = [CatalogGpu {
+            id: Some("unknown_vram".into()),
+            memory: None,
+            price: Some(CatalogPrice {
+                secure: Some(0.10),
+                community: Some(0.10),
+            }),
+            availability: Some("HIGH".into()),
+            ..CatalogGpu::default()
+        }];
         assert!(rank_gpu_types(&gpus, &config).is_empty());
     }
 }

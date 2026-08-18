@@ -444,7 +444,11 @@ ready_requires_embedding_model: true
     fn runpod_enabled_without_api_key_fails_closed() {
         let dir = tempfile::tempdir().unwrap();
         let overlay = dir.path().join("overlay.yaml");
-        fs::write(&overlay, "runpod:\n  enabled: true\n").unwrap();
+        fs::write(
+            &overlay,
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap();
         let err = load_config_from(Some(&overlay), &env_with_state(&dir)).unwrap_err();
         assert!(err.to_string().contains("RUNPOD_API_KEY"), "err={err}");
     }
@@ -453,10 +457,41 @@ ready_requires_embedding_model: true
     fn runpod_enabled_with_api_key_loads() {
         let dir = tempfile::tempdir().unwrap();
         let overlay = dir.path().join("overlay.yaml");
-        fs::write(&overlay, "runpod:\n  enabled: true\n").unwrap();
+        fs::write(
+            &overlay,
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap();
         let mut env = env_with_state(&dir);
         env.insert("RUNPOD_API_KEY".into(), "test-key".into());
         let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert!(config.runpod.enabled);
+    }
+
+    #[test]
+    fn runpod_loopback_enroll_url_rejected_when_enabled() {
+        let err = parse_yaml(
+            "runpod:\n  enabled: true\n  enroll_url: http://127.0.0.1:11437\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("runpod.enroll_url"), "err={err}");
+    }
+
+    #[test]
+    fn runpod_bare_ip_tunnel_endpoint_rejected() {
+        let err = parse_yaml(
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: 176.223.37.107\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("tunnel.api_endpoint"), "err={err}");
+    }
+
+    #[test]
+    fn runpod_guest_reachable_enroll_accepted() {
+        let config = parse_yaml(
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap();
         assert!(config.runpod.enabled);
     }
 

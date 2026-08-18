@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::fleet::ids::NodeId;
+use crate::fleet::url_policy::url_is_guest_reachable;
 
 use super::error::ConfigError;
 
@@ -1043,7 +1044,28 @@ fn system_hostname() -> String {
 }
 
 fn default_runpod_image() -> String {
-    "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04".to_string()
+    "ollama/ollama:latest".to_string()
+}
+
+fn default_preferred_data_centers() -> Vec<String> {
+    vec![
+        "EU-NL-1".into(),
+        "EU-FR-1".into(),
+        "EU-CZ-1".into(),
+        "EU-RO-1".into(),
+        "EU-SE-1".into(),
+    ]
+}
+
+fn validate_guest_reachable_http_url(raw: &str, field: &str) -> Result<(), ConfigError> {
+    let _ = strip_http_url(raw, field)?;
+    if !url_is_guest_reachable(raw) {
+        return Err(ConfigError::invalid(format!(
+            "{field} must be a guest-reachable http(s) URL (not loopback, RFC1918, or link-local): {:?}",
+            raw.trim()
+        )));
+    }
+    Ok(())
 }
 
 /// RunPod interruptible GPU pod provisioning (opt-in; disabled by default).
@@ -1058,12 +1080,17 @@ pub struct RunpodConfig {
     pub interruptible: bool,
     pub on_demand_fallback: bool,
     pub image: String,
+    /// Optional RunPod template id (`templateId` on create). Image is still sent.
+    pub template_id: Option<String>,
     pub container_disk_gb: u32,
     pub min_vram_gb: f64,
     pub max_vram_gb: Option<f64>,
     pub allowed_gpu_types: Vec<String>,
     pub denied_gpu_types: Vec<String>,
     pub allowed_data_centers: Vec<String>,
+    /// Preferred EU data centers when `allowed_data_centers` is empty (soft filter).
+    #[serde(default = "default_preferred_data_centers")]
+    pub preferred_data_centers: Vec<String>,
     pub max_price_per_hour: Option<f64>,
     pub auto_scale: bool,
     pub auto_scale_min_instances: u32,
@@ -1101,12 +1128,14 @@ impl Default for RunpodConfig {
             interruptible: true,
             on_demand_fallback: false,
             image: default_runpod_image(),
+            template_id: None,
             container_disk_gb: 40,
             min_vram_gb: 8.0,
             max_vram_gb: Some(80.0),
             allowed_gpu_types: Vec::new(),
             denied_gpu_types: Vec::new(),
             allowed_data_centers: Vec::new(),
+            preferred_data_centers: default_preferred_data_centers(),
             max_price_per_hour: None,
             auto_scale: true,
             auto_scale_min_instances: 0,
@@ -1236,6 +1265,36 @@ impl RunpodConfig {
         {
             return Err(ConfigError::invalid("runpod auto_scale min must be <= max"));
         }
+        if let Some(tid) = self.template_id.as_deref() {
+            if tid.trim().is_empty() {
+                return Err(ConfigError::invalid(
+                    "runpod.template_id must be non-empty when set",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_guest_urls_when_enabled(
+        &self,
+        tunnel: &TunnelConfig,
+    ) -> Result<(), ConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        let enroll = self
+            .enroll_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                ConfigError::invalid("runpod.enroll_url is required when runpod.enabled")
+            })?;
+        validate_guest_reachable_http_url(enroll, "runpod.enroll_url")?;
+        let api = tunnel.api_endpoint().ok_or_else(|| {
+            ConfigError::invalid("tunnel.api_endpoint is required when runpod.enabled")
+        })?;
+        validate_guest_reachable_http_url(api, "tunnel.api_endpoint")?;
         Ok(())
     }
 
@@ -1343,6 +1402,7 @@ impl YamlTunables {
         self.timeouts.validate()?;
         self.verda.validate()?;
         self.runpod.validate()?;
+        self.runpod.validate_guest_urls_when_enabled(&self.tunnel)?;
         self.upstream.validate()?;
         self.tunnel.validate()?;
         for tier in &self.desired_model_tiers {

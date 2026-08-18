@@ -1,14 +1,61 @@
-# Placeholder tunables overlay for the Swarm stack (`OLLAMA_ROUTER_CONFIG`).
-# Commit only placeholders — never live values, tokens, or fleet inventory.
+# Tunables overlay for the Swarm stack (OLLAMA_ROUTER_CONFIG).
+# Commit only placeholders — replace YOUR_PUBLIC_HOST before live cloud test.
+# Never commit tokens, enable keys, or fleet inventory (`nodes:` is forbidden).
 #
-# Copy this to `/etc/ollama-router/config.yaml` on the swarm manager (or
-# mount a real overlay here) and keep `nodes:` OUT of it: membership is
-# fleet.yaml + FleetState + cloud managers; a top-level `nodes:` key in a
-# tunables overlay is a hard config error.
-#
-# Example knobs (defaults live in router.defaults.yaml at the repo root):
-# policy:
-#   default_max_inflight: 2
-# saturation_wait_seconds: 0
-# auto_pull_on_miss: false
+# Cloud credentials: Swarm secrets -> env (see ollama-router.stack.yml).
+# enroll_url and tunnel.api_endpoint must be reachable from Verda/RunPod guests
+# (not 127.0.0.1, LAN, or Tailscale-only). Load tests use ROUTER_URL only —
+# never aim generate at *.proxy.runpod.net.
+
 job_store_path: /var/lib/ollama-router/model-operations.sqlite3
+
+policy:
+  auto_pull_on_miss: true
+  model_warm_enabled: false
+  saturation_wait_seconds: 0
+
+tunnel:
+  # Guest-reachable controller (not loopback). Replace if your zrok lives elsewhere.
+  api_endpoint: https://zrok.YOUR_PUBLIC_HOST
+  enable_token_env: ZROK_ENABLE_TOKEN
+  access_bind: "127.0.0.1"
+
+verda:
+  enabled: true
+  auto_scale: true
+  auto_scale_min_instances: 0
+  auto_scale_max_instances: 2
+  idle_scale_down_enabled: true
+  idle_timeout_seconds: 90
+  idle_grace_after_create_seconds: 300
+  min_lifetime_seconds: 0
+  ensure_on_startup: false
+  destroy_on_shutdown: true
+  enroll_url: https://ollama-router.bicorn-beta.ts.net:11434
+  # max_spot_price_per_hour: 0.50
+
+runpod:
+  enabled: true
+  interruptible: true
+  on_demand_fallback: false
+  auto_scale: true
+  auto_scale_min_instances: 0
+  auto_scale_max_instances: 2
+  idle_scale_down_enabled: true
+  idle_timeout_seconds: 90
+  idle_grace_after_create_seconds: 300
+  min_lifetime_seconds: 0
+  destroy_on_shutdown: true
+  # Default image is ollama/ollama:latest (override to pin a digest or legacy PyTorch).
+  image: ollama/ollama:latest
+  # template_id: null
+  preferred_data_centers:
+    - EU-NL-1
+    - EU-FR-1
+    - EU-CZ-1
+    - EU-RO-1
+    - EU-SE-1
+  enroll_url: https://ollama-router.bicorn-beta.ts.net:11434
+  # Guest-reachable agent package when GitHub release assets 404:
+  # agent_package_url: https://example.invalid/ollama-node-agent_0.1.0_amd64.deb
+  # max_price_per_hour: 0.50

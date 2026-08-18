@@ -113,6 +113,33 @@ pub fn url_host_is_rfc1918(url: &str) -> bool {
     classify_url_host(url) == Some(HostClass::Private)
 }
 
+/// True when `url`'s host is link-local or IPv6 ULA (not reachable from cloud guests).
+pub fn url_host_is_link_local_or_ula(url: &str) -> bool {
+    matches!(
+        classify_url_host(url),
+        Some(HostClass::LinkLocal | HostClass::UniqueLocal)
+    )
+}
+
+/// True when `url` is absolute `http(s)` and its host is reachable from a cloud guest
+/// (not loopback, RFC1918, link-local, or ULA).
+pub fn url_is_guest_reachable(url: &str) -> bool {
+    let trimmed = url.trim();
+    if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
+        return false;
+    }
+    if url_host_is_loopback(trimmed) {
+        return false;
+    }
+    if url_host_is_rfc1918(trimmed) {
+        return false;
+    }
+    if url_host_is_link_local_or_ula(trimmed) {
+        return false;
+    }
+    true
+}
+
 /// True when `url`'s host is any IP address (v4 or v6).
 pub fn url_host_is_ip(url: &str) -> bool {
     url_host(url)

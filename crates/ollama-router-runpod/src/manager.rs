@@ -352,6 +352,10 @@ impl RunpodManager {
         self.persist_runpod_log(&node_id, "", pod, &choice.gpu_type_id, None)
             .await;
         let ready = self.wait_enrolled_and_healthy(&node_id).await;
+        if !ready.ok {
+            self.terminate_pod_on_enroll_failure(pod_id, &node_id, &ready.detail)
+                .await;
+        }
         self.persist_runpod_log(
             &node_id,
             ready.url.as_deref().unwrap_or(""),
@@ -443,6 +447,9 @@ impl RunpodManager {
                 pod.cost_per_hour().or(Some(choice.on_demand_price)),
             )
             .await;
+        } else {
+            self.terminate_pod_on_enroll_failure(pod_id, &node_id, &ready.detail)
+                .await;
         }
         json!({
             "status": "created",
@@ -492,6 +499,36 @@ impl RunpodManager {
                     url: None,
                     detail: "shutdown".into(),
                 };
+            }
+        }
+    }
+
+    async fn terminate_pod_on_enroll_failure(&self, pod_id: &str, node_id: &NodeId, detail: &str) {
+        tracing::warn!(
+            node_id = %node_id,
+            pod_id,
+            reason = detail,
+            "runpod_enroll_failed_terminate"
+        );
+        match self.inner.client.delete_pod(pod_id).await {
+            Ok(true) => {
+                tracing::info!(node_id = %node_id, pod_id, "runpod_enroll_failed_terminated");
+            }
+            Ok(false) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    pod_id,
+                    reason = "delete_not_found",
+                    "runpod_enroll_failed_terminate_miss"
+                );
+            }
+            Err(err) => {
+                tracing::warn!(
+                    node_id = %node_id,
+                    pod_id,
+                    error = %err,
+                    "runpod_enroll_failed_terminate_error"
+                );
             }
         }
     }

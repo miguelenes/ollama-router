@@ -188,13 +188,20 @@ runpod:
   cloud_type: SECURE
   interruptible: true
   on_demand_fallback: false
-  image: runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04
+  image: ollama/ollama:latest
+  template_id: null
   container_disk_gb: 40
   min_vram_gb: 8
   max_vram_gb: 80
   allowed_gpu_types: []
   denied_gpu_types: []
   allowed_data_centers: []
+  preferred_data_centers:
+    - EU-NL-1
+    - EU-FR-1
+    - EU-CZ-1
+    - EU-RO-1
+    - EU-SE-1
   max_price_per_hour: null
   auto_scale: true
   auto_scale_min_instances: 0

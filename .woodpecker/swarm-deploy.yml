@@ -37,6 +37,16 @@ steps:
         from_secret: FLEET_REGISTRY
       DEPLOY_REGISTRY:
         from_secret: DEPLOY_REGISTRY
+      VERDA_CLIENT_ID:
+        from_secret: VERDA_CLIENT_ID
+      VERDA_CLIENT_SECRET:
+        from_secret: VERDA_CLIENT_SECRET
+      RUNPOD_API_KEY:
+        from_secret: RUNPOD_API_KEY
+      ZROK_ENABLE_TOKEN:
+        from_secret: ZROK_ENABLE_TOKEN
+      OLLAMA_ROUTER_ZROK_API_ENDPOINT:
+        from_secret: OLLAMA_ROUTER_ZROK_API_ENDPOINT
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
     commands:

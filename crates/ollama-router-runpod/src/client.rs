@@ -152,11 +152,11 @@ impl RunpodClient {
 
     pub async fn list_catalog_gpus(&self) -> Result<Vec<CatalogGpu>, RunpodError> {
         let cloud = self.cloud_type.trim();
-        let path = if cloud.is_empty() {
-            "/catalog/gpus?include=AVAILABILITY".to_string()
-        } else {
-            format!("/catalog/gpus?include=AVAILABILITY&cloud={cloud}")
-        };
+        let mut path = String::from("/catalog/gpus?include=AVAILABILITY&product=POD");
+        if !cloud.is_empty() {
+            path.push_str("&cloud=");
+            path.push_str(cloud);
+        }
         let resp = self
             .request_v2(reqwest::Method::GET, &path, None, None)
             .await?;

@@ -1,0 +1,32 @@
+# SwarmNet fleet inventory — operator GitOps for the home LAN.
+#
+# Client URL: ollama-router on :11434 (Swarm ingress / manager host-publish).
+# Backend URL: each node's host-mode Ollama on :11435 (deploy/ollama stack).
+#
+# Use LAN IPs for nodes on 192.168.100.0/24 so the router task (Swarm overlay)
+# can reach backends without Tailscale MagicDNS in the container netns.
+# Omit nas (manager) — do not park large weights on the control plane.
+#
+# CI never writes this file; install via Docker config on stack deploy.
+version: 1
+nodes:
+  - id: desktop-pc
+    url: http://192.168.100.135:11435
+    capacity:
+      vram_gb: 0
+      gpus: 0
+  - id: nuc
+    url: http://192.168.100.160:11435
+    labels: [gpu]
+    capacity:
+      gpus: 1
+  - id: illuma
+    url: http://100.98.93.14:11435
+    capacity:
+      vram_gb: 0
+      gpus: 0
+  - id: illuma-sg
+    url: http://100.109.98.37:11435
+    capacity:
+      vram_gb: 0
+      gpus: 0

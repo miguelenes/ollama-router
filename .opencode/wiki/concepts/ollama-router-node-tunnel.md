@@ -131,20 +131,32 @@ Ubuntu 24 CUDA.
 
 ## RunPod
 
-Bootstrap is container **`dockerStartCmd`**, not SSH and not a Verda-style
-startup-script catalog. The manager renders the agent-bootstrap script
-(install node-agent package, zrok private enable, agent serve, enroll) and
-passes `dockerStartCmd: ["bash","-lc", <script>]` on a configurable stock
-CUDA-capable `image`. Container `env` carries secret values under configured
-`*_env` names only — memory-only, never logged or persisted. Create uses
-`ports: []` and `volumeInGb: 0` so the RunPod proxy/public IP is never ingress
-and terminated pods leave no billed volume.
+Bootstrap is container **`dockerEntrypoint` + `dockerStartCmd`**, not SSH and
+not a Verda-style startup-script catalog. Default image is
+**`ollama/ollama:latest`** (optional `runpod.template_id`). The manager overrides
+the image entrypoint to `/bin/bash` and passes `dockerStartCmd: ["-lc", <script>]`
+because the stock Ollama entrypoint would otherwise run `ollama bash -lc …`.
+The script starts `OLLAMA_HOST=127.0.0.1 ollama serve`, installs the
+node-agent package (guest-reachable `agent_package_url` when GitHub assets
+404), enables zrok private share, runs agent serve, and enrolls. Container `env`
+carries secret values under configured `*_env` names only — memory-only, never
+logged or persisted. Package download failure logs a reason code and
+`sleep infinity` (no tight restart loop). Create uses `ports: []` and
+`volumeInGb: 0` so the RunPod proxy/public IP is never ingress.
+
+When `runpod.enabled`, **`runpod.enroll_url`** and **`tunnel.api_endpoint`**
+must be guest-reachable absolute `http(s)` URLs at config load (not loopback,
+RFC1918, or scheme-less IPs). The enroll **URL** is the guest-reachable
+exception; the enrolled Ollama share stays loopback.
 
 After the pod is `RUNNING`, the manager polls FleetState for enroll of the
-managed RunPod row, then probes tunnel `GET /api/tags`. Public pod IP / RunPod
-proxy hostnames stay `public_url_blocked`. Teardown always **terminates**
-(`DELETE /pods/{id}`), never stop-only. Interrupted (non-RUNNING) managed pods
-are terminated on the reconcile tick and replaced only when below the floor.
+managed RunPod row, then probes tunnel `GET /api/tags`. Enroll timeout
+**terminates** the pod and keeps FleetState until destroy succeeds. Public pod
+IP / RunPod proxy hostnames stay `public_url_blocked`. Teardown always
+**terminates** (`DELETE /pods/{id}`), never stop-only. Interrupted (non-RUNNING)
+managed pods are terminated on the reconcile tick and replaced only when below
+the floor. `preferred_data_centers` (default EU ids) is a soft preference with
+stockout fallback; `allowed_data_centers` remains a hard filter.
 
 ## Related
 

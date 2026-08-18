@@ -138,6 +138,8 @@ fn manager_with_shutdown(
     config.runpod.poll_interval_seconds = 0.5;
     config.runpod.create_timeout_seconds = 5.0;
     config.runpod.router_id_env = "OLLAMA_ROUTER_ID".into();
+    config.runpod.enroll_url = Some("https://router.example:11435".into());
+    config.tunnel.api_endpoint = "https://zrok.example:18080".into();
     tweak(&mut config);
     let config = Arc::new(config);
     let registry = Arc::new(Registry::new(&config));
@@ -438,4 +440,55 @@ async fn create_additional_refuses_when_live_owned_at_max() {
     let out = mgr.create_additional().await.expect("create");
     assert_eq!(out["status"], "none");
     assert_eq!(post.calls(), 0);
+}
+
+#[tokio::test]
+async fn enroll_timeout_terminates_pod_and_retains_fleet_state() {
+    let server = MockServer::start();
+    stub_catalog(&server);
+    server.mock(|when, then| {
+        when.method(GET).path("/pods");
+        then.status(200).json_body(json!([]));
+    });
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/pods");
+        then.status(200).json_body(json!({
+            "id": "pod-never",
+            "name": owned_name("pod-never"),
+            "desiredStatus": "RUNNING",
+            "costPerHr": 0.30,
+            "machine": {"dataCenterId": "US-CA-2", "gpuTypeId": "NVIDIA L4"},
+        }));
+    });
+    server.mock(|when, then| {
+        when.method(GET).path("/pods/pod-never");
+        then.status(200).json_body(json!({
+            "id": "pod-never",
+            "name": owned_name("pod-never"),
+            "desiredStatus": "RUNNING",
+            "costPerHr": 0.30,
+        }));
+    });
+    let delete = server.mock(|when, then| {
+        when.method(DELETE).path("/pods/pod-never");
+        then.status(200).json_body(json!({"ok": true}));
+    });
+    let (mgr, _, fs) = manager_with(&server, |c| {
+        c.runpod.auto_scale = false;
+        c.runpod.interruptible = true;
+        c.runpod.on_demand_fallback = false;
+        c.runpod.create_timeout_seconds = 1.0;
+        c.runpod.poll_interval_seconds = 0.2;
+    });
+    let out = mgr.create_additional().await.expect("create");
+    assert_eq!(out["enroll"], "fail");
+    assert_eq!(out["detail"], "enroll_timeout");
+    assert_eq!(delete.calls(), 1, "enroll timeout must terminate pod");
+    assert!(
+        fs.list_runpod_nodes()
+            .unwrap()
+            .contains_key("runpod-pod-never"),
+        "FleetState ownership retained until destroy succeeds"
+    );
+    assert_eq!(post.calls(), 1);
 }

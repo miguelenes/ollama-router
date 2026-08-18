@@ -165,13 +165,12 @@ The CI agent daemon must trust `FLEET_REGISTRY_REPLICA` in
 1. **Create secrets** (never commit):
    ```bash
    printf '%s' "$ADMIN_TOKEN" | docker secret create ollama-router-admin-token -
-   # optional: VERDA_CLIENT_ID / VERDA_CLIENT_SECRET / RUNPOD_API_KEY / zrok
-   #   printf '%s' "$VERDA_CLIENT_ID"     | docker secret create verda-client-id -
-   #   printf '%s' "$VERDA_CLIENT_SECRET" | docker secret create verda-client-secret -
-   #   printf '%s' "$RUNPOD_API_KEY"      | docker secret create runpod-api-key -
    ```
-   The stack declares `ollama-router-admin-token` as `external: true`; add
-   others to the `secrets:` list and the service `secrets:` entry if needed.
+   Cloud credentials (`VERDA_*`, `RUNPOD_API_KEY`, `ZROK_ENABLE_TOKEN`,
+   `OLLAMA_ROUTER_ZROK_API_ENDPOINT`) are passed as **host env at deploy time**
+   (Woodpecker repo secrets → `docker stack deploy` interpolation). Optionally
+   extend the stack service `secrets:` list and entrypoint for Swarm-secret
+   mounts instead.
 
 2. **Place inventory** on the manager:
    ```bash
@@ -205,6 +204,40 @@ The CI agent daemon must trust `FLEET_REGISTRY_REPLICA` in
 6. **Enable the gates** (Woodpecker secrets): first
    `FLEET_REGISTRY_PUSH_ENABLED=true` (verify the image appears on `:5005`
    and the stack is unchanged), then `SWARM_DEPLOY_ENABLED=true`.
+
+## Live cloud autoscale test (paid)
+
+After guest-reachable **zrok** (`tunnel.api_endpoint`) and **enroll_url** are
+configured in the overlay and the stack is redeployed with cloud env vars:
+
+```bash
+export OLLAMA_ROUTER_ADMIN_TOKEN=…   # never commit
+export ROUTER_URL=http://127.0.0.1:11434
+# Must match overlay (guest-reachable http(s), not loopback):
+export GUEST_ENROLL_URL=https://your-router.example:11434
+export GUEST_ZROK_API_ENDPOINT=https://zrok.your-public-host
+# Required when GitHub agent release assets 404:
+export AGENT_PACKAGE_URL=https://your-host/ollama-node-agent_0.1.0_amd64.deb
+# RunPod-only when Verda creds are absent:
+# export VERDA_SKIP=true
+./deploy/swarm/cloud-autoscale-test.sh
+```
+
+Load stays `${ROUTER_URL}/api/generate` — never `*.proxy.runpod.net`.
+`DRAIN_NUC=true` (default) cordons the LAN GPU so MEDIUM misses reach RunPod;
+set `DRAIN_NUC=false` to keep nuc in rotation.
+
+RunPod defaults use **`ollama/ollama:latest`** with `dockerEntrypoint` override
+so bootstrap can start loopback Ollama and install the node-agent. Optional
+`runpod.template_id` and `preferred_data_centers` (EU ids with stockout fallback)
+live in [router.config.example.yaml](router.config.example.yaml).
+
+Local zrok compose is fetched by `task zrok:fetch` into `.local/zrok` (upstream
+URL may drift to `zrok2-instance` — update the Taskfile pointer rather than
+vendoring a new stack here).
+
+See [router.config.example.yaml](router.config.example.yaml) for test tunables
+(`idle_timeout_seconds: 90`, `auto_scale_max_instances: 2`, warm-keeper off).
 
 ## CI update flow (after bootstrap)
 

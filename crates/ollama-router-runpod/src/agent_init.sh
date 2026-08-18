@@ -1,4 +1,4 @@
-# ollama-router Verda first-boot installer. Secrets come from
+# ollama-router RunPod first-boot installer. Secrets come from
 # /run/ollama-router/bootstrap.env (written by the router at create).
 # Never xtrace. Never echo secrets. Do not install Tailscale.
 # Do not probe public :11434.
@@ -6,6 +6,11 @@
 set -euo pipefail
 set +o xtrace
 umask 077
+
+fail_package() {
+  echo "reason_code=agent_package_unavailable" >&2
+  exec sleep infinity
+}
 
 BOOTSTRAP=/run/ollama-router/bootstrap.env
 if [[ -f "${BOOTSTRAP}" ]]; then
@@ -68,15 +73,15 @@ install_from_file() {
       if [[ -x "${stage}/ollama-node-agent" ]]; then
         install -m 755 "${stage}/ollama-node-agent" /usr/local/bin/ollama-node-agent
       else
-        echo "agent tarball missing binary" >&2
+        echo "reason_code=agent_package_invalid" >&2
         rm -rf "${stage}"
-        return 1
+        fail_package
       fi
       rm -rf "${stage}"
       ;;
     *)
-      echo "unsupported agent package" >&2
-      return 1
+      echo "reason_code=agent_package_invalid" >&2
+      fail_package
       ;;
   esac
 }
@@ -100,14 +105,14 @@ download_install() {
     url="${AGENT_DEB_AMD64:-}"
   fi
   if [[ -z "${url}" ]]; then
-    echo "agent package url missing" >&2
-    return 1
+    echo "reason_code=agent_package_url_missing" >&2
+    fail_package
   fi
   if ! curl -fsSL -o "${tmp}" "${url}"; then
     rm -f "${tmp}"
     if [[ -n "${AGENT_PACKAGE_URL:-}" ]]; then
-      echo "agent package download failed" >&2
-      return 1
+      echo "reason_code=agent_package_download_failed" >&2
+      fail_package
     fi
     if [[ "${deb_arch}" == "arm64" ]]; then
       url="${AGENT_TAR_ARM64:-}"
@@ -117,8 +122,8 @@ download_install() {
     tmp=$(mktemp)
     if [[ -z "${url}" ]] || ! curl -fsSL -o "${tmp}" "${url}"; then
       rm -f "${tmp}"
-      echo "agent package download failed" >&2
-      return 1
+      echo "reason_code=agent_package_download_failed" >&2
+      fail_package
     fi
   fi
   if [[ "${url}" == *.deb ]]; then
@@ -135,8 +140,8 @@ download_install() {
 download_install
 
 if ! command -v ollama-node-agent >/dev/null 2>&1; then
-  echo "ollama-node-agent missing after install" >&2
-  exit 1
+  echo "reason_code=agent_package_missing_after_install" >&2
+  fail_package
 fi
 
 setup_args=(setup --config /etc/ollama-node-agent/config.yaml)

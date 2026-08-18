@@ -66,6 +66,10 @@
 #   interruptible: true
 #   on_demand_fallback: false
 #   cloud_type: SECURE
+#   # Default image is ollama/ollama:latest (override to pin a digest or PyTorch).
+#   # image: ollama/ollama:latest
+#   # template_id: null
+#   # preferred_data_centers: [EU-NL-1, EU-FR-1, EU-CZ-1, EU-RO-1, EU-SE-1]
 #   # Hard hourly cap (must be > 0 when set):
 #   # max_price_per_hour: 0.50
 #   min_vram_gb: 8
@@ -78,10 +82,13 @@
 #   enroll_url: http://router.example:11435
 #   zrok_enable_token_env: ZROK_ENABLE_TOKEN
 #   enroll_token_env: OLLAMA_ROUTER_ADMIN_TOKEN
+#   # Guest-reachable agent package (required until GitHub release assets exist):
+#   # agent_package_url: https://example.invalid/ollama-node-agent_0.1.0_amd64.deb
 
 # Self-hosted zrok controller the router `access private` frontends talk to.
+# When runpod.enabled, api_endpoint must be guest-reachable http(s) (not loopback).
 # Enable token stays in the env named below — never a YAML literal.
 # tunnel:
-#   api_endpoint: http://127.0.0.1:18080
+#   api_endpoint: http://zrok.example:18080
 #   enable_token_env: ZROK_ENABLE_TOKEN
 #   access_bind: "127.0.0.1"

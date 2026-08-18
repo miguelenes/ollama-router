@@ -1,6 +1,6 @@
 ---
 name: runpod-pod-fleet
-description: Implements RunPod interruptible GPU pod fleet management — bearer REST (v1 pods + v2 GPU catalog), best $/VRAM selection with hourly cap, dockerStartCmd bootstrap (never SSH) plus self-hosted zrok private share, and terminate-permanently teardown. Use when working under crates/ollama-router-runpod or multi-provider demand.
+description: Implements RunPod interruptible GPU pod fleet management — bearer REST (v1 pods + v2 GPU catalog), best $/VRAM selection with hourly cap, dockerEntrypoint + dockerStartCmd bootstrap (never SSH) plus self-hosted zrok private share, and terminate-permanently teardown. Use when working under crates/ollama-router-runpod or multi-provider demand.
 ---
 
 # RunPod pod fleet
@@ -22,6 +22,9 @@ Bearer API key from env named by `runpod.api_key_env` (default `RUNPOD_API_KEY`)
 - Never log `RUNPOD_API_KEY` or container env secret values.
 - Honor 429 with `Retry-After` / `RateLimit` backoff.
 
+When `runpod.enabled`, config load requires guest-reachable `runpod.enroll_url`
+and `tunnel.api_endpoint` (absolute `http(s)`, not loopback/RFC1918/link-local).
+
 ## Selector (pure, unit-tested)
 
 `GET /v2/catalog/gpus?include=AVAILABILITY` (v2 catalog). Filter available +
@@ -30,25 +33,32 @@ VRAM band + allow/deny GPU types + data centers + optional `max_price_per_hour`
 `gpuTypeIds`. Unknown VRAM loses a value comparison. DTOs: serde **ignore
 extra fields**.
 
+When `allowed_data_centers` is non-empty it is a **hard** filter. Otherwise
+`preferred_data_centers` (default EU ids) is tried first; stockout falls back to
+eligible offers outside that list.
+
 ## Provision URL
 
 1. Create pod via v1 `POST /pods` with `interruptible` from config (default
    true). On-demand fallback only when `on_demand_fallback` is explicitly
    enabled — never silent.
-2. Bootstrap is **`dockerStartCmd: ["bash","-lc", <script>]`** on a stock
-   CUDA-capable `image` (not a Verda startup-script catalog, not SSH). The
-   script installs the matching agent package, enables a zrok **private**
-   share, runs agent serve, and enrolls. Secrets arrive only via container
-   `env` under configured `*_env` names — never in the script string, never
-   logged.
+2. Default image is **`ollama/ollama:latest`** (optional `template_id` →
+   `templateId`). Bootstrap sets **`dockerEntrypoint: ["/bin/bash"]`** and
+   **`dockerStartCmd: ["-lc", <script>]`** so the official Ollama entrypoint
+   does not swallow the installer. The script starts
+   `OLLAMA_HOST=127.0.0.1 ollama serve`, installs the agent package, enables a
+   zrok **private** share, runs agent serve, and enrolls. Secrets arrive only
+   via container `env` under configured `*_env` names — never in the script
+   string, never logged. Agent package 404 → reason code + `sleep infinity`
+   (no crash-loop).
 3. Create with `ports: []`, `volumeInGb: 0`, tunable `containerDiskInGb`.
    Nothing is exposed on the RunPod proxy/public IP.
 4. After create, verify actual `costPerHr` against `max_price_per_hour`; over
    cap → terminate immediately (stockout). Persist actual cost in FleetState.
 5. After `RUNNING`, wait/reconcile polls FleetState enroll for the managed
-   row, then `GET {tunnel}/api/tags`. Timeout uses allowlisted `enroll_timeout`
-   and **keeps** FleetState ownership. Do not persist provider error text in
-   SQLite.
+   row, then `GET {tunnel}/api/tags`. Timeout uses allowlisted `enroll_timeout`,
+   **terminates** the pod, and **keeps** FleetState ownership until destroy
+   succeeds. Do not persist provider error text in SQLite.
 6. Register the Ollama URL only after enroll of the zrok **private** share
    and `/api/tags` through the tunnel. Inside the pod, Ollama and the
    node-agent bind **loopback**.
@@ -81,4 +91,4 @@ block the client; capacity miss stays **503 + Retry-After**.
 httpmock only. **No live RunPod.** Selector unit tests + proptest that the
 cap/band filter dominates ranking. Manager suite: coalesced create, ceiling
 refusal, foreign pod untouched, interruption below/above floor, failed destroy
-retains row, no-secret logging on create failure.
+retains row, enroll timeout terminates pod, no-secret logging on create failure.

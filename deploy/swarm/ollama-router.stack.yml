@@ -23,37 +23,59 @@ services:
     image: ${DEPLOY_REGISTRY:-127.0.0.1:5005}/ollama-router:${ROUTER_TAG:-latest}
     ports:
       - "11434:11434" # Ollama-compatible listen (override with OLLAMA_ROUTER_HOST/PORT env)
+    # Swarm secrets -> env (never commit values; create with docker secret create).
+    command:
+      - /bin/sh
+      - -c
+      - |
+        if [ -f /run/secrets/ollama-router-admin-token ]; then
+          export OLLAMA_ROUTER_ADMIN_TOKEN="$$(cat /run/secrets/ollama-router-admin-token)"
+        fi
+        if [ -f /run/secrets/verda-client-id ]; then
+          export VERDA_CLIENT_ID="$$(cat /run/secrets/verda-client-id)"
+        fi
+        if [ -f /run/secrets/verda-client-secret ]; then
+          export VERDA_CLIENT_SECRET="$$(cat /run/secrets/verda-client-secret)"
+        fi
+        if [ -f /run/secrets/runpod-api-key ]; then
+          export RUNPOD_API_KEY="$$(cat /run/secrets/runpod-api-key)"
+        fi
+        if [ -f /run/secrets/zrok-enable-token ]; then
+          export ZROK_ENABLE_TOKEN="$$(cat /run/secrets/zrok-enable-token)"
+        fi
+        exec ollama-router serve
     environment:
-      # Admin API is fail-closed: unset token -> /router/v1/* returns 403.
-      OLLAMA_ROUTER_ADMIN_TOKEN: ${OLLAMA_ROUTER_ADMIN_TOKEN:-}
       OLLAMA_ROUTER_FLEET: /etc/ollama-router/fleet.yaml
-      # Optional cloud providers (host env / Swarm secrets; never commit):
-      # VERDA_CLIENT_ID, VERDA_CLIENT_SECRET, VERDA_API_ENDPOINT
-      # RUNPOD_API_KEY, RUNPOD_API_ENDPOINT
-      # ZROK_API_ENDPOINT, ZROK_ENABLE_TOKEN_ENV
+      OLLAMA_ROUTER_CONFIG: /etc/ollama-router/config.yaml
+      # Cloud + zrok credentials: set at `docker stack deploy` from the host env
+      # (Woodpecker repo secrets) or mount optional Swarm secrets by extending
+      # this service's `secrets:` list locally — never commit values.
+      VERDA_CLIENT_ID: ${VERDA_CLIENT_ID:-}
+      VERDA_CLIENT_SECRET: ${VERDA_CLIENT_SECRET:-}
+      RUNPOD_API_KEY: ${RUNPOD_API_KEY:-}
+      ZROK_ENABLE_TOKEN: ${ZROK_ENABLE_TOKEN:-}
+      OLLAMA_ROUTER_ZROK_API_ENDPOINT: ${OLLAMA_ROUTER_ZROK_API_ENDPOINT:-}
+      OLLAMA_ROUTER_ID: ${OLLAMA_ROUTER_ID:-}
     volumes:
-      # Inventory is GitOps / operator-owned: mounted read-only, CI never
-      # writes fleet.yaml.
-      - /etc/ollama-router/fleet.yaml:/etc/ollama-router/fleet.yaml:ro
       # Durable FleetState + model-operations SQLite live under /var/lib/ollama-router.
       - ollama-router-state:/var/lib/ollama-router
     configs:
+      # GitOps inventory (deploy/fleet.swarm.yaml); CI never writes fleet.yaml.
+      - source: ollama-router-fleet
+        target: /etc/ollama-router/fleet.yaml
+        mode: 0444
       # Optional tunables overlay (defaults in router.defaults.yaml apply when absent).
       - source: ollama-router-config
         target: /etc/ollama-router/config.yaml
         mode: 0440
     secrets:
-      # Placeholder names only. Create with `docker secret create` and enable
-      # with `--secret` on the service, or pass env from the host. Example:
-      #   printf '%s' "$ADMIN_TOKEN" | docker secret create ollama-router-admin-token -
-      #   docker service update --secret-add ollama-router-admin-token ollama-router_router
       - ollama-router-admin-token
     deploy:
       replicas: 1
-      # Bind-mounted fleet.yaml lives on the manager; keep the router there.
+      # Host Tailscale + LAN reachability to :11435 backends (not NAS overlay).
       placement:
         constraints:
-          - node.role == manager
+          - node.hostname == desktop-pc
       restart_policy:
         condition: any
         delay: 5s
@@ -68,6 +90,8 @@ volumes:
   ollama-router-state:
 
 configs:
+  ollama-router-fleet:
+    file: ../fleet.swarm.yaml
   ollama-router-config:
     file: router.config.example.yaml
     # Do not commit live tunables here; ship a placeholder template instead
@@ -76,6 +100,7 @@ configs:
 
 secrets:
   ollama-router-admin-token:
-    # Placeholder; replaced by the operator's `docker secret create` at
-    # bootstrap. Never commit a live token.
+    # Required for admin API. Create: printf '%s' "$ADMIN_TOKEN" | docker secret create ollama-router-admin-token -
     external: true
+  # Optional (extend service `secrets:` + entrypoint when preferring Swarm secrets):
+  # verda-client-id, verda-client-secret, runpod-api-key, zrok-enable-token
