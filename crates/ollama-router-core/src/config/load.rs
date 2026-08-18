@@ -469,6 +469,41 @@ ready_requires_embedding_model: true
     }
 
     #[test]
+    fn cloud_enabled_false_disables_both_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(
+            &overlay,
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\nverda:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("RUNPOD_API_KEY".into(), "test-key".into());
+        env.insert("VERDA_CLIENT_ID".into(), "id".into());
+        env.insert("VERDA_CLIENT_SECRET".into(), "secret".into());
+        env.insert("OLLAMA_ROUTER_CLOUD_ENABLED".into(), "false".into());
+        let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert!(!config.runpod.enabled);
+        assert!(!config.verda.enabled);
+    }
+
+    #[test]
+    fn runpod_enabled_env_knob_disables_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        let overlay = dir.path().join("overlay.yaml");
+        fs::write(
+            &overlay,
+            "runpod:\n  enabled: true\n  enroll_url: https://router.example:11435\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",
+        )
+        .unwrap();
+        let mut env = env_with_state(&dir);
+        env.insert("RUNPOD_API_KEY".into(), "test-key".into());
+        env.insert("RUNPOD_ENABLED".into(), "false".into());
+        let config = load_config_from(Some(&overlay), &env).unwrap();
+        assert!(!config.runpod.enabled);
+    }
+
+    #[test]
     fn runpod_loopback_enroll_url_rejected_when_enabled() {
         let err = parse_yaml(
             "runpod:\n  enabled: true\n  enroll_url: http://127.0.0.1:11437\ntunnel:\n  api_endpoint: https://zrok.example:18080\n",

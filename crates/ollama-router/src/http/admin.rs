@@ -3,6 +3,8 @@
 //! Bearer token comes from `OLLAMA_ROUTER_ADMIN_TOKEN` (captured on
 //! [`AppState`] construction). Unset → 403. No Thunder routes.
 
+use std::sync::atomic::Ordering;
+
 use axum::extract::{Path, Query, State};
 use axum::http::{header::AUTHORIZATION, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -1195,6 +1197,83 @@ pub async fn runpod_destroy(State(state): State<AppState>, headers: HeaderMap) -
             StatusCode::OK
         },
         body,
+    )
+}
+
+pub async fn cloud_status(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    Json(json!({
+        "halted": state.cloud_halted.load(Ordering::Relaxed),
+        "verda_enabled": state.config.verda.enabled,
+        "runpod_enabled": state.config.runpod.enabled,
+        "verda_present": state.verda.is_some(),
+        "runpod_present": state.runpod.is_some(),
+    }))
+    .into_response()
+}
+
+pub async fn cloud_halt(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    state.cloud_halted.store(true, Ordering::Relaxed);
+    if let Some(mgr) = state.verda.as_ref() {
+        mgr.set_halted(true);
+        mgr.abort_demand().await;
+    }
+    if let Some(mgr) = state.runpod.as_ref() {
+        mgr.set_halted(true);
+        mgr.abort_demand().await;
+    }
+    tracing::warn!(reason = "cloud_halted", "cloud_provider_kill_switch");
+    let verda = match state.verda.as_ref() {
+        Some(mgr) => mgr.destroy_all_owned().await,
+        None => json!({"status": "skipped", "reason": "not_enabled"}),
+    };
+    let runpod = match state.runpod.as_ref() {
+        Some(mgr) => mgr.destroy_all_owned().await,
+        None => json!({"status": "skipped", "reason": "not_enabled"}),
+    };
+    let failed = [&verda, &runpod].iter().any(|body| {
+        body.get("failed")
+            .and_then(|v| v.as_array())
+            .is_some_and(|a| !a.is_empty())
+    });
+    json_status(
+        if failed {
+            StatusCode::MULTI_STATUS
+        } else {
+            StatusCode::OK
+        },
+        json!({
+            "halted": true,
+            "verda": verda,
+            "runpod": runpod,
+        }),
+    )
+}
+
+pub async fn cloud_resume(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Some(resp) = require_admin(&state, &headers) {
+        return resp;
+    }
+    state.cloud_halted.store(false, Ordering::Relaxed);
+    if let Some(mgr) = state.verda.as_ref() {
+        mgr.set_halted(false);
+    }
+    if let Some(mgr) = state.runpod.as_ref() {
+        mgr.set_halted(false);
+    }
+    tracing::info!(reason = "cloud_resumed", "cloud_provider_kill_switch");
+    json_status(
+        StatusCode::OK,
+        json!({
+            "halted": false,
+            "verda_enabled": state.config.verda.enabled,
+            "runpod_enabled": state.config.runpod.enabled,
+        }),
     )
 }
 

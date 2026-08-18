@@ -305,6 +305,79 @@ async fn runpod_routes_503_when_disabled() {
 }
 
 #[tokio::test]
+async fn cloud_kill_switch_halts_and_resumes_without_providers() {
+    let state = state_with_token(RouterConfig::default(), Some("secret"));
+    let (status, body) = send(
+        state.clone(),
+        get_req("/router/v1/cloud/status", Some("secret")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["halted"], json!(false));
+    assert_eq!(parsed["verda_present"], json!(false));
+    assert_eq!(parsed["runpod_present"], json!(false));
+
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/cloud/halt",
+            json!({}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["halted"], json!(true));
+    assert_eq!(parsed["verda"]["reason"], json!("not_enabled"));
+    assert_eq!(parsed["runpod"]["reason"], json!("not_enabled"));
+    assert!(state
+        .cloud_halted
+        .load(std::sync::atomic::Ordering::Relaxed));
+
+    let (status, body) = send(
+        state.clone(),
+        json_req(
+            Method::POST,
+            "/router/v1/cloud/resume",
+            json!({}),
+            Some("secret"),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let parsed: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(parsed["halted"], json!(false));
+    assert!(!state
+        .cloud_halted
+        .load(std::sync::atomic::Ordering::Relaxed));
+}
+
+#[tokio::test]
+async fn cloud_kill_switch_forbidden_without_token() {
+    let state = state_with_token(RouterConfig::default(), None);
+    for path in [
+        "/router/v1/cloud/status",
+        "/router/v1/cloud/halt",
+        "/router/v1/cloud/resume",
+    ] {
+        let method = if path.ends_with("status") {
+            Method::GET
+        } else {
+            Method::POST
+        };
+        let (status, _) = send(
+            state.clone(),
+            json_req(method, path, json!({}), Some("secret")),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path}");
+    }
+}
+
+#[tokio::test]
 async fn verda_routes_forbidden_without_token() {
     let state = state_with_token(RouterConfig::default(), None);
     let (status, _) = send(

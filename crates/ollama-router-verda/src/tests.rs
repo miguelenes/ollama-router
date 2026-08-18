@@ -840,6 +840,30 @@ async fn demand_scale_up_respects_max_instances() {
 }
 
 #[tokio::test]
+async fn halt_blocks_ensure_create_and_demand() {
+    let server = MockServer::start();
+    token_ok(&server, 3600);
+    stub_catalog(&server);
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/v1/instances");
+        then.status(200).json_body(json!({"id": "should-not"}));
+    });
+    let (mgr, _, _) = manager(&server, true);
+    mgr.set_halted(true);
+    assert!(mgr.is_halted());
+    assert!(!ollama_router_core::cloud::CloudProviderHandle::below_ceiling(&mgr));
+    let created = mgr.create_additional().await.expect("create");
+    assert_eq!(created["status"], "none");
+    let ensured = mgr.ensure(true).await.expect("ensure");
+    assert_eq!(ensured["status"], "none");
+    mgr.request_scale_up(RoutingError::Saturated);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(post.calls(), 0);
+    mgr.set_halted(false);
+    assert!(ollama_router_core::cloud::CloudProviderHandle::below_ceiling(&mgr));
+}
+
+#[tokio::test]
 async fn demand_scale_up_skips_when_auto_scale_false() {
     let server = MockServer::start();
     token_ok(&server, 3600);

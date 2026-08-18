@@ -56,6 +56,10 @@ services:
       ZROK_ENABLE_TOKEN: ${ZROK_ENABLE_TOKEN:-}
       OLLAMA_ROUTER_ZROK_API_ENDPOINT: ${OLLAMA_ROUTER_ZROK_API_ENDPOINT:-}
       OLLAMA_ROUTER_ID: ${OLLAMA_ROUTER_ID:-}
+      # Kill switch: false disables both providers at process start (YAML cannot override).
+      OLLAMA_ROUTER_CLOUD_ENABLED: ${OLLAMA_ROUTER_CLOUD_ENABLED:-}
+      VERDA_ENABLED: ${VERDA_ENABLED:-}
+      RUNPOD_ENABLED: ${RUNPOD_ENABLED:-}
     volumes:
       # Durable FleetState + model-operations SQLite live under /var/lib/ollama-router.
       - ollama-router-state:/var/lib/ollama-router

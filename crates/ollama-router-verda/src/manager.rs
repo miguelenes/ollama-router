@@ -1,7 +1,7 @@
 //! Verda spot fleet manager: create, adopt, destroy, reconcile, idle scale-down.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -72,6 +72,7 @@ struct Inner {
     recovery: std::sync::Mutex<Option<Recovery>>,
     orphan_first_seen: std::sync::Mutex<HashMap<String, Instant>>,
     cached_offer: std::sync::Mutex<Option<CachedOffer>>,
+    cloud_halted: AtomicBool,
 }
 
 impl VerdaManager {
@@ -115,8 +116,21 @@ impl VerdaManager {
                 recovery: std::sync::Mutex::new(None),
                 orphan_first_seen: std::sync::Mutex::new(HashMap::new()),
                 cached_offer: std::sync::Mutex::new(None),
+                cloud_halted: AtomicBool::new(false),
             }),
         })
+    }
+
+    pub fn set_halted(&self, halted: bool) {
+        self.inner.cloud_halted.store(halted, Ordering::Relaxed);
+    }
+
+    pub fn is_halted(&self) -> bool {
+        self.inner.cloud_halted.load(Ordering::Relaxed)
+    }
+
+    fn creates_blocked(&self) -> bool {
+        self.shutdown_cancelled() || self.is_halted()
     }
 
     fn lock_cached_offer(&self) -> std::sync::MutexGuard<'_, Option<CachedOffer>> {
@@ -350,13 +364,13 @@ impl VerdaManager {
     }
 
     pub async fn ensure(&self, create: bool) -> Result<Value, VerdaError> {
-        if self.shutdown_cancelled() {
-            tracing::info!("verda_ensure_skipped_shutdown");
+        if self.creates_blocked() {
+            tracing::info!(halted = self.is_halted(), "verda_ensure_skipped");
             return Ok(json!({"status": "none"}));
         }
         let _lock = self.inner.ensure_lock.lock().await;
-        if self.shutdown_cancelled() {
-            tracing::info!("verda_ensure_skipped_shutdown");
+        if self.creates_blocked() {
+            tracing::info!(halted = self.is_halted(), "verda_ensure_skipped");
             return Ok(json!({"status": "none"}));
         }
         self.ensure_locked(create)
@@ -394,13 +408,13 @@ impl VerdaManager {
     }
 
     pub async fn create_additional(&self) -> Result<Value, VerdaError> {
-        if self.shutdown_cancelled() {
-            tracing::info!("verda_create_skipped_shutdown");
+        if self.creates_blocked() {
+            tracing::info!(halted = self.is_halted(), "verda_create_skipped");
             return Ok(json!({"status": "none"}));
         }
         let _lock = self.inner.ensure_lock.lock().await;
-        if self.shutdown_cancelled() {
-            tracing::info!("verda_create_skipped_shutdown");
+        if self.creates_blocked() {
+            tracing::info!(halted = self.is_halted(), "verda_create_skipped");
             return Ok(json!({"status": "none"}));
         }
         self.create_additional_locked()
@@ -1447,6 +1461,9 @@ impl CloudProviderHandle for VerdaManager {
     }
 
     fn below_ceiling(&self) -> bool {
+        if self.is_halted() {
+            return false;
+        }
         let max_n = self.inner.config.verda.auto_scale_max_instances;
         if max_n == 0 {
             return true;
@@ -1465,8 +1482,12 @@ impl CloudProviderHandle for VerdaManager {
 impl DemandScale for VerdaManager {
     fn request_scale_up(&self, reason: RoutingError) {
         let reason_code = reason.as_reason_code();
-        if self.shutdown_cancelled() {
-            tracing::info!(reason = reason_code, "verda_demand_scale_up_skipped");
+        if self.creates_blocked() {
+            tracing::info!(
+                reason = reason_code,
+                halted = self.is_halted(),
+                "verda_demand_scale_up_skipped"
+            );
             return;
         }
         if !self.inner.config.verda.auto_scale {

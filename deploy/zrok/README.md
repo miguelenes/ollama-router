@@ -4,9 +4,11 @@ Cloud and remote Ollama hosts reach the router through a **private zrok share**,
 not Tailscale and not `zrok.io` public shares. The control plane runs **next to
 the router**. `fleet.yaml` LAN URLs stay **direct HTTP**.
 
-This repo does not vendor the full OpenZiti stack. Use the official
-[zrok-instance Docker Compose](https://docs.zrok.io/docs/0.4/guides/self-hosting/docker/)
-(zrok CLI: `enable`, `reserve private`, `share reserved`, `access private`).
+This repo does not vendor the full OpenZiti stack. `task zrok:fetch` sparse-clones
+**zrok v1.1.11** `docker/compose/zrok-instance` (CLI: `enable`, `reserve private`,
+`share reserved`, `access private`). Do not use `https://get.openziti.io/zrok-instance/fetch.bash`
+(404) or fetch.bash from `main` (that is **zrok2**, incompatible with this
+product). Remove `.local/zrok` and re-fetch if a zrok2 compose landed there.
 
 Prometheus in `deploy/compose.yaml` scrapes the **router** only. Do not scrape
 node-agent `:11436`.
@@ -21,7 +23,12 @@ task zrok:ps
 
 `task zrok:up` copies [`deploy/zrok.env.example`](../zrok.env.example) to
 `.local/zrok/.env` and fills empty passwords with local random values. That
-file is gitignored. Controller API: **http://127.0.0.1:18080**.
+file is gitignored. Controller API on the host: **http://127.0.0.1:18080**.
+Cloud guests need a public URL (Tailscale Funnel **8443** → `:18080`, e.g.
+`https://desktop.bicorn-beta.ts.net:8443`). OpenZiti **3022** must stay
+direct TLS (Funnel TCP **10000**) — do not HTTP-proxy the data plane. Set
+advertised ziti addresses **before** the first `zrok:up`; changing them later
+does not rewrite PKI.
 
 Create an enable token from the controller (command names follow upstream):
 
@@ -44,7 +51,7 @@ task zrok:cli
 # equivalent:
 docker run --rm --network host \
   -e ZROK_API_ENDPOINT=http://127.0.0.1:18080 \
-  docker.io/openziti/zrok:latest version
+  docker.io/openziti/zrok:1.1.11 version
 ```
 
 Point the router overlay at the instance (`deny_unknown_fields` tunables YAML):
@@ -71,7 +78,10 @@ zrok. Stop with `task zrok:down`.
    router host. Use TLS in production (Caddy overlay in upstream docs).
 2. Wildcard DNS is required for **public** shares. This product uses **private**
    shares only; still run a controller/frontend the `zrok` CLI can reach.
-3. Set `tunnel.api_endpoint` to that controller (`https://zrok.example`).
+3. Set `tunnel.api_endpoint` to a **guest-reachable** controller (Funnel
+   `https://desktop.bicorn-beta.ts.net:8443`, not `127.0.0.1` and not MagicDNS
+   without Funnel). Private shares do not need wildcard DNS; the ziti
+   controller/router advertised addresses still must be reachable from RunPod.
 4. `tunnel.access_bind` stays loopback (`127.0.0.1`). Enroll hydrates
    `http://127.0.0.1:<port>` into FleetState.
 5. Give the router process `ZROK_ENABLE_TOKEN` (or the env named in

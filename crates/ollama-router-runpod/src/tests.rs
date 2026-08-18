@@ -242,6 +242,29 @@ async fn demand_scale_up_respects_max_instances() {
 }
 
 #[tokio::test]
+async fn halt_blocks_ensure_create_and_demand() {
+    let server = MockServer::start();
+    stub_catalog(&server);
+    let post = server.mock(|when, then| {
+        when.method(POST).path("/pods");
+        then.status(200).json_body(json!({"id": "should-not"}));
+    });
+    let (mgr, _, _) = manager(&server, true);
+    mgr.set_halted(true);
+    assert!(mgr.is_halted());
+    assert!(!ollama_router_core::cloud::CloudProviderHandle::below_ceiling(&mgr));
+    let created = mgr.create_additional().await.expect("create");
+    assert_eq!(created["status"], "none");
+    let ensured = mgr.ensure(true).await.expect("ensure");
+    assert_eq!(ensured["status"], "none");
+    mgr.request_scale_up(RoutingError::NoHealthy);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(post.calls(), 0);
+    mgr.set_halted(false);
+    assert!(ollama_router_core::cloud::CloudProviderHandle::below_ceiling(&mgr));
+}
+
+#[tokio::test]
 async fn foreign_pod_is_untouched() {
     let server = MockServer::start();
     stub_catalog(&server);

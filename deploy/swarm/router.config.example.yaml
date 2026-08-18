@@ -1,11 +1,17 @@
 # Tunables overlay for the Swarm stack (OLLAMA_ROUTER_CONFIG).
-# Commit only placeholders — replace YOUR_PUBLIC_HOST before live cloud test.
+# This file is the live stack config (`ollama-router-config`). Keep cloud
+# providers **false** until guest curls for enroll + zrok + agent package succeed.
 # Never commit tokens, enable keys, or fleet inventory (`nodes:` is forbidden).
 #
 # Cloud credentials: Swarm secrets -> env (see ollama-router.stack.yml).
-# enroll_url and tunnel.api_endpoint must be reachable from Verda/RunPod guests
-# (not 127.0.0.1, LAN, or Tailscale-only). Load tests use ROUTER_URL only —
-# never aim generate at *.proxy.runpod.net.
+# Kill switch: OLLAMA_ROUTER_CLOUD_ENABLED=false at stack deploy, or
+# POST /router/v1/cloud/halt (admin bearer) to terminate owned cloud GPUs.
+#
+# Guest enroll uses Tailscale Funnel HTTPS 443 path `/router` (Woodpecker keeps
+# `/`). Funnel strips `--set-path=/router`, so the public enroll URL has an extra
+# `/router` prefix. MagicDNS `ollama-router.bicorn-beta.ts.net:11434` is
+# tailnet-only — RunPod guests cannot use it.
+# Load tests use ROUTER_URL only — never aim generate at *.proxy.runpod.net.
 
 job_store_path: /var/lib/ollama-router/model-operations.sqlite3
 
@@ -15,13 +21,14 @@ policy:
   saturation_wait_seconds: 0
 
 tunnel:
-  # Guest-reachable controller (not loopback). Replace if your zrok lives elsewhere.
-  api_endpoint: https://zrok.YOUR_PUBLIC_HOST
+  # Funnel HTTPS 8443 → zrok controller :18080 (not loopback, not MagicDNS-only).
+  # OpenZiti :3022 still needs a direct TLS path (Funnel TCP 10000); do not HTTP-proxy it.
+  api_endpoint: https://desktop.bicorn-beta.ts.net:8443
   enable_token_env: ZROK_ENABLE_TOKEN
   access_bind: "127.0.0.1"
 
 verda:
-  enabled: true
+  enabled: false
   auto_scale: true
   auto_scale_min_instances: 0
   auto_scale_max_instances: 2
@@ -31,11 +38,11 @@ verda:
   min_lifetime_seconds: 0
   ensure_on_startup: false
   destroy_on_shutdown: true
-  enroll_url: https://ollama-router.bicorn-beta.ts.net:11434
+  enroll_url: https://desktop.bicorn-beta.ts.net/router/router/v1/nodes/enroll
   # max_spot_price_per_hour: 0.50
 
 runpod:
-  enabled: true
+  enabled: false
   interruptible: true
   on_demand_fallback: false
   auto_scale: true
@@ -55,7 +62,7 @@ runpod:
     - EU-CZ-1
     - EU-RO-1
     - EU-SE-1
-  enroll_url: https://ollama-router.bicorn-beta.ts.net:11434
-  # Guest-reachable agent package when GitHub release assets 404:
-  # agent_package_url: https://example.invalid/ollama-node-agent_0.1.0_amd64.deb
+  enroll_url: https://desktop.bicorn-beta.ts.net/router/router/v1/nodes/enroll
+  # Guest-reachable agent .deb (GitHub v0.1.0 assets 404). After `task agent:release:deb`:
+  # agent_package_url: https://desktop.bicorn-beta.ts.net/agent/ollama-node-agent_0.1.0_amd64.deb
   # max_price_per_hour: 0.50

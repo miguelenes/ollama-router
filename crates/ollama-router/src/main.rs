@@ -284,10 +284,10 @@ fn wire_cloud_providers(state: &mut AppState, shutdown: CancellationToken) -> an
     }
 
     if handles.is_empty() {
-        // AppState defaults to NoopDemandScale; leave it.
+        // AppState defaults to gated no-op demand; leave it.
         return Ok(());
     }
-    state.demand = Arc::new(MultiProviderDemand::new(handles));
+    state.set_cloud_demand(Arc::new(MultiProviderDemand::new(handles)));
     Ok(())
 }
 

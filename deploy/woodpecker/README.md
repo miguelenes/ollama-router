@@ -44,8 +44,9 @@ unblocks CI regardless of GitHub account billing state.
    ```
    Funnel must be enabled on the tailnet once (`tailscale funnel` prints a
    `login.tailscale.com/f/funnel` URL if it is not). `--bg` resumes after
-   reboot; `task woodpecker:up` re-applies it on deploy. Do not publish
-   `:8000` on the LAN and do not use a trycloudflare URL.
+   reboot; `task woodpecker:up` re-applies **`--set-path=/`** so it does not
+   reset `/router` (guest enroll) or `/agent`. Do not `funnel reset`. Do not
+   publish `:8000` on the LAN and do not use a trycloudflare URL.
 
 4. **Activate the repository** (admin rights required): open
    `http://127.0.0.1:8000/` (compose binds loopback only; OAuth stays here),

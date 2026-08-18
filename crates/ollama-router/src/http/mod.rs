@@ -1,6 +1,6 @@
 //! Axum app: `/healthz`, `/readyz`, `/metrics`, aggregated tags and `/v1/models`, OpenAI inference, proxy fallback.
 
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,7 +13,7 @@ use ollama_router_core::cloud::{DemandScale, NoopDemandScale};
 use ollama_router_core::config::RouterConfig;
 use ollama_router_core::fleet::{FleetState, Registry};
 use ollama_router_core::jobs::PullOrchestrator;
-use ollama_router_core::routing::{looks_like_embedding, DEFAULT_EMBED_MARKERS};
+use ollama_router_core::routing::{looks_like_embedding, RoutingError, DEFAULT_EMBED_MARKERS};
 use ollama_router_runpod::RunpodManager;
 use ollama_router_verda::VerdaManager;
 use rust_embed::RustEmbed;
@@ -53,6 +53,8 @@ pub struct AppState {
     pub runpod: Option<RunpodManager>,
     pub metrics: Arc<Metrics>,
     pub tunnels: TunnelFrontends,
+    /// Runtime kill switch: skip cloud create until resume or process restart.
+    pub cloud_halted: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -84,12 +86,16 @@ impl AppState {
             .filter(|s| !s.is_empty());
         let fleet_state = Arc::new(FleetState::new(&config.state_path));
         let tunnels = TunnelFrontends::from_config(&config.tunnel);
+        let cloud_halted = Arc::new(AtomicBool::new(false));
         Ok(Self {
             config,
             registry,
             client,
             orchestrator,
-            demand: Arc::new(NoopDemandScale),
+            demand: Arc::new(GatedDemand {
+                inner: Arc::new(NoopDemandScale),
+                halted: cloud_halted.clone(),
+            }),
             pool,
             tie_break: Arc::new(AtomicU64::new(0)),
             admin_token,
@@ -98,7 +104,41 @@ impl AppState {
             runpod: None,
             metrics,
             tunnels,
+            cloud_halted,
         })
+    }
+
+    /// Replace demand scale-up, keeping the runtime cloud halt gate.
+    pub fn set_cloud_demand(&mut self, inner: Arc<dyn DemandScale>) {
+        self.demand = GatedDemand::wrap(inner, self.cloud_halted.clone());
+    }
+}
+
+/// Demand fan-out that no-ops while [`AppState::cloud_halted`] is set.
+pub(crate) struct GatedDemand {
+    inner: Arc<dyn DemandScale>,
+    halted: Arc<AtomicBool>,
+}
+
+impl GatedDemand {
+    pub(crate) fn wrap(
+        inner: Arc<dyn DemandScale>,
+        halted: Arc<AtomicBool>,
+    ) -> Arc<dyn DemandScale> {
+        Arc::new(Self { inner, halted })
+    }
+}
+
+impl DemandScale for GatedDemand {
+    fn request_scale_up(&self, reason: RoutingError) {
+        if self.halted.load(Ordering::Relaxed) {
+            tracing::info!(
+                reason = reason.as_reason_code(),
+                "cloud_halted_scale_up_skipped"
+            );
+            return;
+        }
+        self.inner.request_scale_up(reason);
     }
 }
 
@@ -272,6 +312,9 @@ pub const ADMIN_OPERATION_IDS: &[&str] = &[
     "verdaDestroy",
     "verdaEnsure",
     "verdaStatus",
+    "cloudHalt",
+    "cloudResume",
+    "cloudStatus",
 ];
 
 pub(crate) fn json_status(status: StatusCode, body: serde_json::Value) -> Response {
@@ -332,6 +375,9 @@ pub fn make_app(state: AppState) -> Router {
         .route("/router/v1/runpod/status", get(admin::runpod_status))
         .route("/router/v1/runpod/ensure", post(admin::runpod_ensure))
         .route("/router/v1/runpod/destroy", post(admin::runpod_destroy))
+        .route("/router/v1/cloud/status", get(admin::cloud_status))
+        .route("/router/v1/cloud/halt", post(admin::cloud_halt))
+        .route("/router/v1/cloud/resume", post(admin::cloud_resume))
         // Wrong method on a registered path must reach the proxy so envelopes
         // stay Ollama/OpenAI-shaped (Axum's default 405 would skip `.fallback`).
         .method_not_allowed_fallback(proxy_route)
@@ -361,5 +407,46 @@ impl<B> MakeSpan<B> for RequestIdMakeSpan {
             uri = %request.uri(),
             request_id = %request_id,
         )
+    }
+}
+
+#[cfg(test)]
+mod gated_demand_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    struct CountingDemand {
+        n: AtomicUsize,
+    }
+
+    impl DemandScale for CountingDemand {
+        fn request_scale_up(&self, _reason: RoutingError) {
+            self.n.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn halted_skips_inner_scale_up() {
+        let inner = Arc::new(CountingDemand {
+            n: AtomicUsize::new(0),
+        });
+        let halted = Arc::new(AtomicBool::new(true));
+        let gated = GatedDemand {
+            inner: inner.clone(),
+            halted,
+        };
+        gated.request_scale_up(RoutingError::NoHealthy);
+        assert_eq!(inner.n.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn resume_forwards_inner_scale_up() {
+        let inner = Arc::new(CountingDemand {
+            n: AtomicUsize::new(0),
+        });
+        let halted = Arc::new(AtomicBool::new(false));
+        let gated = GatedDemand::wrap(inner.clone(), halted);
+        gated.request_scale_up(RoutingError::Saturated);
+        assert_eq!(inner.n.load(Ordering::Relaxed), 1);
     }
 }

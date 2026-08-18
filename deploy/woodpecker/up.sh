@@ -71,7 +71,8 @@ fi
 
 "${COMPOSE[@]}" up -d
 
-if ! funnel_out=$(tailscale funnel --bg --yes 8000 2>&1); then
+# --set-path=/ updates only Woodpecker. Do not omit it (that can reset /router).
+if ! funnel_out=$(tailscale funnel --bg --yes --set-path=/ 8000 2>&1); then
   printf '%s\n' "${funnel_out}" >&2
   echo "Tailscale Funnel failed. Enable it on the tailnet (login.tailscale.com/f/funnel) and retry. Do not use Cloudflare or trycloudflare." >&2
   exit 1

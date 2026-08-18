@@ -396,6 +396,55 @@ paths:
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+  /router/v1/cloud/status:
+    get:
+      tags: [cloud]
+      summary: Cloud kill-switch status
+      description: >
+        Reports whether the runtime halt flag is set and whether Verda/RunPod
+        managers are wired. Does not create or destroy instances.
+      operationId: cloudStatus
+      responses:
+        "200":
+          description: Kill-switch and provider presence.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/cloud/halt:
+    post:
+      tags: [cloud]
+      summary: Halt cloud providers
+      description: >
+        Stops further Verda/RunPod creates and terminates owned cloud
+        instances. fleet.yaml hosts are never destroyed. Resume with
+        `POST /router/v1/cloud/resume`. Process-start disable:
+        `OLLAMA_ROUTER_CLOUD_ENABLED=false`.
+      operationId: cloudHalt
+      responses:
+        "200":
+          description: Halt applied; destroy started or skipped.
+        "207":
+          description: Halt applied; at least one destroy failed (ownership retained).
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+  /router/v1/cloud/resume:
+    post:
+      tags: [cloud]
+      summary: Resume cloud providers
+      description: >
+        Clears the runtime halt so demand scale-up may create again. Does not
+        enable YAML-disabled providers and does not create instances.
+      operationId: cloudResume
+      responses:
+        "200":
+          description: Halt cleared.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
 components:
   securitySchemes:

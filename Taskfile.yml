@@ -262,15 +262,27 @@ tasks:
       - docker compose -f deploy/woodpecker/compose.yaml --env-file deploy/woodpecker/.env ps
 
   zrok:fetch:
-    desc: Download official zrok-instance compose into .local/zrok (no tokens; not vendored)
+    desc: Fetch zrok v1.1.11 instance compose into .local/zrok (not zrok2; no tokens)
     cmds:
       - cmd: |
           mkdir -p .local/zrok
           if [[ -f .local/zrok/compose.yml || -f .local/zrok/compose.yaml ]]; then
+            if grep -qE 'zrok2' .local/zrok/compose.yml .local/zrok/compose.yaml 2>/dev/null; then
+              echo "refusing zrok2 compose in .local/zrok — remove it and re-run (this product uses zrok CLI v1)" >&2
+              exit 1
+            fi
             echo "already fetched: .local/zrok" >&2
             exit 0
           fi
-          curl -sSfL https://get.openziti.io/zrok-instance/fetch.bash | bash -s "$PWD/.local/zrok"
+          # get.openziti.io/zrok-instance/fetch.bash 404s; main fetch.bash pulls zrok2-instance.
+          # Pin the last zrok v1 compose (CLI enable / share reserved / access private).
+          REF="${ZROK_INSTANCE_REF:-v1.1.11}"
+          tmp=$(mktemp -d)
+          git clone --depth 1 --branch "${REF}" --filter=blob:none --sparse \
+            https://github.com/openziti/zrok.git "${tmp}"
+          git -C "${tmp}" sparse-checkout set docker/compose/zrok-instance
+          cp -a "${tmp}/docker/compose/zrok-instance/." .local/zrok/
+          rm -rf "${tmp}"
           if [[ -f .local/zrok/compose.yaml && ! -f .local/zrok/compose.yml ]]; then
             ln -sfn compose.yaml .local/zrok/compose.yml
           fi
@@ -326,5 +338,5 @@ tasks:
       - cmd: |
           docker run --rm --network host \
             -e ZROK_API_ENDPOINT="${ZROK_API_ENDPOINT:-http://127.0.0.1:18080}" \
-            docker.io/openziti/zrok:latest version
+            docker.io/openziti/zrok:1.1.11 version
         sh: [bash, -euo, pipefail, -c]

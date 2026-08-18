@@ -207,17 +207,43 @@ The CI agent daemon must trust `FLEET_REGISTRY_REPLICA` in
 
 ## Live cloud autoscale test (paid)
 
-After guest-reachable **zrok** (`tunnel.api_endpoint`) and **enroll_url** are
-configured in the overlay and the stack is redeployed with cloud env vars:
+Do **not** set `runpod.enabled: true` until enroll, zrok API, ziti data plane,
+and the agent package all succeed from a network that is not the tailnet.
+MagicDNS `https://ollama-router.bicorn-beta.ts.net:11434` is tailnet-only and
+will mint a pod that never enrolls.
+
+Guest HTTP uses Tailscale Funnel on `https://desktop.bicorn-beta.ts.net`
+(Woodpecker keeps `/`; router enroll is `/router`; optional agent packages
+are `/agent`). Funnel **strips** `--set-path=/router`, so overlay `enroll_url`
+is `https://desktop.bicorn-beta.ts.net/router/router/v1/nodes/enroll`.
+Re-apply without wiping CI:
+
+```bash
+bash deploy/swarm/funnel-guest.sh
+```
+
+`desktop-pc` Funnel needs `attr: funnel` (`tag:ops` on this node, or
+`nodeAttrs` for `tag:compute`). Do not Funnel `/api` or `:11434` as a whole
+HTTPS origin — those routes are unauthenticated.
+
+zrok is **zrok CLI v1** (`task zrok:fetch` pins `v1.1.11`). Do not use
+`get.openziti.io/zrok-instance` (404) or main-branch fetch (zrok2). Funnel
+HTTPS **8443** can front the controller API (`:18080`). OpenZiti **3022** must
+be direct TLS (Funnel TCP **10000**), never an HTTP proxy. Set advertised
+ziti addresses **before** the first `task zrok:up` (PKI).
+
+After those guest curls succeed, set `runpod.enabled: true` in the overlay
+and redeploy (still one replica). Until then keep YAML `enabled: false` even
+if `RUNPOD_API_KEY` is in the task env.
 
 ```bash
 export OLLAMA_ROUTER_ADMIN_TOKEN=…   # never commit
 export ROUTER_URL=http://127.0.0.1:11434
-# Must match overlay (guest-reachable http(s), not loopback):
-export GUEST_ENROLL_URL=https://your-router.example:11434
-export GUEST_ZROK_API_ENDPOINT=https://zrok.your-public-host
+# Must match overlay (Funnel enroll, not MagicDNS :11434):
+export GUEST_ENROLL_URL=https://desktop.bicorn-beta.ts.net/router/router/v1/nodes/enroll
+export GUEST_ZROK_API_ENDPOINT=https://desktop.bicorn-beta.ts.net:8443
 # Required when GitHub agent release assets 404:
-export AGENT_PACKAGE_URL=https://your-host/ollama-node-agent_0.1.0_amd64.deb
+export AGENT_PACKAGE_URL=https://desktop.bicorn-beta.ts.net/agent/ollama-node-agent_0.1.0_amd64.deb
 # RunPod-only when Verda creds are absent:
 # export VERDA_SKIP=true
 ./deploy/swarm/cloud-autoscale-test.sh
@@ -232,12 +258,30 @@ so bootstrap can start loopback Ollama and install the node-agent. Optional
 `runpod.template_id` and `preferred_data_centers` (EU ids with stockout fallback)
 live in [router.config.example.yaml](router.config.example.yaml).
 
-Local zrok compose is fetched by `task zrok:fetch` into `.local/zrok` (upstream
-URL may drift to `zrok2-instance` — update the Taskfile pointer rather than
-vendoring a new stack here).
-
 See [router.config.example.yaml](router.config.example.yaml) for test tunables
 (`idle_timeout_seconds: 90`, `auto_scale_max_instances: 2`, warm-keeper off).
+
+## Cloud kill switch
+
+Providers stay off until both YAML (`verda.enabled` / `runpod.enabled`) and env
+allow them. Empty stack env (`OLLAMA_ROUTER_CLOUD_ENABLED`, `VERDA_ENABLED`,
+`RUNPOD_ENABLED`) leaves the overlay in charge.
+
+```bash
+# Process-start (survives restart): disable both providers, then redeploy.
+OLLAMA_ROUTER_CLOUD_ENABLED=false docker stack deploy --prune \
+  -c deploy/swarm/ollama-router.stack.yml ollama-router
+
+# Runtime (needs image with /router/v1/cloud/*): halt + terminate owned GPUs.
+curl -fsS -X POST -H "Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN" \
+  http://127.0.0.1:11434/router/v1/cloud/halt
+# Resume creates (does not spawn a GPU by itself):
+curl -fsS -X POST -H "Authorization: Bearer $OLLAMA_ROUTER_ADMIN_TOKEN" \
+  http://127.0.0.1:11434/router/v1/cloud/resume
+```
+
+`fleet.yaml` hosts are never destroyed. Halt does not enable YAML-disabled
+providers.
 
 ## CI update flow (after bootstrap)
 

@@ -265,6 +265,16 @@ const KNOBS: &[Knob] = &[
         kind: KnobKind::Int,
     },
     Knob {
+        env: "RUNPOD_ENABLED",
+        path: &["runpod", "enabled"],
+        kind: KnobKind::Bool,
+    },
+    Knob {
+        env: "RUNPOD_AUTO_SCALE",
+        path: &["runpod", "auto_scale"],
+        kind: KnobKind::Bool,
+    },
+    Knob {
         env: "OLLAMA_ROUTER_ZROK_BIN",
         path: &["tunnel", "zrok_bin"],
         kind: KnobKind::Str,
@@ -303,6 +313,18 @@ pub(crate) fn apply_env_knobs(raw: &mut Value, env: &impl EnvSource) -> Result<(
         }
         let value = parse_knob(knob.env, stripped, knob.kind)?;
         set_path(raw, knob.path, value);
+    }
+    // Master kill switch: off forces both providers disabled. On does not
+    // enable them — YAML / VERDA_ENABLED / RUNPOD_ENABLED still control that.
+    if let Some(raw_val) = env.var("OLLAMA_ROUTER_CLOUD_ENABLED") {
+        let stripped = raw_val.trim();
+        if !stripped.is_empty() {
+            let value = parse_knob("OLLAMA_ROUTER_CLOUD_ENABLED", stripped, KnobKind::Bool)?;
+            if value == Value::Bool(false) {
+                set_path(raw, &["verda", "enabled"], Value::Bool(false));
+                set_path(raw, &["runpod", "enabled"], Value::Bool(false));
+            }
+        }
     }
     Ok(())
 }

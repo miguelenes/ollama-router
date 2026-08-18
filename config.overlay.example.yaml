@@ -8,6 +8,8 @@
 # Cloud providers: Verda spots and optional RunPod interruptible pods.
 # Thunder sections are rejected as unknown fields. Secrets stay in env
 # (VERDA_CLIENT_ID / VERDA_CLIENT_SECRET, RUNPOD_API_KEY) — never YAML.
+# Kill switch: OLLAMA_ROUTER_CLOUD_ENABLED=false (or VERDA_ENABLED / RUNPOD_ENABLED)
+# disables providers at process start. Runtime: POST /router/v1/cloud/halt.
 #
 # Hourly caps (hard filters on create): Verda `max_spot_price_per_hour`,
 # RunPod `max_price_per_hour`. Over-cap offers are never provisioned.
